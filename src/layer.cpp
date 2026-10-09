@@ -183,6 +183,9 @@ void InitProcess() {
              g_cfg.head.rollLock ? 1 : 0, g_cfg.head.fovScale, g_cfg.head.edgeGuard ? 1 : 0);
     else
         LOGI("head smoothing: off (head_smoothing = 0)");
+    LOGI("symmetric_fov %d: %s", g_cfg.head.symmetricFov ? 1 : 0,
+         g_cfg.head.symmetricFov ? "both eyes re-projected to one common symmetric view (standard 3D SBS)"
+                                 : "raw eye images (asymmetric per-eye fov)");
     if (g_autoRecordSec > 0) LOGI("XR_EYE_CAPTURE_AUTORECORD=%.1f s: recording starts at the first frame", g_autoRecordSec);
     const std::wstring reqTray = EnvW(L"XR_EYE_CAPTURE_REQUIRE_TRAY");
     if (!reqTray.empty()) {
@@ -290,6 +293,9 @@ void StartRecording(SessionData* sd, const EyeView& L, const EyeView& R) {
     rs.audio = g_cfg.audioEnabled;
     rs.audioDevice = g_cfg.audioDevice;
     rs.head = g_cfg.head;
+    rs.startFovValid = L.hasPose && R.hasPose;
+    for (int i = 0; i < 4; ++i) { rs.startFov[0][i] = L.fov[i]; rs.startFov[1][i] = R.fov[i]; }
+    rs.startEyeW[0] = L.w; rs.startEyeH[0] = L.h; rs.startEyeW[1] = R.w; rs.startEyeH[1] = R.h;
     const UINT W = L.w + R.w, H = L.h > R.h ? L.h : R.h;
     LOGI("record: start %s | %s | %ux%u SBS (eyes %ux%u + %ux%u) | %u fps from %s (display refresh %.1f, measured %.2f) | %s",
          elog::Narrow(rs.path).c_str(), GfxApiName(sd->api), W, H, L.w, L.h, R.w, R.h, fps, fpsFrom, refresh,

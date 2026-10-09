@@ -7,7 +7,8 @@
 //                       roll  2 deg * sin(2 pi 4.7 t + 2.0)
 //   deliberate turn:    yaw  += 30 deg, cosine ease from t = 4.0 s to t = 5.0 s (turning LEFT: +yaw about +Y)
 //   orientation q = Ry(yaw) * Rx(pitch) * Rz(roll)      (OpenXR: right-handed, -Z forward, +Y up)
-// Per-eye fov (asymmetric like a real headset, radians): left {-0.87, 0.75, 0.80, -0.85}, right mirrored.
+// Per-eye fov (asymmetric like a real headset; outer angle larger than the inner one): left L -50 R +40 deg,
+// right L -40 R +50 deg, up / down +-45 deg (radians below). Common symmetric part: +-40 x +-45 deg.
 // Eyes share the head orientation; positions are +-32 mm along the head's +X.
 #pragma once
 #include <cmath>
@@ -17,8 +18,8 @@ namespace test_motion {
 const double kPi = 3.14159265358979323846;
 const double kDeg = kPi / 180.0;
 const double kTurnStart = 4.0, kTurnEnd = 5.0, kTurnDeg = 30.0, kJitterDeg = 2.0;
-const float kFovLeft[4] = {-0.87f, 0.75f, 0.80f, -0.85f};
-const float kFovRight[4] = {-0.75f, 0.87f, 0.80f, -0.85f};
+const float kFovLeft[4] = {(float)(-50 * kDeg), (float)(40 * kDeg), (float)(45 * kDeg), (float)(-45 * kDeg)};
+const float kFovRight[4] = {(float)(-40 * kDeg), (float)(50 * kDeg), (float)(45 * kDeg), (float)(-45 * kDeg)};
 
 struct Quat { double x, y, z, w; };
 

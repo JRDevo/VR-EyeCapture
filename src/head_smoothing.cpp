@@ -120,6 +120,32 @@ void Identity(SmoothEyeOut& e) {
 
 } // namespace
 
+SymmetricFov ComputeSymmetricFov(const float fovL[4], const float fovR[4], uint32_t wL, uint32_t hL, uint32_t wR, uint32_t hR) {
+    SymmetricFov r;
+    const float* f[2] = {fovL, fovR};
+    const uint32_t w[2] = {wL, wR}, h[2] = {hL, hR};
+    double tanH = 1e9, tanV = 1e9, dH = 0, dV = 0;
+    for (int e = 0; e < 2; ++e) {
+        for (int i = 0; i < 4; ++i)
+            if (!std::isfinite(f[e][i]) || std::fabs(f[e][i]) >= 1.553f) return r;
+        if (!(f[e][0] < f[e][1]) || !(f[e][3] < f[e][2]) || !w[e] || !h[e]) return r;
+        const double l = std::tan((double)f[e][0]), rr = std::tan((double)f[e][1]);
+        const double u = std::tan((double)f[e][2]), d = std::tan((double)f[e][3]);
+        tanH = std::min(tanH, std::min(std::fabs(l), std::fabs(rr)));
+        tanV = std::min(tanV, std::min(std::fabs(u), std::fabs(d)));
+        dH = std::max(dH, w[e] / (rr - l));
+        dV = std::max(dV, h[e] / (u - d));
+    }
+    // A view that does not contain its own centre line (both angles on one side) has no symmetric part.
+    if (!(tanH > 1e-3) || !(tanV > 1e-3)) return r;
+    r.tanH = tanH;
+    r.tanV = tanV;
+    r.eyeW = 2u * (uint32_t)std::lround(tanH * dH);   // round_even(2 tanH dH)
+    r.eyeH = 2u * (uint32_t)std::lround(tanV * dV);
+    r.valid = r.eyeW >= 32 && r.eyeH >= 32;
+    return r;
+}
+
 double HeadSmoothingTimeConstant(float s) {
     if (s <= 0) return 0;
     return 0.05 * std::pow(30.0, ((double)s - 0.1) / 0.9);
@@ -145,7 +171,10 @@ void HeadSmoother::Update(int64_t ns, const SmoothEyeIn in[2], SmoothFrame& out)
 
     // filter
     const double dt = have_ ? (double)(ns - lastNs_) * 1e-9 : 0.0;
-    if (!have_ || dt > 0.5) {
+    if (!s_.Enabled()) {
+        S_ = H;                       // no filter: output = actual head (symmetric_fov only)
+        have_ = true;
+    } else if (!have_ || dt > 0.5) {
         S_ = H;
         catch_ = 0;
         have_ = true;
@@ -165,8 +194,9 @@ void HeadSmoother::Update(int64_t ns, const SmoothEyeIn in[2], SmoothFrame& out)
 
     Q O = s_.rollLock ? RemoveRoll(S_) : S_;
 
-    // per eye: C_e = q_e^-1 * O * H^-1 * q_e
-    const double k = std::min(1.0, std::max(0.1, (double)s_.fovScale));
+    // per eye: C_e = q_e^-1 * O * H^-1 * q_e  (symmetric output: parallel cameras, C_e = q_e^-1 * O)
+    const double k = s_.Enabled() ? std::min(1.0, std::max(0.1, (double)s_.fovScale)) : 1.0;
+    const bool sym = symH_ > 0 && symV_ > 0;
     const Q Hinv = Conj(H);
     auto build = [&](const Q& o, double cm[2][9]) {
         bool all = true;
@@ -174,10 +204,15 @@ void HeadSmoother::Update(int64_t ns, const SmoothEyeIn in[2], SmoothFrame& out)
             SmoothEyeOut& eo = out.eye[e];
             if (!in[e].valid) { Identity(eo); continue; }
             const Q qe = e == 0 ? qL : qR;
-            ToMatrix(Mul(Mul(Conj(qe), o), Mul(Hinv, qe)), cm[e]);
+            ToMatrix(sym ? Mul(Conj(qe), o) : Mul(Mul(Conj(qe), o), Mul(Hinv, qe)), cm[e]);
             eo.srcTan[0] = (float)in[e].tanL; eo.srcTan[1] = (float)in[e].tanR;
             eo.srcTan[2] = (float)in[e].tanU; eo.srcTan[3] = (float)in[e].tanD;
-            for (int i = 0; i < 4; ++i) eo.outTan[i] = (float)(k * eo.srcTan[i]);
+            if (sym) {
+                eo.outTan[0] = (float)(-k * symH_); eo.outTan[1] = (float)(k * symH_);
+                eo.outTan[2] = (float)(k * symV_);  eo.outTan[3] = (float)(-k * symV_);
+            } else {
+                for (int i = 0; i < 4; ++i) eo.outTan[i] = (float)(k * eo.srcTan[i]);
+            }
             eo.covered = Covered(cm[e], eo.outTan, eo.srcTan);
             all = all && eo.covered;
         }
@@ -185,7 +220,7 @@ void HeadSmoother::Update(int64_t ns, const SmoothEyeIn in[2], SmoothFrame& out)
     };
     double cm[2][9];
     bool all = build(O, cm);
-    if (!all && s_.edgeGuard) {
+    if (!all && s_.edgeGuard && s_.Enabled()) {
         // smallest b with slerp(O, H, b) covered (b = 1 is the actual head: always covered since k <= 1)
         double lo = 0, hi = 1;
         for (int it = 0; it < 14; ++it) {

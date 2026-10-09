@@ -90,6 +90,7 @@ starts its OpenXR instance.
 | `gamma` | `auto` | `auto` from the swapchain format; `srgb` / `linear` only if colours look washed out or too dark. |
 | `audio_enabled` | `1` | Record the sound (what plays on the playback device). |
 | `audio_device` | *(empty)* = default playback device | Part of the device name, e.g. `Virtual Desktop Audio`. |
+| `symmetric_fov` | `1` | Re-project both eyes to one common symmetric view (standard 3D SBS). See "Why the eyes are re-projected to a symmetric view". `0` = raw eye images. |
 | `head_smoothing` | `0` | Head-motion smoothing strength, `0` = off. See "Head-motion smoothing". |
 | `head_follow_deg` | `12` | Smoothing: how far (degrees) the view may lag a deliberate turn before it catches up. |
 | `roll_lock` | `0` | Smoothing: `1` = keep the horizon level. |
@@ -122,8 +123,25 @@ work is done on the encoder's own GPU device, after the frame is copied).
 
 Only rotation is smoothed; small position shakes are not visible at normal viewing distances and cannot be
 re-projected without depth. If a game submits its views in a head-locked space, there is nothing to smooth (the log
-line `head smoothing summary` then shows a correction of 0). The summary line per recording shows the mean / max
+line `re-projection summary` then shows a correction of 0). The summary line per recording shows the mean / max
 correction, how often the edge guard limited it, frames with black edges, and the GPU cost.
+
+### Why the eyes are re-projected to a symmetric view
+
+A headset renders each eye with an asymmetric field of view: the outer side is wider than the inner side (for example
+-50 / +40 degrees for the left eye and -40 / +50 for the right). The headset's compositor knows that and shows each
+image at the right place. A 3D side-by-side player (YouTube VR, a 3D TV) does not: it puts both halves on the same
+rectangle, so a far-away object appears at different positions in the two eyes, as if it were closer than infinity or
+"beyond" it. The eyes try to fuse that and cannot -- eye strain, double images. Standard 3D video needs two parallel
+cameras with identical symmetric fields of view.
+
+With `symmetric_fov = 1` (the default) the recorder therefore re-projects both eyes (on the encoder's GPU device, the
+same pass as head smoothing) to the part of the view both eyes share, symmetric and identical for both (in the example
++-40 degrees horizontally), facing the same direction. Eye positions are kept, so the 3D depth is unchanged. The video
+is a little narrower than the raw eye images (it keeps the game's pixel density, e.g. 5058 instead of 6120 pixels per
+eye for a -50 / +40 view) and costs one GPU pass per frame. `symmetric_fov = 0` records the raw eye images as before.
+The log shows the numbers at the start of each recording, e.g.
+`symmetric fov: source L[-50.0,+40.0]x[-45.0,+45.0] R[-40.0,+50.0]x[-45.0,+45.0] -> output ±40.0° x ±45.0° per eye, 5058x6496 per eye`.
 
 ## Log and troubleshooting
 
@@ -145,7 +163,8 @@ Per frame the game's render thread does two GPU copies (plus an MSAA resolve whe
 a fence signal and nothing else — measured 0.07 ms (D3D12) / 0.18 ms (D3D11) of CPU time per frame on an RTX 5090.
 Encoding runs on its own threads and its own D3D11 device on the same GPU. Extra VRAM while recording: about
 3 x the side-by-side frame in RGBA plus 4 x in NV12 (≈ 400 MB at 6144 x 3264). Nothing is done while not recording.
-Head-motion smoothing adds one more RGBA frame of VRAM and one full-screen pass on the encoder's device: measured
+Head-motion smoothing and `symmetric_fov` (on by default) add one more RGBA frame of VRAM and one full-screen pass on
+the encoder's device: measured
 0.2 ms GPU per frame at 12240 x 6496 (ATS on VDXR, encoded at 8192 x 4346) on an RTX 5090, and nothing on the game's
 thread or GPU queue.
 

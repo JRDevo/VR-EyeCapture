@@ -223,6 +223,8 @@ KeyResult ApplyKey(Config& c, const std::wstring& key, std::wstring val) {
         if (ParseFloat(val, fl) && fl >= 0.5f && fl <= 1.0f) c.head.fovScale = fl; else ok = false;
     } else if (key == L"edge_guard") {
         if (ParseBool(val, b)) c.head.edgeGuard = b; else ok = false;
+    } else if (key == L"symmetric_fov") {
+        if (ParseBool(val, b)) c.head.symmetricFov = b; else ok = false;
     } else if (key == L"log_level") {
         const std::wstring l = Lower(val);
         if (l == L"error") c.logLevel = LogLevel::Error;

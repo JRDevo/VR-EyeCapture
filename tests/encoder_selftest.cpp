@@ -6,10 +6,11 @@
 //   encoder_selftest [--api d3d11|d3d12] [--layout two|array|wide|msaa] [--eye 1920x1080] [--seconds 5] [--fps 90]
 //                    [--format srgb|unorm] [--codec hevc|h264] [--out file.mp4] [--no-audio] [--no-tone]
 //                    [--max-width N] [--max-fps N]
-//                    [--head-smoothing S] [--fov-scale K] [--follow-deg D] [--roll-lock] [--no-edge-guard]
+//                    [--head-smoothing S] [--fov-scale K] [--follow-deg D] [--roll-lock] [--no-edge-guard] [--no-symmetric]
 // Head smoothing: every view is submitted with an identity pose and a +-0.8 rad fov, so with --fov-scale 1 the
 // re-projection is an exact identity mapping and verify_mp4.ps1's pixel checks (grey steps, eye id) still apply:
-// that proves the stage keeps the colour path (sRGB data and the linear pre-pass) unchanged.
+// that proves the stage keeps the colour path (sRGB data and the linear pre-pass) unchanged. symmetric_fov is on by
+// default (as in config.ini); with a symmetric source fov it is the same identity mapping. --no-symmetric = raw path.
 // Exit code 0 = file written with >= 90 % of the frames.
 #include <windows.h>
 #include <d3d11_4.h>
@@ -92,6 +93,7 @@ int main(int argc, char** argv) {
         else if (k == "--follow-deg") a.head.followDeg = (float)atof(next().c_str());
         else if (k == "--roll-lock") a.head.rollLock = true;
         else if (k == "--no-edge-guard") a.head.edgeGuard = false;
+        else if (k == "--no-symmetric") a.head.symmetricFov = false;
         else { printf("unknown argument %s\n", k.c_str()); return 2; }
     }
     const bool d3d12 = a.api == "d3d12";
@@ -237,6 +239,11 @@ int main(int argc, char** argv) {
     rs.maxWidth = a.maxWidth;
     rs.maxFps = a.maxFps;
     rs.head = a.head;
+    rs.startFovValid = true;
+    for (int e = 0; e < 2; ++e) {
+        for (int i = 0; i < 4; ++i) rs.startFov[e][i] = eyes[e].fov[i];
+        rs.startEyeW[e] = eyes[e].w; rs.startEyeH[e] = eyes[e].h;
+    }
     Recorder rec;
     rec.Start(src.get(), rs, 2 * w, h, w, stage, srgbData);
     {

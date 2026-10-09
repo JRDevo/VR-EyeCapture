@@ -79,10 +79,27 @@ those get a compute pre-pass that sRGB-encodes. Measured: the NVIDIA video proce
 passes values through without the curve (grey 128 stayed 128 instead of 188), hence the explicit pass.
 `config.ini gamma = srgb | linear` overrides the decision. Output is tagged BT.709 primaries / transfer / matrix, limited range.
 
-### Head-motion smoothing
+### Re-projection stage: symmetric fov and head-motion smoothing
 
-Off (`head_smoothing = 0`) the stage does not exist: no resources, no pass, the video processor reads the ring (or the
-linear pre-pass output) exactly as before. On:
+One pass on the encoder device does both. It exists when `symmetric_fov = 1` (default; needs a usable view fov at
+record start) or `head_smoothing > 0`. With both off there are no resources and no pass: the video processor reads the
+ring (or the linear pre-pass output) exactly as before.
+
+**Symmetric fov.** Headset views are asymmetric (outer angle larger). A flat SBS player maps both halves onto the same
+rectangle, so a direction (a point at infinity) lands at different x in the two halves -> parallax at infinity, the
+eyes do not fuse. Fix: both eyes get the same symmetric frustum and the same orientation (parallel cameras).
+`ComputeSymmetricFov` (at `Recorder::Start`, from the views' fov / size at that frame, fixed for the recording):
+`tanH = min over both eyes of min(|tan angleLeft|, |tan angleRight|)`, `tanV` likewise; per-eye output size
+`round_even(2 tanH densityH) x round_even(2 tanV densityV)` with `density = max over eyes of size / (tanR - tanL)`
+(source pixel density). The SBS output is `2 eyeW x eyeH`; the video processor scales it as before (8192 HEVC limit).
+Output tans `(-tanH, tanH, tanV, -tanV)`, times `output_fov_scale` only while smoothing (without smoothing the
+intersection is always covered). Output orientation for both eyes = `O` (= `H` without smoothing), i.e.
+`C_e = q_e^-1 * O` instead of the canted-eye-preserving `q_e^-1 * O * H^-1 * q_e`. Eye positions are untouched (the
+stereo baseline). Logged at record start (`recorder: symmetric fov: source L[..] R[..] -> output ±..° x ±..° per eye,
+WxH per eye`). Tested: `run_jitter.ps1` raw vs rawasym (far marker same x in both halves within 1 px vs ~250 px apart),
+`head_smoothing_test` (intersection, sizes, rounding).
+
+**Head-motion smoothing** (`head_smoothing > 0`):
 
 - **Input.** The layer copies each `XrCompositionLayerProjectionView`'s `pose` and `fov` into `EyeView` (pose in the
   projection layer's space; same space for both views). `SubmitFrame` also gets `XrFrameEndInfo::displayTime`. The
@@ -116,7 +133,7 @@ linear pre-pass output) exactly as before. On:
 - **Cost.** One extra W x H texture (+318 MB at 12240 x 6496) and the pass: 0.20 ms avg / 0.74 ms max GPU at
   12240 x 6496 on an RTX 5090 (D3D11 timestamp queries, logged), 0.01 ms worker CPU. The game thread's `SubmitFrame`
   is unchanged apart from copying 2 x 8 floats.
-- **Stats** in `head smoothing summary`: mean / max correction (angle O vs H), frames where the edge guard limited it,
+- **Stats** in `re-projection summary (head smoothing on|off, symmetric fov on|off)`: mean / max correction (angle O vs H), frames where the edge guard limited it,
   frames with uncovered output (black), frames with follow / catch-up active, frames without a usable pose (identity
   pass-through), filter resets, GPU / CPU cost.
 - **Translation** is ignored on purpose (needs depth). Head-locked projection spaces (VIEW) give identity poses:
@@ -171,8 +188,8 @@ the DLL (`GetModuleHandleEx` + `FreeLibraryAndExitThread`), so an early unload c
 | `layer_loadtest.exe` | Real loader + active runtime (VDXR here): our layer is enumerated, negotiates, an instance is created and destroyed through it. |
 | `tests\run_e2e.ps1` | Real loader → installed layer → `mock_runtime.dll`, a normal app frame loop for every layout and both D3D APIs, recording through `XR_EYE_CAPTURE_AUTORECORD`; each MP4 verified. |
 | dormant case (last case of `run_e2e.ps1`) | Without `XR_EYE_CAPTURE_REQUIRE_TRAY=0` and without the tray: `layer_e2e --expect-dormant` loop completes, no MP4, log has the "layer dormant" line and no `control:` / recorder lines. (Fails if a tray is running.) |
-| `head_smoothing_test.exe` | Filter math on the CPU: time-constant mapping, first frame = identity, correction direction for yaw / pitch (OpenXR conventions), gap reset, roll lock, follow + catch-up (lag bound, settle), edge guard on / off, no-pose pass-through. |
-| `tests\run_jitter.ps1` | Head smoothing end to end (installed layer, real loader, mock runtime): `layer_e2e --jitter` renders a world-locked grid + marker for the pose the mock reports (+-2 degree yaw / pitch / roll jitter at 3.3 / 4.1 / 4.7 Hz, a 30 degree yaw turn at t = 4..5 s; `tests/test_motion.h`). Three recordings (smoothing 0; 0.6 with `output_fov_scale` 0.9; same with `edge_guard` 0), ffmpeg-decoded, marker located per frame in the left eye. Checks: raw marker = analytic expectation (RMS < 0.15 degree), jitter-phase std-dev raw / smoothed >= 5, settles within 0.5 s after the turn (1 degree), final position 30 / 0 degrees, no black border pixels in the jitter phase. Measured: raw 2.00 degree, smoothed 0.34 degree (5.8x; 7.5x without the edge guard), settle 0.16 s (0.20 s without the guard), RMS 0.006 degree. |
+| `head_smoothing_test.exe` | Symmetric fov intersection, output size (density, even rounding), parallel-camera mapping without smoothing; filter math on the CPU: time-constant mapping, first frame = identity, correction direction for yaw / pitch (OpenXR conventions), gap reset, roll lock, follow + catch-up (lag bound, settle), edge guard on / off, no-pose pass-through. |
+| `tests\run_jitter.ps1` | Head smoothing end to end (installed layer, real loader, mock runtime): `layer_e2e --jitter` renders a world-locked grid + marker for the pose the mock reports (+-2 degree yaw / pitch / roll jitter at 3.3 / 4.1 / 4.7 Hz, a 30 degree yaw turn at t = 4..5 s; `tests/test_motion.h`). The mock's views have asymmetric fovs (left -50/+40, right -40/+50, +-45 degrees). Four recordings (smoothing 0 with `symmetric_fov` 1; smoothing 0 with `symmetric_fov` 0; 0.6 with `output_fov_scale` 0.9; same with `edge_guard` 0), ffmpeg-decoded, marker located per frame in both eyes. Checks: marker = analytic expectation (RMS < 0.15 degree), far marker at the same x in both halves with `symmetric_fov` 1 (<= 1 px) and not with 0, jitter-phase std-dev raw / smoothed >= 5, settles within 0.5 s after the turn (1 degree), final position 30 / 0 degrees, no black border pixels in the jitter phase. Measured: raw 2.00 degree, smoothed 0.31 degree (6.5x; 7.6x without the edge guard), settle 0.16 s (0.20 s without the guard), RMS 0.006 degree; far-marker x right - left: symmetric 0.29 px max (smoothed 0.50 px), raw asymmetric -244.5 px mean. |
 | tray IPC | Start `EyeCaptureTray.exe` (GUI), then `layer_e2e --record 0` (it must be started with the tray running, or with `XR_EYE_CAPTURE_REQUIRE_TRAY=0`) + `EyeCaptureTray.exe --start / --status / --stop`. |
 
 Test-only environment variables read by the layer: `XR_EYE_CAPTURE_AUTORECORD=<seconds>` (start at the first frame,

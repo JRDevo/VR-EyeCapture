@@ -1,5 +1,6 @@
 // head_smoothing_test -- CPU unit test of src/head_smoothing (filter, conventions, roll lock, follow, edge guard).
 // No GPU, no files. Exit code 0 = all checks passed.
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include "head_smoothing.h"
@@ -125,6 +126,49 @@ int main() {
         Eyes(in, YawPitchRoll(8, 0, 0));
         hn.Update(dt, in, f);
         Check(!f.guarded && f.uncovered, "edge_guard = 0: same jump is reported uncovered", f.correctionDeg);
+    }
+    {   // symmetric fov: intersection of both eyes, output size at the source density, rounded to even
+        const double D = test_motion::kDeg;
+        const float fl[4] = {(float)(-50 * D), (float)(40 * D), (float)(45 * D), (float)(-45 * D)};
+        const float fr[4] = {(float)(-40 * D), (float)(50 * D), (float)(45 * D), (float)(-45 * D)};
+        const SymmetricFov sf = ComputeSymmetricFov(fl, fr, 6120, 6496, 6120, 6496);
+        const double dens = 6120.0 / (std::tan(40 * D) + std::tan(50 * D));
+        const uint32_t wantW = 2u * (uint32_t)std::lround(std::tan(40 * D) * dens);
+        Check(sf.valid && std::fabs(std::atan(sf.tanH) / D - 40.0) < 1e-3 && std::fabs(std::atan(sf.tanV) / D - 45.0) < 1e-3,
+              "symmetric fov of L[-50,+40] R[-40,+50] x +-45 = +-40 x +-45 deg", std::atan(sf.tanH) / D);
+        printf("    output per eye %ux%u (source 6120x6496)\n", sf.eyeW, sf.eyeH);
+        Check(sf.eyeW == wantW && sf.eyeW % 2 == 0 && sf.eyeH == 6496, "output size: 2 tanH x density, even; height kept", sf.eyeW);
+        // smaller vertical fov on one eye and different densities: min of the angles, max of the densities
+        const float fr2[4] = {(float)(-45 * D), (float)(45 * D), (float)(40 * D), (float)(-42 * D)};
+        const SymmetricFov s2 = ComputeSymmetricFov(fl, fr2, 1000, 1001, 1200, 1000);
+        const double dH = std::max(1000.0 / (std::tan(50 * D) + std::tan(40 * D)), 1200.0 / (2 * std::tan(45 * D)));
+        const double dV = std::max(1001.0 / (2 * std::tan(45 * D)), 1000.0 / (std::tan(40 * D) + std::tan(42 * D)));
+        Check(std::fabs(std::atan(s2.tanV) / D - 40.0) < 1e-3 && s2.eyeW == 2u * (uint32_t)std::lround(std::tan(40 * D) * dH) &&
+              s2.eyeH == 2u * (uint32_t)std::lround(std::tan(40 * D) * dV) && s2.eyeW % 2 == 0 && s2.eyeH % 2 == 0,
+              "mixed eyes: min angle, max density, even sizes", (double)s2.eyeH);
+        // a view that lies entirely on one side of its centre line has no symmetric part
+        const float bad[4] = {(float)(5 * D), (float)(40 * D), (float)(45 * D), (float)(-45 * D)};
+        Check(!ComputeSymmetricFov(bad, fr, 100, 100, 100, 100).valid, "fov not containing the centre line -> invalid", 0);
+
+        // smoothing off + symmetric output: parallel cameras, C = q_e^-1 * H, both eyes the same output frustum
+        HeadSmoothingSettings s; s.smoothing = 0.0f;
+        HeadSmoother hs(s);
+        hs.SetSymmetricOutput(sf.tanH, sf.tanV);
+        SmoothEyeIn in2[2];
+        Eyes(in2, YawPitchRoll(10, 3, 2));
+        for (int e = 0; e < 2; ++e) {
+            const float* fv = e == 0 ? fl : fr;
+            in2[e].tanL = std::tan((double)fv[0]); in2[e].tanR = std::tan((double)fv[1]);
+            in2[e].tanU = std::tan((double)fv[2]); in2[e].tanD = std::tan((double)fv[3]);
+        }
+        hs.Update(0, in2, f);
+        double m = 0;
+        for (int i = 0; i < 9; ++i) m = std::fmax(m, std::fabs(f.eye[1].m[i] - (i % 4 == 0 ? 1.0 : 0.0)));
+        const bool same = f.eye[0].outTan[0] == f.eye[1].outTan[0] && f.eye[0].outTan[2] == f.eye[1].outTan[2];
+        Check(m < 1e-6 && same && std::fabs(f.eye[0].outTan[1] - sf.tanH) < 1e-6 && f.eye[0].covered && f.eye[1].covered &&
+              !f.uncovered, "smoothing off: identity rotation, same symmetric output frustum (scale 1), covered", m);
+        hs.Update(dt, in2, f);
+        Check(!f.reset && f.correctionDeg < 1e-9, "smoothing off: no filtering, no correction", f.correctionDeg);
     }
     {   // no usable pose -> pass-through
         HeadSmoothingSettings s; s.smoothing = 0.6f;

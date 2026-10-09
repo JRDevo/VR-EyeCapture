@@ -32,7 +32,12 @@ struct RecorderSettings {
     unsigned     maxWidth = 0;       // 0 = native
     bool         audio = true;
     std::wstring audioDevice;
-    HeadSmoothingSettings head;      // head-motion smoothing (head.smoothing = 0: stage bypassed)
+    HeadSmoothingSettings head;      // head-motion smoothing + symmetric fov (both off: re-projection stage bypassed)
+    // The two views' fov (angleLeft, angleRight, angleUp, angleDown) and image sizes at record start: symmetric_fov
+    // fixes the output frustum and size of the whole recording from these.
+    bool         startFovValid = false;
+    float        startFov[2][4] = {};
+    uint32_t     startEyeW[2] = {}, startEyeH[2] = {};
 };
 
 enum class RecState { Idle, Starting, Recording, Stopping, Failed };

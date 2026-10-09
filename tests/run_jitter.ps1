@@ -1,17 +1,22 @@
 <#
-    run_jitter.ps1 -- end-to-end test of head-motion smoothing, no headset: real OpenXR loader -> INSTALLED layer ->
+    run_jitter.ps1 -- end-to-end test of head-motion smoothing and symmetric_fov, no headset: real OpenXR loader -> INSTALLED layer ->
     tests/mock_runtime in jitter mode (head motion of tests/test_motion.h: +-2 deg yaw/pitch/roll jitter at 3.3/4.1/4.7 Hz
-    for the whole run, plus a deliberate 30 deg yaw turn from t = 4 s to t = 5 s). layer_e2e --jitter renders a
-    world-locked grid with a white marker for the located pose every frame, like a game.
+    for the whole run, plus a deliberate 30 deg yaw turn from t = 4 s to t = 5 s; asymmetric per-eye fov like a real
+    headset: left -50/+40, right -40/+50, +-45 deg). layer_e2e --jitter renders a world-locked grid with a white marker
+    (a direction, i.e. at infinity) for the located pose every frame, like a game.
 
-    Three recordings:  raw      head_smoothing = 0                              (stage bypassed)
+    Four recordings:   raw      head_smoothing = 0  (symmetric_fov = 1, the default: output +-40 x +-45 deg per eye)
+                       rawasym  head_smoothing = 0, symmetric_fov = 0      (stage bypassed: the raw eye images)
                        smooth   head_smoothing = 0.6, output_fov_scale = 0.9    (edge_guard = 1, the default)
                        noguard  same with edge_guard = 0                         (pure filter + follow)
-    Each video is decoded (ffmpeg, Y plane), the marker is located in the LEFT eye per frame (weighted centroid of
-    Y > 150) and converted to camera angles with the left eye's (scaled) fov. Video time -> motion time through the
+    Each video is decoded (ffmpeg, Y plane), the marker is located in each eye per frame (weighted centroid of
+    Y > 150) and converted to camera angles with the left eye's output fov (symmetric x scale, or the raw left fov). Video time -> motion time through the
     layer's "first video frame ... displayTime" log line and layer_e2e's E2E_T0_NS.
     Checks:
       raw     marker = the analytic expectation for the mock pose (RMS < 0.15 deg)   -> the test scene is right
+              (rawasym: same with the raw left-eye fov)
+      stereo  raw (symmetric): the far marker is at the same x in both halves (max |xL - xR| <= 1 px);
+              rawasym: it is not (documents the bug symmetric_fov fixes)
       ratio   std-dev of the marker position, jitter-only phase t in [1.0, 3.9] s: raw / smooth >= 5
       settle  smooth and noguard: after the turn ends (t = 5 s) the marker (0.1 s moving average) stays within 1 deg
               of its final rest position from t <= 5.5 s on; final rest position within 0.5 deg of 30 deg / 0 deg
@@ -53,12 +58,14 @@ public static class JitterAnalysis {
             int got = 0;
             while (got < f.Length) { int n = s.Read(f, got, f.Length - got); if (n <= 0) break; got += n; }
             if (got < f.Length) break;
-            double sw = 0, sx = 0, sy = 0;
+            double sw = 0, sx = 0, sy = 0, rw = 0, rx = 0;
             for (int y = 0; y < H; y++) {
                 int row = y * W;
                 for (int x = 0; x < eyeW; x++) {
                     int v = f[row + x];
                     if (v > 150) { double w = v - 150; sw += w; sx += w * x; sy += w * y; }
+                    int v2 = f[row + eyeW + x];
+                    if (v2 > 150) { double w = v2 - 150; rw += w; rx += w * x; }
                 }
             }
             int black = 0;
@@ -69,7 +76,7 @@ public static class JitterAnalysis {
                 if (edgeRow) { for (int x = 0; x < W; x++) if (f[row + x] < 30) black++; }
                 else foreach (int x0 in edgesX) for (int x = x0; x < x0 + 3; x++) if (f[row + x] < 30) black++;
             }
-            res.Add(new double[] { sw > 0 ? sx / sw : double.NaN, sw > 0 ? sy / sw : double.NaN, black });
+            res.Add(new double[] { sw > 0 ? sx / sw : double.NaN, sw > 0 ? sy / sw : double.NaN, black, rw > 0 ? rx / rw : double.NaN });
         }
         p.WaitForExit();
         return res.ToArray();
@@ -91,11 +98,14 @@ public static class JitterAnalysis {
 }
 '@
 
-$tanL = [math]::Tan(-0.87); $tanR = [math]::Tan(0.75); $tanU = [math]::Tan(0.80); $tanD = [math]::Tan(-0.85)   # left eye
+$D = [math]::PI / 180
+$rawTans = @([math]::Tan(-50 * $D), [math]::Tan(40 * $D), [math]::Tan(45 * $D), [math]::Tan(-45 * $D))   # left eye, raw
+$symTans = @(-[math]::Tan(40 * $D), [math]::Tan(40 * $D), [math]::Tan(45 * $D), -[math]::Tan(45 * $D))   # common symmetric
 $cases = @(
-    @{ name = 'raw';     cfg = 'head_smoothing=0';                                     k = 1.0 },
-    @{ name = 'smooth';  cfg = 'head_smoothing=0.6;output_fov_scale=0.9';              k = 0.9 },
-    @{ name = 'noguard'; cfg = 'head_smoothing=0.6;output_fov_scale=0.9;edge_guard=0'; k = 0.9 }
+    @{ name = 'raw';     cfg = 'head_smoothing=0';                                     k = 1.0; tans = $symTans },
+    @{ name = 'rawasym'; cfg = 'head_smoothing=0;symmetric_fov=0';                     k = 1.0; tans = $rawTans },
+    @{ name = 'smooth';  cfg = 'head_smoothing=0.6;output_fov_scale=0.9';              k = 0.9; tans = $symTans },
+    @{ name = 'noguard'; cfg = 'head_smoothing=0.6;output_fov_scale=0.9;edge_guard=0'; k = 0.9; tans = $symTans }
 )
 $prevTray = $env:XR_EYE_CAPTURE_REQUIRE_TRAY; $prevCfg = $env:XR_EYE_CAPTURE_CONFIG
 $env:XR_EYE_CAPTURE_REQUIRE_TRAY = '0'
@@ -113,9 +123,11 @@ foreach ($c in $cases) {
     $mOut = [regex]::Match($o, 'E2E_OUTPUT=(.+)'); $mT0 = [regex]::Match($o, 'E2E_T0_NS=(\d+)')
     if ($LASTEXITCODE -ne 0 -or -not $mOut.Success -or -not $mT0.Success) { Write-Host $o; Check $false "$($c.name): e2e run"; continue }
     $file = $mOut.Groups[1].Value.Trim()
-    $log = Get-Content (Join-Path $out 'eye_capture.log') -Raw
+    $log = Get-Content (Join-Path $out 'eye_capture.log') -Raw -Encoding UTF8
     $mFirst = [regex]::Match($log, 'first video frame \(t = 0 in the file\): displayTime (\d+) ns')
-    $mSum = [regex]::Match($log, 'head smoothing summary: [^\r\n]+')
+    $mSum = [regex]::Match($log, 're-projection summary[^\r\n]+')
+    $mSym = [regex]::Match($log, 'symmetric fov[^\r\n]+')
+    if ($mSym.Success) { Write-Host "  $($mSym.Value)" }
     if ($mSum.Success) { Write-Host "  $($mSum.Value)" }
     if (-not $mFirst.Success) { Check $false "$($c.name): first-frame displayTime in the log"; continue }
     $offset = ([double]$mFirst.Groups[1].Value - [double]$mT0.Groups[1].Value) / 1e9
@@ -128,6 +140,7 @@ foreach ($c in $cases) {
     $n = [math]::Min($scan.Length, $pts.Count)
     Write-Host ("  {0} frames {1}x{2}, motion t of frame 0 = {3:N3} s" -f $n, $W, $H, $offset)
     $k = $c.k
+    $tanL = $c.tans[0]; $tanR = $c.tans[1]; $tanU = $c.tans[2]; $tanD = $c.tans[3]
     $rows = New-Object System.Collections.Generic.List[object]
     for ($i = 0; $i -lt $n; $i++) {
         $t = $pts[$i] + $offset
@@ -137,7 +150,7 @@ foreach ($c in $cases) {
             $xt = $k * ($tanL + ($cx + 0.5) / $eyeW * ($tanR - $tanL)); $yt = $k * ($tanU + ($cy + 0.5) / $H * ($tanD - $tanU))
             $ax = [math]::Atan($xt) * 180 / [math]::PI; $ay = [math]::Atan($yt) * 180 / [math]::PI
         }
-        $rows.Add([pscustomobject]@{ t = $t; x = $ax; y = $ay; black = $scan[$i][2] })
+        $rows.Add([pscustomobject]@{ t = $t; x = $ax; y = $ay; black = $scan[$i][2]; dx = $scan[$i][3] - $cx })
     }
     $data[$c.name] = $rows
 }
@@ -167,15 +180,25 @@ function Settle($rows) {
 }
 
 Write-Host "`n=== checks" -ForegroundColor Cyan
-if ($data.ContainsKey('raw')) {
+foreach ($name in @('raw', 'rawasym')) {
+    if (-not $data.ContainsKey($name)) { continue }
     $se = 0; $cnt = 0; $missing = 0
-    foreach ($r in $data['raw']) {
+    foreach ($r in $data[$name]) {
         if ([double]::IsNaN($r.x)) { $missing++; continue }
         $e = [JitterAnalysis]::Expected($r.t)
         $se += [math]::Pow($r.x - $e[0], 2) + [math]::Pow($r.y - $e[1], 2); $cnt++
     }
     $rms = [math]::Sqrt($se / [math]::Max(1, $cnt))
-    Check ($rms -lt 0.15 -and $missing -eq 0) ("raw: marker follows the mock head pose exactly (RMS error {0:N3} deg over {1} frames, marker missing in {2})" -f $rms, $cnt, $missing)
+    Check ($rms -lt 0.15 -and $missing -eq 0) ("{3}: marker follows the mock head pose exactly (RMS error {0:N3} deg over {1} frames, marker missing in {2})" -f $rms, $cnt, $missing, $name)
+}
+foreach ($name in @('raw', 'rawasym', 'smooth')) {
+    if (-not $data.ContainsKey($name)) { continue }
+    $d = @($data[$name] | Where-Object { -not [double]::IsNaN($_.dx) } | ForEach-Object { $_.dx })
+    $mean = ($d | Measure-Object -Average).Average
+    $maxAbs = ($d | ForEach-Object { [math]::Abs($_) } | Measure-Object -Maximum).Maximum
+    $msg = "{0}: far marker x right half - left half: mean {1:N2} px, max |dx| {2:N2} px ({3} frames)" -f $name, $mean, $maxAbs, $d.Count
+    if ($name -eq 'rawasym') { Check ([math]::Abs($mean) -gt 50) "$msg -> parallax at infinity without symmetric_fov (the bug)" }
+    else { Check ($maxAbs -le 1.0) "$msg -> same x in both eyes" }
 }
 if ($data.ContainsKey('raw') -and $data.ContainsKey('smooth')) {
     $s0 = JitterStd $data['raw']; $s1 = JitterStd $data['smooth']
@@ -192,7 +215,7 @@ foreach ($name in @('smooth', 'noguard')) {
     Check ($st[0] -le 0.5) ("{0}: settles {1:N2} s after the turn ends (<= 0.5 s within 1 deg)" -f $name, $st[0])
     Check ([math]::Abs($st[1] - 30) -le 0.5 -and [math]::Abs($st[2]) -le 0.5) ("{0}: final rest position {1:N2} / {2:N2} deg (want 30 / 0)" -f $name, $st[1], $st[2])
 }
-foreach ($name in @('raw', 'smooth', 'noguard')) {
+foreach ($name in @('raw', 'rawasym', 'smooth', 'noguard')) {
     if (-not $data.ContainsKey($name)) { continue }
     $j = @($data[$name] | Where-Object { $_.t -ge 1.0 -and $_.t -le 3.9 })
     $bf = @($j | Where-Object { $_.black -gt 0 }).Count

@@ -39,7 +39,8 @@ const char kLinearToSrgbCs[] =
 // Head-motion smoothing: re-project each eye of the SBS frame onto the smoothed head orientation (rotational
 // timewarp). One full-screen triangle over the whole SBS texture; the pixel shader picks the eye by x. For an output
 // pixel: ray in the smoothed (output) camera from the scaled fov -> C (actual-eye-from-smoothed rotation) -> project
-// with the eye's actual fov -> sample that eye's half of the source bilinearly; outside it = black. Source SRV and
+// with the eye's actual fov -> sample that eye's half of the source bilinearly; outside it = black. The output is
+// W x H (same layout as the source) or, with symmetric_fov, 2 x eyeW x eyeH of the common symmetric frustum. Source SRV and
 // target RTV are the same typed UNORM / float format, so no gamma conversion happens. See head_smoothing.h.
 const char kReprojVs[] =
     "float4 main(uint id : SV_VertexID) : SV_Position {\n"
@@ -47,14 +48,14 @@ const char kReprojVs[] =
     "    return float4(p * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);\n"
     "}\n";
 const char kReprojPs[] =
-    "struct Eye { float4 r0, r1, r2, outTan, srcTan, rect; };\n"   // rect: x0, y0, w, h in pixels
-    "cbuffer P : register(b0) { Eye eye[2]; float4 misc; };\n"     // misc: 1/W, 1/H, right eye x0, 0
+    "struct Eye { float4 r0, r1, r2, outTan, srcTan, src, dst; };\n"   // src / dst: x0, y0, w, h in pixels
+    "cbuffer P : register(b0) { Eye eye[2]; float4 misc; };\n"     // misc: 1/srcW, 1/srcH, right eye x0 in the output, 0
     "Texture2D<float4> src : register(t0);\n"
     "SamplerState smp : register(s0);\n"
     "float4 main(float4 pos : SV_Position) : SV_Target {\n"
     "    const float4 black = float4(0.0, 0.0, 0.0, 1.0);\n"
     "    Eye E = eye[pos.x >= misc.z ? 1 : 0];\n"
-    "    float2 uv = (pos.xy - E.rect.xy) / E.rect.zw;\n"
+    "    float2 uv = (pos.xy - E.dst.xy) / E.dst.zw;\n"
     "    if (uv.y > 1.0) return black;\n"
     "    float3 d = float3(lerp(E.outTan.x, E.outTan.y, uv.x), lerp(E.outTan.z, E.outTan.w, uv.y), -1.0);\n"
     "    float3 a = float3(dot(E.r0.xyz, d), dot(E.r1.xyz, d), dot(E.r2.xyz, d));\n"
@@ -62,11 +63,11 @@ const char kReprojPs[] =
     "    float2 t = a.xy / -a.z;\n"
     "    float2 s = float2((t.x - E.srcTan.x) / (E.srcTan.y - E.srcTan.x), (E.srcTan.z - t.y) / (E.srcTan.z - E.srcTan.w));\n"
     "    if (any(s < 0.0) || any(s > 1.0)) return black;\n"
-    "    float2 p = clamp(E.rect.xy + s * E.rect.zw, E.rect.xy + 0.5, E.rect.xy + E.rect.zw - 0.5);\n"
+    "    float2 p = clamp(E.src.xy + s * E.src.zw, E.src.xy + 0.5, E.src.xy + E.src.zw - 0.5);\n"
     "    return float4(src.SampleLevel(smp, p * misc.xy, 0).rgb, 1.0);\n"
     "}\n";
 
-struct RpEye { float r0[4], r1[4], r2[4], outTan[4], srcTan[4], rect[4]; };
+struct RpEye { float r0[4], r1[4], r2[4], outTan[4], srcTan[4], src[4], dst[4]; };
 struct RpConstants { RpEye eye[2]; float misc[4]; };
 static_assert(sizeof(RpConstants) % 16 == 0, "constant buffer size");
 
@@ -230,7 +231,9 @@ struct Recorder::Impl {
     ComPtr<ID3D11UnorderedAccessView> linUav;
     ComPtr<ID3D11VideoProcessorInputView> linView;
     // head-motion smoothing (only when s.head.Enabled())
-    std::atomic<bool> smooth{false};   // written by Start / worker init, read by SubmitFrame
+    std::atomic<bool> stage{false};    // re-projection stage on (head smoothing and / or symmetric fov); Start / worker init
+    SymmetricFov sym;                  // symmetric_fov output (valid = on for this recording)
+    UINT vpW = 0, vpH = 0, outRightX = 0;   // stage output = video processor input size; right eye x0 in it
     HeadSmoother smoother;
     ComPtr<ID3D11VertexShader> rpVs;
     ComPtr<ID3D11PixelShader> rpPs;
@@ -321,8 +324,15 @@ bool Recorder::Start(IFrameSource* src, const RecorderSettings& s, UINT w, UINT 
     m.written = 0; m.dropRing = 0; m.dropGpu = 0; m.dropPool = 0; m.dropDup = 0; m.decimated = 0; m.audioFrames = 0; m.writeErrors = 0;
     m.t0Disp = 0;
     m.loggedFirst = false;
-    m.smooth = s.head.Enabled();
+    m.sym = SymmetricFov();
+    if (s.head.symmetricFov && s.startFovValid)
+        m.sym = ComputeSymmetricFov(s.startFov[0], s.startFov[1], s.startEyeW[0], s.startEyeH[0], s.startEyeW[1], s.startEyeH[1]);
+    m.stage = s.head.Enabled() || m.sym.valid;
     m.smoother.Configure(s.head);   // also resets the filter: every recording starts at the actual head pose
+    m.smoother.SetSymmetricOutput(m.sym.valid ? m.sym.tanH : 0.0, m.sym.valid ? m.sym.tanV : 0.0);
+    m.vpW = m.sym.valid ? 2 * m.sym.eyeW : w;
+    m.vpH = m.sym.valid ? m.sym.eyeH : h;
+    m.outRightX = m.sym.valid ? m.sym.eyeW : leftWidth;
     m.smFrames = m.smGuarded = m.smUncovered = m.smCatch = m.smNoPose = m.smResets = m.gpuN = 0;
     m.smCorrSum = m.smCorrMax = m.gpuSum = m.gpuMax = m.cpuSum = m.cpuMax = 0;
     m.queue.clear();
@@ -372,7 +382,7 @@ bool Recorder::SubmitFrame(int64_t ts, const EyeView& L, const EyeView& R, int64
     m.lastTs = ts;
     Impl::Item item{};
     item.slot = slot; item.ready = ready; item.ts = ts; item.disp = disp;
-    if (m.smooth) {
+    if (m.stage) {
         const EyeView* ev[2] = {&l, &r};
         const UINT x0[2] = {0, m.leftW};
         for (int e = 0; e < 2; ++e) {
@@ -525,15 +535,15 @@ void Recorder::Impl::Run() {
              hasAudio ? "AAC" : "none", (unsigned long long)audioFrames.load(), audioFrames.load() / 48000.0,
              HrText(fhr).c_str(), st3dReport.c_str());
     if (fileOk) LOGI("%s", sum); else LOGE("%s", sum);
-    if (smooth) {
+    if (stage) {
         const double n = smFrames ? (double)smFrames : 1.0;
-        LOGI("head smoothing summary: %llu frames | correction mean %.2f deg, max %.2f deg | edge guard limited the "
+        LOGI("re-projection summary (head smoothing %s, symmetric fov %s): %llu frames | correction mean %.2f deg, max %.2f deg | edge guard limited the "
              "correction in %llu frames | source did not cover the output (black edges) in %llu frames | follow / "
              "catch-up active in %llu frames | no usable pose in %llu frames | filter resets %llu | re-projection %ux%u: "
              "GPU %.3f ms avg, %.3f ms max (%llu samples), worker CPU %.3f ms avg, %.3f ms max",
-             (unsigned long long)smFrames, smCorrSum / n, smCorrMax, (unsigned long long)smGuarded,
+             s.head.Enabled() ? "on" : "off", sym.valid ? "on" : "off", (unsigned long long)smFrames, smCorrSum / n, smCorrMax, (unsigned long long)smGuarded,
              (unsigned long long)smUncovered, (unsigned long long)smCatch, (unsigned long long)smNoPose,
-             (unsigned long long)smResets, W, H, gpuN ? gpuSum / gpuN : 0.0, gpuMax, (unsigned long long)gpuN,
+             (unsigned long long)smResets, vpW, vpH, gpuN ? gpuSum / gpuN : 0.0, gpuMax, (unsigned long long)gpuN,
              cpuSum / n, cpuMax);
     }
     SetMessage(fileOk ? std::string("saved ") + file : std::string("recording failed (no frames or finalize error)"));
@@ -554,8 +564,8 @@ bool Recorder::Impl::Init() {
     }
     if (!encCtx4) { SetMessage("no ID3D11DeviceContext4"); return false; }
 
-    // --- output size ---
-    outW = W; outH = H;
+    // --- output size (from the re-projection output when symmetric_fov changes it) ---
+    outW = vpW; outH = vpH;
     auto scaleTo = [&](UINT maxW, UINT maxH) {
         if (outW > maxW) { outH = (UINT)((uint64_t)outH * maxW / outW); outW = maxW; }
         if (outH > maxH) { outW = (UINT)((uint64_t)outW * maxH / outH); outH = maxH; }
@@ -575,7 +585,21 @@ bool Recorder::Impl::Init() {
          GfxApiName(src->Api()), W, H, leftW, DxgiFormatName(fmt), srgb ? "sRGB-encoded" : "linear", outW, outH,
          hevc ? "HEVC" : "H.264", bitrate / 1e6, fps, fps * 2);
 
-    if (smooth)
+    if (sym.valid) {
+        const double D = 180.0 / 3.14159265358979323846;
+        const float* fl = s.startFov[0];
+        const float* fr = s.startFov[1];
+        LOGI("recorder: symmetric fov: source L[%+.1f,%+.1f]x[%+.1f,%+.1f] R[%+.1f,%+.1f]x[%+.1f,%+.1f] -> output "
+             "\xC2\xB1%.1f\xC2\xB0 x \xC2\xB1%.1f\xC2\xB0 per eye%s, %ux%u per eye (SBS %ux%u, from %ux%u)",
+             fl[0] * D, fl[1] * D, fl[3] * D, fl[2] * D, fr[0] * D, fr[1] * D, fr[3] * D, fr[2] * D,
+             std::atan(sym.tanH) * D, std::atan(sym.tanV) * D,
+             s.head.Enabled() ? " (x output_fov_scale while smoothing)" : "", sym.eyeW, sym.eyeH, vpW, vpH, W, H);
+    } else if (s.head.symmetricFov) {
+        LOGW("recorder: symmetric fov: no usable view fov at record start -- recording the raw eye images");
+    } else {
+        LOGI("recorder: symmetric fov off (symmetric_fov = 0): raw eye images");
+    }
+    if (s.head.Enabled())
         LOGI("recorder: head smoothing ON -- head_smoothing %.2f (time constant %.3f s), head_follow_deg %.1f, roll_lock %d, "
              "output_fov_scale %.2f, edge_guard %d",
              s.head.smoothing, HeadSmoothingTimeConstant(s.head.smoothing), s.head.followDeg, s.head.rollLock ? 1 : 0,
@@ -647,7 +671,7 @@ bool Recorder::Impl::InitVideoProcessor() {
     D3D11_VIDEO_PROCESSOR_CONTENT_DESC cd{};
     cd.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
     cd.InputFrameRate = {fps, 1};
-    cd.InputWidth = W; cd.InputHeight = H;
+    cd.InputWidth = vpW; cd.InputHeight = vpH;
     cd.OutputFrameRate = {fps, 1};
     cd.OutputWidth = outW; cd.OutputHeight = outH;
     cd.Usage = D3D11_VIDEO_USAGE_OPTIMAL_QUALITY;
@@ -689,7 +713,7 @@ bool Recorder::Impl::InitVideoProcessor() {
         vctx->VideoProcessorSetStreamColorSpace(vp.Get(), 0, &in);
         vctx->VideoProcessorSetOutputColorSpace(vp.Get(), &out);
     }
-    const RECT srcR{0, 0, (LONG)W, (LONG)H}, dstR{0, 0, (LONG)outW, (LONG)outH};
+    const RECT srcR{0, 0, (LONG)vpW, (LONG)vpH}, dstR{0, 0, (LONG)outW, (LONG)outH};
     vctx->VideoProcessorSetStreamFrameFormat(vp.Get(), 0, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
     vctx->VideoProcessorSetStreamSourceRect(vp.Get(), 0, TRUE, &srcR);
     vctx->VideoProcessorSetStreamDestRect(vp.Get(), 0, TRUE, &dstR);
@@ -711,11 +735,12 @@ bool Recorder::Impl::InitVideoProcessor() {
         hr = vdev->CreateVideoProcessorInputView(linTex.Get(), venum.Get(), &iv, &linView);
         if (FAILED(hr)) { LOGE("recorder: input view on the linear pre-pass texture hr=0x%08lx", (unsigned long)hr); SetMessage("video processor input view"); return false; }
     }
-    if (smooth && !InitReprojection(vpFmt)) {
+    if (stage && !InitReprojection(vpFmt)) {
+        if (vpW != W || vpH != H) { SetMessage("re-projection setup failed"); return false; }   // VP sized for its output
         LOGW("recorder: head smoothing disabled for this recording (re-projection setup failed)");
-        smooth = false;
+        stage = false;
     }
-    const bool vpFromRing = srgb && !smooth;   // otherwise the VP reads the pre-pass / re-projection output
+    const bool vpFromRing = srgb && !stage;   // otherwise the VP reads the pre-pass / re-projection output
     bool direct = true;
     for (auto& t : ring.tex) {
         if (!vpFromRing) break;
@@ -837,7 +862,7 @@ bool Recorder::Impl::InitReprojection(DXGI_FORMAT vpFmt) {
     }
     if (SUCCEEDED(hr)) {
         D3D11_TEXTURE2D_DESC d{};
-        d.Width = W; d.Height = H; d.MipLevels = 1; d.ArraySize = 1; d.Format = vpFmt; d.SampleDesc.Count = 1;
+        d.Width = vpW; d.Height = vpH; d.MipLevels = 1; d.ArraySize = 1; d.Format = vpFmt; d.SampleDesc.Count = 1;
         d.Usage = D3D11_USAGE_DEFAULT; d.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
         hr = enc->CreateTexture2D(&d, nullptr, &rpTex);
     }
@@ -877,9 +902,9 @@ bool Recorder::Impl::InitReprojection(DXGI_FORMAT vpFmt) {
             break;
         }
     }
-    LOGI("recorder: head smoothing re-projection pass on the encoder device: %ux%u, %s -> %s, +%.0f MB VRAM",
-         W, H, srgb ? "ring" : "linear pre-pass output", DxgiFormatName(vpFmt),
-         (double)W * H * (vpFmt == DXGI_FORMAT_R16G16B16A16_FLOAT ? 8 : 4) / (1024.0 * 1024.0));
+    LOGI("recorder: re-projection pass on the encoder device: %ux%u -> %ux%u, %s -> %s, +%.0f MB VRAM",
+         W, H, vpW, vpH, srgb ? "ring" : "linear pre-pass output", DxgiFormatName(vpFmt),
+         (double)vpW * vpH * (vpFmt == DXGI_FORMAT_R16G16B16A16_FLOAT ? 8 : 4) / (1024.0 * 1024.0));
     return true;
 }
 
@@ -917,7 +942,7 @@ void Recorder::Impl::Reproject(ID3D11ShaderResourceView* srcSrv, const RpConstan
     ID3D11Buffer* cb = rpCb.Get();
     ID3D11SamplerState* smp = rpSmp.Get();
     ID3D11RenderTargetView* rtv = rpRtv.Get();
-    const D3D11_VIEWPORT vpt{0.0f, 0.0f, (float)W, (float)H, 0.0f, 1.0f};
+    const D3D11_VIEWPORT vpt{0.0f, 0.0f, (float)vpW, (float)vpH, 0.0f, 1.0f};
     encCtx->IASetInputLayout(nullptr);
     encCtx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     encCtx->VSSetShader(rpVs.Get(), nullptr, 0);
@@ -1068,7 +1093,7 @@ void Recorder::Impl::Process(const Item& it) {
     // head smoothing, CPU part: filter + per-eye re-projection constants (before taking the device lock)
     RpConstants rc{};
     int64_t cpuTicks = 0;   // our own CPU time on the worker (filter + constants + draw submission), not lock / pool waits
-    if (smooth) {
+    if (stage) {
         const int64_t c0 = QpcNow100ns();
         SmoothEyeIn in[2];
         for (int e = 0; e < 2; ++e) {
@@ -1094,10 +1119,16 @@ void Recorder::Impl::Process(const Item& it) {
             for (int c = 0; c < 3; ++c) { re.r0[c] = eo.m[c]; re.r1[c] = eo.m[3 + c]; re.r2[c] = eo.m[6 + c]; }
             for (int c = 0; c < 4; ++c) { re.outTan[c] = eo.outTan[c]; re.srcTan[c] = eo.srcTan[c]; }
             const ItemEye& ie = it.eye[e];
-            re.rect[0] = (float)ie.x0; re.rect[1] = 0.0f;
-            re.rect[2] = (float)std::max<UINT>(1, ie.w); re.rect[3] = (float)std::max<UINT>(1, ie.h);
+            re.src[0] = (float)ie.x0; re.src[1] = 0.0f;
+            re.src[2] = (float)std::max<UINT>(1, ie.w); re.src[3] = (float)std::max<UINT>(1, ie.h);
+            if (sym.valid) {
+                re.dst[0] = (float)(e == 0 ? 0 : sym.eyeW); re.dst[1] = 0.0f;
+                re.dst[2] = (float)sym.eyeW; re.dst[3] = (float)sym.eyeH;
+            } else {
+                for (int c = 0; c < 4; ++c) re.dst[c] = re.src[c];
+            }
         }
-        rc.misc[0] = 1.0f / (float)W; rc.misc[1] = 1.0f / (float)H; rc.misc[2] = (float)leftW; rc.misc[3] = 0.0f;
+        rc.misc[0] = 1.0f / (float)W; rc.misc[1] = 1.0f / (float)H; rc.misc[2] = (float)outRightX; rc.misc[3] = 0.0f;
         cpuTicks += QpcNow100ns() - c0;
     }
 
@@ -1127,13 +1158,13 @@ void Recorder::Impl::Process(const Item& it) {
         encCtx->CSSetShader(nullptr, nullptr, 0);
         view = linView.Get();
         rpSrc = rpLinSrv.Get();
-    } else if (smooth) {
+    } else if (stage) {
         rpSrc = rpRingSrv[it.slot].Get();
     } else {
         view = inViews[it.slot].Get();
         if (!localCopies.empty()) encCtx->CopyResource(localCopies[it.slot].Get(), ring.tex[it.slot].Get());
     }
-    if (smooth) {
+    if (stage) {
         const int64_t c0 = QpcNow100ns();
         Reproject(rpSrc, rc);   // after the pre-pass (linear formats), so the colour path is unchanged
         view = rpView.Get();
@@ -1147,7 +1178,7 @@ void Recorder::Impl::Process(const Item& it) {
     encCtx4->Signal(ring.free.Get(), freeCounter);
     encCtx->Flush();
     if (haveLock) devMgr->UnlockDevice(devHandle, FALSE);
-    if (smooth) {
+    if (stage) {
         const double ms = cpuTicks / 1e4;
         cpuSum += ms;
         if (ms > cpuMax) cpuMax = ms;

@@ -32,7 +32,7 @@ struct Config {
     GammaMode    gamma = GammaMode::Auto;
     bool         requireTray = true;     // require_tray: layer stays dormant unless EyeCaptureTray.exe is running
     bool         swapEyes = false;       // swap_eyes: put the right eye in the left half (for players that flip SBS)
-    HeadSmoothingSettings head;          // head_smoothing, head_follow_deg, roll_lock, output_fov_scale, edge_guard
+    HeadSmoothingSettings head;          // head_smoothing, head_follow_deg, roll_lock, output_fov_scale, edge_guard, symmetric_fov
     LogLevel     logLevel = LogLevel::Info;
     std::wstring loadedFrom;             // path of the ini that was read ("" = defaults only)
 };
