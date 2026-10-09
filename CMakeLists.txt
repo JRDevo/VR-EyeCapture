@@ -4,6 +4,9 @@ project(openxr_eye_capture VERSION 0.1.0 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+# /EHa: a hardware fault inside the capture path unwinds C++ objects (locks) and is caught in xrEndFrame, which then
+# disables capture for the session instead of taking the game down.
+string(REPLACE "/EHsc" "/EHa" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
 
 # --- OpenXR SDK --- headers for the layer, plus the loader (openxr_loader.dll) for the tests only.
 # The layer itself never links the loader: the loader loads the layer. Fetched at configure time

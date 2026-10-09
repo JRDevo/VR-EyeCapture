@@ -5,7 +5,7 @@
         "library_path": "./eye_capture.dll",
         "api_version": "1.0",
         "implementation_version": "1",
-        "description": "Records both eye images of any D3D11 OpenXR app into a side-by-side 3D MP4 (hotkey toggled).",
+        "description": "Stereo recorder for any OpenXR game: both eye images to a side-by-side 3D MP4 (hotkey or tray toggled).",
         "disable_environment": "DISABLE_@EYE_LAYER_NAME@"
     }
 }

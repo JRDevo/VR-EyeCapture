@@ -14,6 +14,7 @@ param(
     [int]$EyeH = 1080,
     [double]$Fps = 90,
     [double]$Seconds = 5,
+    [double]$DurationTolerance = 0.35,
     [string]$Codec = 'hevc',
     [ValidateSet('srgb', 'unorm')][string]$Format = 'srgb',
     [switch]$ExpectAudio,
@@ -51,7 +52,7 @@ if ($v) {
     $p = $v.avg_frame_rate.Split('/'); $rate = [double]$p[0] / [double]$p[1]
     Check ([math]::Abs($rate - $Fps) -le 2) ("avg frame rate {0:N2} (want ~{1})" -f $rate, $Fps)
     $dur = [double]$v.duration
-    Check ([math]::Abs($dur - $Seconds) -le 0.35) ("video duration {0:N2} s (want ~{1})" -f $dur, $Seconds)
+    Check ([math]::Abs($dur - $Seconds) -le $DurationTolerance) ("video duration {0:N2} s (want ~{1})" -f $dur, $Seconds)
     $sd = $v.side_data_list | Where-Object { $_.side_data_type -eq 'Stereo 3D' }
     Check ($sd -ne $null -and $sd.type -eq 'side by side') "st3d parsed by ffprobe: $($sd.side_data_type) / $($sd.type)"
     Check ($v.color_space -eq 'bt709' -and $v.color_range -eq 'tv') "colour tags $($v.color_space) / $($v.color_range)"
@@ -66,7 +67,7 @@ Check ($i -gt 0 -and $j -gt 0 -and $i -gt $j -and $bytes[$i + 8] -eq 2) "st3d bo
 if ($ExpectAudio) {
     Check ($a -ne $null -and $a.codec_name -eq 'aac') "audio stream $($a.codec_name) $($a.sample_rate) Hz $($a.channels) ch"
     if ($a) {
-        Check ([math]::Abs([double]$a.duration - $Seconds) -le 0.5) ("audio duration {0:N2} s" -f [double]$a.duration)
+        Check ([math]::Abs([double]$a.duration - $Seconds) -le $DurationTolerance + 0.15) ("audio duration {0:N2} s" -f [double]$a.duration)
         if ($ExpectSound) {
             # ffmpeg prints to stderr; PS 5.1 turns native stderr into errors under 'Stop', so go through cmd.
             $vd = cmd /c "`"$ffmpeg`" -hide_banner -i `"$File`" -map 0:a -af volumedetect -f null - 2>&1" | Out-String
