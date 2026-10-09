@@ -34,7 +34,7 @@ if (-not $CurrentUser) {
         if ($p.ExitCode -ne 0) { Write-Host "elevated install failed (exit $($p.ExitCode))" -ForegroundColor Red; exit $p.ExitCode }
         # The elevated process may run as a different account, so its HKCU is not ours: remove OUR per-user duplicate
         # here, or the official loader loads the layer twice (double negotiate -> crash in games that use that loader).
-        $mine = 'HKCU:\SOFTWARE\Khronos\OpenXR\ApiLayers\Implicit'
+        $mine = 'HKCU:\SOFTWARE\Khronos\OpenXR\1\ApiLayers\Implicit'
         if (Test-Path $mine) {
             foreach ($n in ((Get-Item $mine).GetValueNames() | Where-Object { [System.IO.Path]::GetFileName($_) -ieq $jsonName })) {
                 Remove-ItemProperty -Path $mine -Name $n -ErrorAction SilentlyContinue
