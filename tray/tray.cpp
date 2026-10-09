@@ -11,6 +11,8 @@
 #include <windows.h>
 #include <shellapi.h>
 #include <cmath>
+#include <map>
+#include <set>
 #include <string>
 #include "config.h"
 #include "postprocess.h"
@@ -36,6 +38,14 @@ std::wstring   g_exeDir;
 pp::Processor  g_pp;
 bool           g_baselineDone = false;   // the first status read only sets the baseline (no job for older recordings)
 std::wstring   g_lastSaved;              // last "saved" file seen (dedupe)
+// Fallback scan of the captures folder (see ScanCaptures): covers a "saved" message that never arrived (game quit /
+// crashed / was killed right after the recording).
+FILETIME       g_trayStart{};                      // only MP4s newer than this are considered
+std::set<std::wstring> g_queuedPaths;              // normalised full paths queued in this tray session (both paths dedupe here)
+struct Pending { ULONGLONG size = 0; ULONGLONG stableSince = 0; std::wstring path; };
+std::map<std::wstring, Pending> g_pending;         // scan candidates waiting for their size to settle
+bool           g_wasLive = false;
+ULONGLONG      g_lastScan = 0;
 
 HICON MakeDotIcon(COLORREF c) {
     const int s = 32;
@@ -82,7 +92,18 @@ std::wstring ExeDir() {
     return s.substr(0, s.find_last_of(L"\\/"));
 }
 
+std::wstring NormPath(const std::wstring& p) {
+    wchar_t full[MAX_PATH * 2];
+    DWORD n = GetFullPathNameW(p.c_str(), (DWORD)(sizeof(full) / sizeof(full[0])), full, nullptr);
+    std::wstring r = (n > 0 && n < sizeof(full) / sizeof(full[0])) ? std::wstring(full, n) : p;
+    CharLowerBuffW(&r[0], (DWORD)r.size());
+    return r;
+}
+
+bool Exists(const std::wstring& p) { return GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES; }
+
 // Queue a finished recording for post-processing (MP4 only; a no-op when both post_mkv and post_flat are 0).
+// Non-forced requests are deduplicated by full path for the whole tray session (status message vs fallback scan).
 void QueueRecording(const std::wstring& mp4, bool force) {
     Config cfg;
     LoadConfig(g_exeDir, cfg);
@@ -90,8 +111,73 @@ void QueueRecording(const std::wstring& mp4, bool force) {
         LOGI("tray: recording %s saved; post_mkv and post_flat are both 0 -- not converting", elog::Narrow(mp4).c_str());
         return;
     }
+    const std::wstring key = NormPath(mp4);
+    if (!force && g_queuedPaths.count(key)) {
+        LOGI("tray: %s was already queued -- skipping the duplicate", elog::Narrow(mp4).c_str());
+        return;
+    }
+    g_queuedPaths.insert(key);
     if (g_pp.Enqueue(mp4)) LOGI("tray: queued %s for conversion", elog::Narrow(mp4).c_str());
     else LOGI("tray: %s is already queued / running", elog::Narrow(mp4).c_str());
+}
+
+// Fallback for a "saved <file>" message that never reached us (the game quit or crashed right after / during the
+// recording): look for finished *_SBS.mp4 files in the captures folder that this tray session has not handled.
+// Candidates: newer than the tray start, no sibling .mkv (or _FLAT.mp4 when only the flat step is on), not queued
+// before. PollPending() then waits until the file is not open for writing and its size has been stable for 3 s.
+void ScanCaptures() {
+    Config cfg;
+    LoadConfig(g_exeDir, cfg);
+    if (!cfg.postMkv && !cfg.postFlat) return;
+    std::wstring dir = g_st.outputDir[0] ? std::wstring(g_st.outputDir) : cfg.outputDir;
+    if (dir.empty()) dir = g_exeDir + L"\\captures";
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((dir + L"\\*_SBS.mp4").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        const std::wstring n = fd.cFileName;
+        if (n.size() < 8 || _wcsicmp(n.c_str() + n.size() - 8, L"_SBS.mp4") != 0) continue;
+        if (CompareFileTime(&fd.ftLastWriteTime, &g_trayStart) <= 0) continue;
+        const std::wstring path = dir + L"\\" + n;
+        const std::wstring key = NormPath(path);
+        if (g_queuedPaths.count(key) || g_pending.count(key)) continue;
+        const std::wstring stem = path.substr(0, path.size() - 4);
+        if (Exists(stem + L".mkv")) continue;
+        if (!cfg.postMkv && Exists(stem + L"_FLAT.mp4")) continue;
+        Pending p;
+        p.path = path;
+        p.size = ((ULONGLONG)fd.nFileSizeHigh << 32) | fd.nFileSizeLow;
+        p.stableSince = GetTickCount64();
+        g_pending[key] = p;
+        LOGI("tray: fallback scan found %s (waiting for it to settle)", elog::Narrow(path).c_str());
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+}
+
+void PollPending() {
+    if (g_pending.empty()) return;
+    const ULONGLONG now = GetTickCount64();
+    for (auto it = g_pending.begin(); it != g_pending.end();) {
+        Pending& p = it->second;
+        WIN32_FILE_ATTRIBUTE_DATA a{};
+        if (g_queuedPaths.count(it->first) || !GetFileAttributesExW(p.path.c_str(), GetFileExInfoStandard, &a) ||
+            Exists(p.path.substr(0, p.path.size() - 4) + L".mkv")) {
+            it = g_pending.erase(it);   // handled by the status path / converted / deleted meanwhile
+            continue;
+        }
+        const ULONGLONG size = ((ULONGLONG)a.nFileSizeHigh << 32) | a.nFileSizeLow;
+        if (size != p.size) { p.size = size; p.stableSince = now; ++it; continue; }
+        if (now - p.stableSince < 3000) { ++it; continue; }
+        // open for writing anywhere? (a read open that does not share write fails while a writer holds the file)
+        HANDLE f = CreateFileW(p.path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (f == INVALID_HANDLE_VALUE) { p.stableSince = now; ++it; continue; }
+        CloseHandle(f);
+        LOGI("tray: fallback scan queued %s", elog::Narrow(p.path).c_str());
+        const std::wstring path = p.path;
+        it = g_pending.erase(it);
+        QueueRecording(path, false);
+    }
 }
 
 void Refresh() {
@@ -112,6 +198,19 @@ void Refresh() {
             g_lastSaved = g_st.file;
             QueueRecording(g_lastSaved, false);
         }
+    }
+
+    // fallback scan: when the game just went away, and every 10 s while no recording is running
+    {
+        const ULONGLONG now = GetTickCount64();
+        const bool recActive = g_live && (state == ECS_RECORDING || state == ECS_STARTING || state == ECS_STOPPING);
+        const bool wentAway = g_wasLive && !g_live;
+        if (wentAway || (!recActive && now - g_lastScan >= 10000)) {
+            g_lastScan = now;
+            ScanCaptures();
+        }
+        g_wasLive = g_live;
+        PollPending();
     }
 
     const pp::State job = g_pp.GetState();
@@ -347,6 +446,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     HANDLE alive = testMode ? nullptr : CreateMutexW(&sa, FALSE, EYECAP_TRAY_ALIVE_NAME);
     g_inst = inst;
     g_exeDir = ExeDir();
+    GetSystemTimeAsFileTime(&g_trayStart);
     elog::Init(g_exeDir + L"\\logs\\tray.log", false);
     LOGI("tray: started%s (exe folder %s)", testMode ? " [TEST MODE, private status block]" : "", elog::Narrow(g_exeDir).c_str());
     g_shm = testMode ? EyeCapOpenShared(&g_map, testShm) : EyeCapOpenShared(&g_map);

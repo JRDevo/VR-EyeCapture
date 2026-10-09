@@ -82,6 +82,11 @@ if (EYE_BUILD_TESTS)
     target_compile_definitions(status_sim PRIVATE UNICODE _UNICODE NOMINMAX)
     target_include_directories(status_sim PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
+    # Control thread + ControlPublishFinal on a private status block (no GPU / game): the "saved <file>" shutdown race.
+    add_executable(control_final_test tests/control_final_test.cpp src/control.cpp)
+    target_compile_options(control_final_test PRIVATE ${EYE_WARN_FLAGS})
+    target_link_libraries(control_final_test PRIVATE eye_capture_core)
+
     # Head-smoothing filter unit test (CPU only).
     add_executable(head_smoothing_test tests/head_smoothing_test.cpp)
     target_compile_options(head_smoothing_test PRIVATE ${EYE_WARN_FLAGS})

@@ -2,6 +2,7 @@
 #include "control.h"
 #include <windows.h>
 #include <atomic>
+#include <mutex>
 #include "log.h"
 #include "shared_status.h"
 
@@ -10,7 +11,16 @@ std::atomic<bool> s_stop{false};
 HANDLE            s_thread = nullptr;
 Config            s_cfg;
 std::wstring      s_logPath, s_configPath;
+// Test-only: XR_EYE_CAPTURE_TEST_SHM=<name> puts the status block on a private name (event = <name>-Command) so
+// tests/control_final_test.exe never touches a real game's / the real tray's block.
+std::wstring      s_shmName = EYECAP_SHM_NAME, s_eventName = EYECAP_EVENT_NAME;
 ControlHooks      s_hooks;
+// Guards the shared status block between the control thread and ControlPublishFinal (called from the game's
+// xrDestroySession thread). Lock order: s_pubLock -> g_lock (snapshot()); nobody calls into control holding g_lock.
+std::mutex        s_pubLock;
+EyeCapShared*     s_shm = nullptr;       // valid while the control thread runs (set / cleared under s_pubLock)
+bool              s_owner = false;
+ULONGLONG         s_lastPublish = 0;
 
 void Cue(int kind) {
     switch (kind) {
@@ -38,19 +48,50 @@ uint32_t MapState(const CaptureSnapshot& s) {
     }
 }
 
+// Writes the whole status block from a snapshot. Caller holds s_pubLock and owns the block.
+void PublishLocked(EyeCapShared* shm, const CaptureSnapshot& snap, ULONGLONG now) {
+    const uint32_t newState = MapState(snap);
+    EyeCapBeginWrite(shm);
+    if (newState == ECS_RECORDING && shm->state != ECS_RECORDING) shm->recStartTick = now;
+    if (newState != ECS_RECORDING && newState != ECS_STOPPING) shm->recStartTick = 0;
+    shm->state = newState;
+    shm->width = snap.rec.width;
+    shm->height = snap.rec.height;
+    shm->fps = snap.rec.fps;
+    shm->framesWritten = snap.rec.framesWritten;
+    shm->framesDropped = snap.rec.framesDropped;
+    shm->heartbeatTick = now;
+    EyeCapCopy(shm->game, 64, snap.game.c_str());
+    EyeCapCopy(shm->api, 16, snap.api.c_str());
+    EyeCapCopy(shm->runtime, 64, snap.runtime.c_str());
+    EyeCapCopy(shm->hotkey, 32, s_cfg.hotkey.text.c_str());
+    EyeCapCopy(shm->file, 260, snap.rec.file.c_str());
+    EyeCapCopy(shm->outputDir, 260, snap.outputDir.c_str());
+    EyeCapCopy(shm->logPath, 260, s_logPath.c_str());
+    EyeCapCopy(shm->configPath, 260, s_configPath.c_str());
+    EyeCapCopy(shm->message, 160, elog::Widen(snap.rec.message).c_str());
+    EyeCapEndWrite(shm);
+}
+
 DWORD WINAPI ThreadProc(LPVOID param) {
     HMODULE self = (HMODULE)param;   // pinned by ControlStart; released by FreeLibraryAndExitThread
     const DWORD pid = GetCurrentProcessId();
     HANDLE mapping = nullptr;
-    EyeCapShared* shm = EyeCapOpenShared(&mapping);
-    HANDLE evt = CreateEventW(nullptr, FALSE, FALSE, EYECAP_EVENT_NAME);
+    EyeCapShared* shm = EyeCapOpenShared(&mapping, s_shmName.c_str());
+    HANDLE evt = CreateEventW(nullptr, FALSE, FALSE, s_eventName.c_str());
     if (!shm) LOGW("control: shared memory unavailable -- tray app control disabled (hotkey still works)");
+    {
+        std::lock_guard<std::mutex> pl(s_pubLock);
+        s_shm = shm;
+        s_owner = false;
+        s_lastPublish = 0;
+    }
     LONG lastSeq = shm ? shm->cmdSeq : 0;
     bool prevDown = false;
     bool pendingStart = false;
-    ULONGLONG pendingSince = 0, lastPublish = 0;
+    ULONGLONG pendingSince = 0;
     RecState prevState = RecState::Idle;
-    bool owner = false;
+    RecState prevPubState = RecState::Idle;
 
     while (!s_stop.load()) {
         if (evt) WaitForSingleObject(evt, 20); else Sleep(20);
@@ -60,26 +101,27 @@ DWORD WINAPI ThreadProc(LPVOID param) {
 
         // ownership of the shared status block (the newest capture-capable game wins a dead / stale owner)
         if (shm) {
+            std::lock_guard<std::mutex> pl(s_pubLock);
             if (snap.capable) {
                 const DWORD cur = shm->ownerPid;
                 if (cur != pid && (cur == 0 || !EyeCapProcessAlive(cur) || now - shm->heartbeatTick > 3000)) {
                     shm->ownerPid = pid;
                     LOGI("control: this process now owns the tray status (pid %lu)", (unsigned long)pid);
                 }
-                owner = shm->ownerPid == pid;
-            } else if (owner || shm->ownerPid == pid) {
+                s_owner = shm->ownerPid == pid;
+            } else if (s_owner || shm->ownerPid == pid) {
+                // only ownerPid / state change: file + message ("saved <file>") stay so the tray can still read them
                 EyeCapBeginWrite(shm);
                 shm->ownerPid = 0;
                 shm->state = ECS_NONE;
                 EyeCapEndWrite(shm);
-                owner = false;
+                s_owner = false;
             }
         }
-
         // requests: hotkey (owner only, or any capable process without shared memory) + tray commands
         int request = 0;   // 1 toggle, 2 start, 3 stop
         const bool down = HotkeyDown(s_cfg.hotkey);
-        if (down && !prevDown && snap.capable && (owner || !shm)) {
+        if (down && !prevDown && snap.capable && (s_owner || !shm)) {
             request = 1;
             LOGI("control: hotkey %s pressed", elog::Narrow(s_cfg.hotkey.text).c_str());
         }
@@ -137,38 +179,30 @@ DWORD WINAPI ThreadProc(LPVOID param) {
             prevState = snap.rec.state;
         }
 
-        // publish for the tray
-        if (shm && owner && now - lastPublish >= 250) {
-            lastPublish = now;
-            const uint32_t newState = MapState(snap);
-            EyeCapBeginWrite(shm);
-            if (newState == ECS_RECORDING && shm->state != ECS_RECORDING) shm->recStartTick = now;
-            if (newState != ECS_RECORDING && newState != ECS_STOPPING) shm->recStartTick = 0;
-            shm->state = newState;
-            shm->width = snap.rec.width;
-            shm->height = snap.rec.height;
-            shm->fps = snap.rec.fps;
-            shm->framesWritten = snap.rec.framesWritten;
-            shm->framesDropped = snap.rec.framesDropped;
-            shm->heartbeatTick = now;
-            EyeCapCopy(shm->game, 64, snap.game.c_str());
-            EyeCapCopy(shm->api, 16, snap.api.c_str());
-            EyeCapCopy(shm->runtime, 64, snap.runtime.c_str());
-            EyeCapCopy(shm->hotkey, 32, s_cfg.hotkey.text.c_str());
-            EyeCapCopy(shm->file, 260, snap.rec.file.c_str());
-            EyeCapCopy(shm->outputDir, 260, snap.outputDir.c_str());
-            EyeCapCopy(shm->logPath, 260, s_logPath.c_str());
-            EyeCapCopy(shm->configPath, 260, s_configPath.c_str());
-            EyeCapCopy(shm->message, 160, elog::Widen(snap.rec.message).c_str());
-            EyeCapEndWrite(shm);
+        // publish for the tray: every 250 ms, and at once when a finalize just completed ("saved <file>")
+        if (prevPubState == RecState::Stopping && snap.rec.state != RecState::Stopping) s_lastPublish = 0;
+        prevPubState = snap.rec.state;
+        if (shm) {
+            std::lock_guard<std::mutex> pl(s_pubLock);
+            if (s_owner && now - s_lastPublish >= 250) {
+                s_lastPublish = now;
+                // re-take the snapshot under the lock so a stale one never overwrites a ControlPublishFinal
+                const CaptureSnapshot cur = s_hooks.snapshot();
+                if (cur.capable) PublishLocked(shm, cur, now);
+            }
         }
     }
     if (shm) {
-        if (shm->ownerPid == pid) {
-            EyeCapBeginWrite(shm);
-            shm->ownerPid = 0;
-            shm->state = ECS_NONE;
-            EyeCapEndWrite(shm);
+        {
+            std::lock_guard<std::mutex> pl(s_pubLock);
+            if (shm->ownerPid == pid) {
+                EyeCapBeginWrite(shm);
+                shm->ownerPid = 0;   // message / file stay intact ("saved <file>" is read after the game is gone)
+                shm->state = ECS_NONE;
+                EyeCapEndWrite(shm);
+            }
+            s_shm = nullptr;
+            s_owner = false;
         }
         UnmapViewOfFile(shm);
     }
@@ -181,6 +215,11 @@ DWORD WINAPI ThreadProc(LPVOID param) {
 
 void ControlStart(const Config& cfg, const std::wstring& logPath, const std::wstring& configPath, ControlHooks hooks) {
     if (s_thread) return;
+    wchar_t testShm[128];
+    if (GetEnvironmentVariableW(L"XR_EYE_CAPTURE_TEST_SHM", testShm, 128) > 0) {
+        s_shmName = testShm;
+        s_eventName = std::wstring(testShm) + L"-Command";
+    }
     s_cfg = cfg;
     s_logPath = logPath;
     s_configPath = configPath;
@@ -195,15 +234,42 @@ void ControlStart(const Config& cfg, const std::wstring& logPath, const std::wst
         return;
     }
     LOGI("control: hotkey %s (exact modifiers), tray IPC %s", elog::Narrow(cfg.hotkey.text).c_str(),
-         elog::Narrow(EYECAP_SHM_NAME).c_str());
+         elog::Narrow(s_shmName).c_str());
 }
 
 void ControlStop() {
     if (!s_thread) return;
     s_stop = true;
-    HANDLE e = OpenEventW(EVENT_MODIFY_STATE, FALSE, EYECAP_EVENT_NAME);
+    HANDLE e = OpenEventW(EVENT_MODIFY_STATE, FALSE, s_eventName.c_str());
     if (e) { SetEvent(e); CloseHandle(e); }
     WaitForSingleObject(s_thread, 3000);
     CloseHandle(s_thread);
     s_thread = nullptr;
+}
+
+void ControlPublishFinal(const RecorderStatus& rec, const std::wstring& outputDir) {
+    std::lock_guard<std::mutex> pl(s_pubLock);
+    EyeCapShared* shm = s_shm;
+    if (!shm) return;
+    const DWORD pid = GetCurrentProcessId();
+    const DWORD cur = shm->ownerPid;
+    // never write over another live game's status; a block we released (0) or a dead owner's is fine
+    if (cur != 0 && cur != pid && EyeCapProcessAlive(cur)) return;
+    const ULONGLONG now = GetTickCount64();
+    EyeCapBeginWrite(shm);
+    if (cur == pid) {                       // still the owner: live fields too; ownerPid / state are left to the loop
+        shm->state = ECS_READY;
+        shm->recStartTick = 0;
+        shm->heartbeatTick = now;
+    }
+    shm->width = rec.width;
+    shm->height = rec.height;
+    shm->fps = rec.fps;
+    shm->framesWritten = rec.framesWritten;
+    shm->framesDropped = rec.framesDropped;
+    EyeCapCopy(shm->file, 260, rec.file.c_str());
+    if (!outputDir.empty()) EyeCapCopy(shm->outputDir, 260, outputDir.c_str());
+    EyeCapCopy(shm->message, 160, elog::Widen(rec.message).c_str());
+    EyeCapEndWrite(shm);
+    LOGI("control: published final status to the tray: %s", rec.message.c_str());
 }

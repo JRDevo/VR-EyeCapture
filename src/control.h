@@ -25,3 +25,9 @@ struct ControlHooks {
 
 void ControlStart(const Config& cfg, const std::wstring& logPath, const std::wstring& configPath, ControlHooks hooks);
 void ControlStop();   // joins (bounded wait)
+
+// Publishes the result of a finalized recording ("saved <file>" / failure message, file, counters) to the tray's status
+// block immediately and synchronously, from any thread -- the 250 ms publish loop may already be gone (game quit right after
+// the recording ended). Keeps ownership / liveness untouched; ownerPid / state are only changed by the loop and at shutdown,
+// message and file survive that. No-op when the control thread is not running.
+void ControlPublishFinal(const RecorderStatus& rec, const std::wstring& outputDir);

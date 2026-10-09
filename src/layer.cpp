@@ -656,6 +656,16 @@ XrResult XRAPI_CALL Hook_CreateSession(XrInstance instance, const XrSessionCreat
     return r;
 }
 
+// After a session's recorder has finalized (or when it ends with a fresh "saved" result): hand the result to the tray
+// right now. The control thread publishes only every 250 ms and is stopped with the last armed session, so a game that
+// quits right after the recording ended would otherwise never deliver "saved <file>". Called without g_lock.
+void PublishFinalStatus(SessionData& sd, bool finalizedHere) {
+    RecorderStatus rs = sd.rec->Status();
+    if (rs.message.empty()) return;
+    if (!finalizedHere && rs.message.compare(0, 6, "saved ") != 0) return;
+    ControlPublishFinal(rs, g_cfg.outputDir);
+}
+
 XrResult XRAPI_CALL Hook_DestroySession(XrSession session) {
     std::unique_ptr<SessionData> sd;
     PFN_xrDestroySession next = nullptr;
@@ -680,11 +690,14 @@ XrResult XRAPI_CALL Hook_DestroySession(XrSession session) {
     if (sd) {
         if (sd->rec) {
             const RecState st = sd->rec->State();
+            bool finalized = false;
             if (st == RecState::Starting || st == RecState::Recording || st == RecState::Stopping) {
                 LOGI("session %p ending while recording -- finalizing the file", (void*)session);
                 sd->rec->Stop();
                 if (!sd->rec->WaitIdle(30000)) LOGE("finalize did not finish within 30 s");
+                finalized = true;
             }
+            if (sd->armed) PublishFinalStatus(*sd, finalized);
         }
         LOGI("session %p destroyed after %llu frames%s", (void*)session, (unsigned long long)sd->frames,
              sd->armed ? "" : " (dormant)");
@@ -719,7 +732,11 @@ XrResult XRAPI_CALL Hook_DestroyInstance(XrInstance instance) {
     }
     for (auto& sd : orphans) {
         LOGW("instance destroyed with session %p still alive -- finalizing", (void*)sd->handle);
-        if (sd->rec) { sd->rec->Stop(); sd->rec->WaitIdle(30000); }
+        if (sd->rec) {
+            sd->rec->Stop();
+            sd->rec->WaitIdle(30000);
+            if (sd->armed) PublishFinalStatus(*sd, true);
+        }
     }
     orphans.clear();
     if (last) StopControlIfIdle();
