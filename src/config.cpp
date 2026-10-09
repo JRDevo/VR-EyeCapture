@@ -173,6 +173,8 @@ void LoadConfig(const std::wstring& dllDir, Config& c) {
             else ok = false;
         } else if (key == L"require_tray") {
             if (ParseBool(val, b)) c.requireTray = b; else ok = false;
+        } else if (key == L"swap_eyes") {
+            if (ParseBool(val, b)) c.swapEyes = b; else ok = false;
         } else if (key == L"log_level") {
             const std::wstring l = Lower(val);
             if (l == L"error") c.logLevel = LogLevel::Error;

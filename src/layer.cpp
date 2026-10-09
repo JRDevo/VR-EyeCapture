@@ -382,6 +382,7 @@ void CaptureImpl(SessionData* sd, const XrFrameEndInfo* info) {
         }
         e.x = x; e.y = y; e.w = (uint32_t)w; e.h = (uint32_t)h;
     }
+    if (g_cfg.swapEyes) std::swap(eyes[0], eyes[1]);   // swap_eyes = 1: right eye goes into the left half
     LogLayout(sd, info, proj, eyes[0], eyes[1]);
 
     const RecState rs = sd->rec->State();

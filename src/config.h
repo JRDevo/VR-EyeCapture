@@ -30,6 +30,7 @@ struct Config {
     std::wstring audioDevice;            // substring of the render endpoint name; empty = default render device
     GammaMode    gamma = GammaMode::Auto;
     bool         requireTray = true;     // require_tray: layer stays dormant unless EyeCaptureTray.exe is running
+    bool         swapEyes = false;       // swap_eyes: put the right eye in the left half (for players that flip SBS)
     LogLevel     logLevel = LogLevel::Info;
     std::wstring loadedFrom;             // path of the ini that was read ("" = defaults only)
 };

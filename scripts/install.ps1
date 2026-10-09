@@ -1,4 +1,4 @@
-<#
+﻿<#
     install.ps1 -- register the OpenXR-EyeCapture implicit API layer.
 
     Writes  HKLM\SOFTWARE\Khronos\OpenXR\1\ApiLayers\Implicit\<full path of XR_APILAYER_JRDEVO_eye_capture.json> = DWORD 0
@@ -32,6 +32,15 @@ if (-not $CurrentUser) {
         if ($NoCopy) { $a += '-NoCopy' }
         $p = Start-Process powershell -Verb RunAs -ArgumentList $a -Wait -PassThru
         if ($p.ExitCode -ne 0) { Write-Host "elevated install failed (exit $($p.ExitCode))" -ForegroundColor Red; exit $p.ExitCode }
+        # The elevated process may run as a different account, so its HKCU is not ours: remove OUR per-user duplicate
+        # here, or the official loader loads the layer twice (double negotiate -> crash in games that use that loader).
+        $mine = 'HKCU:\SOFTWARE\Khronos\OpenXR\ApiLayers\Implicit'
+        if (Test-Path $mine) {
+            foreach ($n in ((Get-Item $mine).GetValueNames() | Where-Object { [System.IO.Path]::GetFileName($_) -ieq $jsonName })) {
+                Remove-ItemProperty -Path $mine -Name $n -ErrorAction SilentlyContinue
+                Write-Host "removed per-user duplicate registration: $n"
+            }
+        }
         & reg query $regPathCmd
         exit 0
     }
