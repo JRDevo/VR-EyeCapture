@@ -4,7 +4,10 @@
 // XR_EYE_CAPTURE_AUTORECORD (starts at the first frame, stops after N s) into XR_EYE_CAPTURE_OUTPUT_DIR.
 //
 //   layer_e2e [--api d3d11|d3d12] [--layout two|array|wide|msaa] [--eye 1920x1080] [--seconds 6] [--record 4]
-//             [--out-dir dir] [--expect-dormant]
+//             [--out-dir dir] [--expect-dormant] [--jitter]
+// --jitter (D3D11, layout two): the mock runtime reports the head motion of tests/test_motion.h through xrLocateViews
+// and every frame renders a world-locked grid + marker for the located pose / fov and submits that pose / fov, like a
+// game. Prints E2E_T0_NS=<first predictedDisplayTime> (t = 0 of the motion). Default eye size 1408x1440.
 // Prints the path of the produced MP4 ("E2E_OUTPUT=<path>"). Exit code 0 = a new MP4 appeared
 // (--expect-dormant: the layer must NOT record, e.g. no tray running; exit 0 = loop completed and no MP4 appeared).
 #include <windows.h>
@@ -12,11 +15,14 @@
 #include <d3d12.h>
 #include <dxgi1_4.h>
 #include <wrl/client.h>
+#include <d3dcompiler.h>
+#include <cmath>
 #include <cstdio>
 #include <string>
 #include <vector>
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
+#include "test_motion.h"
 #include "test_pattern.h"
 
 using Microsoft::WRL::ComPtr;
@@ -29,6 +35,28 @@ std::wstring ExeDir() {
     return s.substr(0, s.find_last_of(L"\\/"));
 }
 std::wstring Widen(const std::string& s) { return std::wstring(s.begin(), s.end()); }
+
+const char kSceneVs[] =
+    "float4 main(uint id : SV_VertexID) : SV_Position {\n"
+    "    float2 p = float2((id << 1) & 2, id & 2);\n"
+    "    return float4(p * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);\n"
+    "}\n";
+// World-locked scene, rendered for the located view each frame (like a game): background 40, a grid line (90) every
+// 10 degrees of yaw / pitch, and a white (255) disk of 0.6 degree radius at the world direction -Z (straight ahead at
+// t = 0). Values are written through the UNORM RTV, i.e. they are the bytes in the sRGB swapchain.
+const char kScenePs[] =
+    "cbuffer C : register(b0) { float4 m0, m1, m2, tans, vp; };\n"   // world-from-eye rows; tanL,tanR,tanU,tanD; viewport
+    "float4 main(float4 pos : SV_Position) : SV_Target {\n"
+    "    float2 uv = (pos.xy - vp.xy) / vp.zw;\n"
+    "    float3 d = normalize(float3(lerp(tans.x, tans.y, uv.x), lerp(tans.z, tans.w, uv.y), -1.0));\n"
+    "    float3 w = float3(dot(m0.xyz, d), dot(m1.xyz, d), dot(m2.xyz, d));\n"
+    "    if (-w.z > cos(radians(0.6))) return float4(1.0, 1.0, 1.0, 1.0);\n"
+    "    float yaw = degrees(atan2(-w.x, -w.z)), pitch = degrees(asin(clamp(w.y, -1.0, 1.0)));\n"
+    "    float gy = abs(frac(yaw / 10.0 + 0.5) - 0.5) * 10.0, gp = abs(frac(pitch / 10.0 + 0.5) - 0.5) * 10.0;\n"
+    "    float v = min(gy, gp) < 0.12 ? 90.0 : 40.0;\n"
+    "    return float4(v / 255.0, v / 255.0, v / 255.0, 1.0);\n"
+    "}\n";
+struct SceneCb { float m0[4], m1[4], m2[4], tans[4], vp[4]; };
 
 #define CHECK(x) do { XrResult _r = (x); if (XR_FAILED(_r)) { printf("FAILED %s -> %d\n", #x, (int)_r); return 1; } } while (0)
 
@@ -45,14 +73,15 @@ int main(int argc, char** argv) {
     std::string api = "d3d11", layout = "two";
     unsigned eyeW = 1920, eyeH = 1080;
     double seconds = 6, record = 4;
-    bool expectDormant = false;
+    bool expectDormant = false, jitter = false, eyeSet = false;
     std::wstring outDir = ExeDir() + L"\\e2e_out";
     for (int i = 1; i < argc; ++i) {
         std::string k = argv[i];
         auto next = [&]() -> std::string { return i + 1 < argc ? argv[++i] : std::string(); };
         if (k == "--api") api = next();
         else if (k == "--layout") layout = next();
-        else if (k == "--eye") { std::string v = next(); sscanf_s(v.c_str(), "%ux%u", &eyeW, &eyeH); }
+        else if (k == "--eye") { std::string v = next(); sscanf_s(v.c_str(), "%ux%u", &eyeW, &eyeH); eyeSet = true; }
+        else if (k == "--jitter") jitter = true;
         else if (k == "--seconds") seconds = atof(next().c_str());
         else if (k == "--record") record = atof(next().c_str());
         else if (k == "--out-dir") outDir = Widen(next());
@@ -61,13 +90,17 @@ int main(int argc, char** argv) {
     }
     const bool d3d12 = api == "d3d12";
     const bool arr = layout == "array", wide = layout == "wide", msaa = layout == "msaa";
+    if (jitter && (d3d12 || layout != "two")) { printf("--jitter needs --api d3d11 --layout two\n"); return 2; }
+    if (jitter && !eyeSet) { eyeW = 1408; eyeH = 1440; }
+    SetEnvironmentVariableW(L"EYECAP_MOCK_MOTION", jitter ? L"jitter" : nullptr);
     CreateDirectoryW(outDir.c_str(), nullptr);
     SetEnvironmentVariableW(L"XR_RUNTIME_JSON", (ExeDir() + L"\\mock_runtime.json").c_str());
     SetEnvironmentVariableW(L"XR_EYE_CAPTURE_OUTPUT_DIR", outDir.c_str());
     wchar_t rec[32];
     swprintf_s(rec, L"%.2f", record);
     SetEnvironmentVariableW(L"XR_EYE_CAPTURE_AUTORECORD", record > 0 ? rec : nullptr);   // --record 0: no autorecord (hotkey / tray test)
-    printf("layer_e2e: api=%s layout=%s eye=%ux%u seconds=%.1f record=%.1f\n", api.c_str(), layout.c_str(), eyeW, eyeH, seconds, record);
+    printf("layer_e2e: api=%s layout=%s eye=%ux%u seconds=%.1f record=%.1f%s\n", api.c_str(), layout.c_str(), eyeW, eyeH,
+           seconds, record, jitter ? " jitter" : "");
     const ULONGLONG startTime = GetTickCount64();
     FILETIME ftStart;
     GetSystemTimeAsFileTime(&ftStart);
@@ -161,6 +194,27 @@ int main(int argc, char** argv) {
     XrSpace space = XR_NULL_HANDLE;
     CHECK(xrCreateReferenceSpace(session, &rsi, &space));
 
+    // ---- jitter scene renderer (D3D11) ----
+    ComPtr<ID3D11VertexShader> sceneVs;
+    ComPtr<ID3D11PixelShader> scenePs;
+    ComPtr<ID3D11Buffer> sceneCb;
+    if (jitter) {
+        ComPtr<ID3DBlob> vsb, psb, err;
+        if (FAILED(D3DCompile(kSceneVs, sizeof(kSceneVs) - 1, "scene_vs", nullptr, nullptr, "main", "vs_5_0", 0, 0, &vsb, &err)) ||
+            FAILED(D3DCompile(kScenePs, sizeof(kScenePs) - 1, "scene_ps", nullptr, nullptr, "main", "ps_5_0", 0, 0, &psb, &err))) {
+            printf("scene shader compile failed: %s\n", err ? (const char*)err->GetBufferPointer() : "");
+            return 1;
+        }
+        dev11->CreateVertexShader(vsb->GetBufferPointer(), vsb->GetBufferSize(), nullptr, &sceneVs);
+        dev11->CreatePixelShader(psb->GetBufferPointer(), psb->GetBufferSize(), nullptr, &scenePs);
+        D3D11_BUFFER_DESC bd{};
+        bd.ByteWidth = sizeof(SceneCb);
+        bd.Usage = D3D11_USAGE_DEFAULT;
+        bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        dev11->CreateBuffer(&bd, nullptr, &sceneCb);
+        if (!sceneVs || !scenePs || !sceneCb) { printf("scene renderer setup failed\n"); return 1; }
+    }
+
     // ---- swapchains ----
     std::vector<Sc> scs((arr || wide) ? 1 : 2);
     const UINT inc = d3d12 ? dev12->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV) : 0;
@@ -219,6 +273,17 @@ int main(int argc, char** argv) {
         XrFrameState fs{XR_TYPE_FRAME_STATE};
         XrFrameWaitInfo fwi{XR_TYPE_FRAME_WAIT_INFO};
         CHECK(xrWaitFrame(session, &fwi, &fs));
+        if (f == 0) printf("E2E_T0_NS=%lld\n", (long long)fs.predictedDisplayTime);
+        XrView located[2] = {{XR_TYPE_VIEW}, {XR_TYPE_VIEW}};
+        if (jitter) {
+            XrViewLocateInfo li{XR_TYPE_VIEW_LOCATE_INFO};
+            li.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+            li.displayTime = fs.predictedDisplayTime;
+            li.space = space;
+            XrViewState vs{XR_TYPE_VIEW_STATE};
+            uint32_t nv = 0;
+            CHECK(xrLocateViews(session, &li, &vs, 2, &nv, located));
+        }
         XrFrameBeginInfo fbi{XR_TYPE_FRAME_BEGIN_INFO};
         CHECK(xrBeginFrame(session, &fbi));
         uint32_t idx[2] = {0, 0};
@@ -241,14 +306,38 @@ int main(int argc, char** argv) {
             Sc& sc = scs[s];
             const uint32_t slice = arr ? (uint32_t)e : 0;
             const int ox = wide ? e * (int)eyeW : 0;
-            BuildPattern(pat, e, f, ox, 0, (int)eyeW, (int)eyeH);
             const size_t rv = (size_t)idx[s] * sc.arr + slice;
-            for (auto& p : pat) {
-                if (!d3d12) ctx11_1->ClearView(sc.rtv11[rv].Get(), p.c, &p.r, 1);
-                else list->ClearRenderTargetView(sc.rtv12[rv], p.c, 1, &p.r);
+            if (jitter) {
+                const XrQuaternionf& o = located[e].pose.orientation;
+                float m[9];
+                test_motion::Matrix({o.x, o.y, o.z, o.w}, m);
+                const XrFovf& fv = located[e].fov;
+                SceneCb cb = {{m[0], m[1], m[2], 0}, {m[3], m[4], m[5], 0}, {m[6], m[7], m[8], 0},
+                              {std::tan(fv.angleLeft), std::tan(fv.angleRight), std::tan(fv.angleUp), std::tan(fv.angleDown)},
+                              {(float)ox, 0.0f, (float)eyeW, (float)eyeH}};
+                ctx11->UpdateSubresource(sceneCb.Get(), 0, nullptr, &cb, 0, 0);
+                ID3D11RenderTargetView* rt = sc.rtv11[rv].Get();
+                ID3D11Buffer* cbp = sceneCb.Get();
+                const D3D11_VIEWPORT vpt{(float)ox, 0.0f, (float)eyeW, (float)eyeH, 0.0f, 1.0f};
+                ctx11->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+                ctx11->VSSetShader(sceneVs.Get(), nullptr, 0);
+                ctx11->PSSetShader(scenePs.Get(), nullptr, 0);
+                ctx11->PSSetConstantBuffers(0, 1, &cbp);
+                ctx11->RSSetViewports(1, &vpt);
+                ctx11->OMSetRenderTargets(1, &rt, nullptr);
+                ctx11->Draw(3, 0);
+                ctx11->OMSetRenderTargets(0, nullptr, nullptr);
+                views[e].pose = located[e].pose;
+                views[e].fov = located[e].fov;
+            } else {
+                BuildPattern(pat, e, f, ox, 0, (int)eyeW, (int)eyeH);
+                for (auto& p : pat) {
+                    if (!d3d12) ctx11_1->ClearView(sc.rtv11[rv].Get(), p.c, &p.r, 1);
+                    else list->ClearRenderTargetView(sc.rtv12[rv], p.c, 1, &p.r);
+                }
+                views[e].pose.orientation.w = 1;
+                views[e].fov = {-0.8f, 0.8f, 0.8f, -0.8f};
             }
-            views[e].pose.orientation.w = 1;
-            views[e].fov = {-0.8f, 0.8f, 0.8f, -0.8f};
             views[e].subImage.swapchain = sc.h;
             views[e].subImage.imageRect.offset = {ox, 0};
             views[e].subImage.imageRect.extent = {(int32_t)eyeW, (int32_t)eyeH};

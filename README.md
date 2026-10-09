@@ -90,8 +90,40 @@ starts its OpenXR instance.
 | `gamma` | `auto` | `auto` from the swapchain format; `srgb` / `linear` only if colours look washed out or too dark. |
 | `audio_enabled` | `1` | Record the sound (what plays on the playback device). |
 | `audio_device` | *(empty)* = default playback device | Part of the device name, e.g. `Virtual Desktop Audio`. |
+| `head_smoothing` | `0` | Head-motion smoothing strength, `0` = off. See "Head-motion smoothing". |
+| `head_follow_deg` | `12` | Smoothing: how far (degrees) the view may lag a deliberate turn before it catches up. |
+| `roll_lock` | `0` | Smoothing: `1` = keep the horizon level. |
+| `output_fov_scale` | `0.9` | Smoothing: fraction of the game's field of view in the recording (room for the correction). |
+| `edge_guard` | `1` | Smoothing: `1` = never show black edges (the correction is limited to what the game rendered). |
 | `require_tray` | `1` | `1` = the layer is only active while `EyeCaptureTray.exe` is running (checked when the game creates its VR session). `0` = always active. |
 | `log_level` | `info` | `error`, `warn`, `info`, `debug`. |
+
+## Head-motion smoothing
+
+A recording shows exactly where your head pointed, so every small shake and nod is in the video. Viewers who watch it
+on a flat screen or in their own headset do not move with you, and the shaking is tiring to watch. With
+`head_smoothing` set, the recorder re-projects each eye image onto a smoothed head orientation, the way a headset's
+timewarp re-projects a frame: small fast movements are removed, slow and deliberate ones are kept. Only the
+recording is affected; the game and your headset view are untouched, and nothing extra runs on the game's thread (the
+work is done on the encoder's own GPU device, after the frame is copied).
+
+- **`head_smoothing`** (0 = off, the default): strength. **0.5 to 0.7 is recommended**; 0.6 removes roughly 80 to 85 % of
+  a 3 to 5 Hz shake. Higher values make the camera feel heavier.
+- **`head_follow_deg`** (default 12): when you deliberately look somewhere else (a mirror, a junction), the smoothed
+  view follows as soon as it is this many degrees behind and then catches up quickly, so it does not drift after you.
+- **`roll_lock`** (default 0): `1` keeps the horizon level by removing head tilt from the recording.
+- **`output_fov_scale`** (default 0.9): the recording shows 90 % of the game's field of view (a slight zoom, the
+  outer border is trimmed). That border is the room the correction needs: rotating the view would otherwise show the
+  black area outside what the game rendered. Lower it (e.g. 0.85) for stronger smoothing with fewer limits; 1.0 trims
+  nothing but leaves no room. Only used while smoothing is on.
+- **`edge_guard`** (default 1): never show black edges. When a correction would reach past the rendered image (big
+  shakes, the start of a fast turn, `roll_lock` with a tilted head) the view follows your head just enough to stay
+  inside it. `0` applies the full correction and lets black edges appear.
+
+Only rotation is smoothed; small position shakes are not visible at normal viewing distances and cannot be
+re-projected without depth. If a game submits its views in a head-locked space, there is nothing to smooth (the log
+line `head smoothing summary` then shows a correction of 0). The summary line per recording shows the mean / max
+correction, how often the edge guard limited it, frames with black edges, and the GPU cost.
 
 ## Log and troubleshooting
 
@@ -113,6 +145,9 @@ Per frame the game's render thread does two GPU copies (plus an MSAA resolve whe
 a fence signal and nothing else — measured 0.07 ms (D3D12) / 0.18 ms (D3D11) of CPU time per frame on an RTX 5090.
 Encoding runs on its own threads and its own D3D11 device on the same GPU. Extra VRAM while recording: about
 3 x the side-by-side frame in RGBA plus 4 x in NV12 (≈ 400 MB at 6144 x 3264). Nothing is done while not recording.
+Head-motion smoothing adds one more RGBA frame of VRAM and one full-screen pass on the encoder's device: measured
+0.2 ms GPU per frame at 12240 x 6496 (ATS on VDXR, encoded at 8192 x 4346) on an RTX 5090, and nothing on the game's
+thread or GPU queue.
 
 ## With other mods
 

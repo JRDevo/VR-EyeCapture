@@ -9,6 +9,8 @@
 #include <mfreadwrite.h>
 #include <mftransform.h>
 #include <algorithm>
+#include <cmath>
+#include <cstring>
 #include <vector>
 #include "audio_capture.h"
 #include "log.h"
@@ -33,6 +35,42 @@ const char kLinearToSrgbCs[] =
     "void main(uint3 id : SV_DispatchThreadID) {\n"
     "    dst[id.xy] = float4(Enc(src[id.xy].rgb), 1.0);\n"
     "}\n";
+
+// Head-motion smoothing: re-project each eye of the SBS frame onto the smoothed head orientation (rotational
+// timewarp). One full-screen triangle over the whole SBS texture; the pixel shader picks the eye by x. For an output
+// pixel: ray in the smoothed (output) camera from the scaled fov -> C (actual-eye-from-smoothed rotation) -> project
+// with the eye's actual fov -> sample that eye's half of the source bilinearly; outside it = black. Source SRV and
+// target RTV are the same typed UNORM / float format, so no gamma conversion happens. See head_smoothing.h.
+const char kReprojVs[] =
+    "float4 main(uint id : SV_VertexID) : SV_Position {\n"
+    "    float2 p = float2((id << 1) & 2, id & 2);\n"
+    "    return float4(p * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);\n"
+    "}\n";
+const char kReprojPs[] =
+    "struct Eye { float4 r0, r1, r2, outTan, srcTan, rect; };\n"   // rect: x0, y0, w, h in pixels
+    "cbuffer P : register(b0) { Eye eye[2]; float4 misc; };\n"     // misc: 1/W, 1/H, right eye x0, 0
+    "Texture2D<float4> src : register(t0);\n"
+    "SamplerState smp : register(s0);\n"
+    "float4 main(float4 pos : SV_Position) : SV_Target {\n"
+    "    const float4 black = float4(0.0, 0.0, 0.0, 1.0);\n"
+    "    Eye E = eye[pos.x >= misc.z ? 1 : 0];\n"
+    "    float2 uv = (pos.xy - E.rect.xy) / E.rect.zw;\n"
+    "    if (uv.y > 1.0) return black;\n"
+    "    float3 d = float3(lerp(E.outTan.x, E.outTan.y, uv.x), lerp(E.outTan.z, E.outTan.w, uv.y), -1.0);\n"
+    "    float3 a = float3(dot(E.r0.xyz, d), dot(E.r1.xyz, d), dot(E.r2.xyz, d));\n"
+    "    if (a.z > -1e-6) return black;\n"
+    "    float2 t = a.xy / -a.z;\n"
+    "    float2 s = float2((t.x - E.srcTan.x) / (E.srcTan.y - E.srcTan.x), (E.srcTan.z - t.y) / (E.srcTan.z - E.srcTan.w));\n"
+    "    if (any(s < 0.0) || any(s > 1.0)) return black;\n"
+    "    float2 p = clamp(E.rect.xy + s * E.rect.zw, E.rect.xy + 0.5, E.rect.xy + E.rect.zw - 0.5);\n"
+    "    return float4(src.SampleLevel(smp, p * misc.xy, 0).rgb, 1.0);\n"
+    "}\n";
+
+struct RpEye { float r0[4], r1[4], r2[4], outTan[4], srcTan[4], rect[4]; };
+struct RpConstants { RpEye eye[2]; float misc[4]; };
+static_assert(sizeof(RpConstants) % 16 == 0, "constant buffer size");
+
+const UINT kTimingQueries = 6;
 
 // ---- NV12 pool: tracked samples return their surface here when Media Foundation releases them ----
 struct Nv12Pool {
@@ -167,7 +205,8 @@ struct Recorder::Impl {
     bool ringCreated = false;
 
     // CPU side of the ring
-    struct Item { UINT slot; uint64_t ready; int64_t ts; };
+    struct ItemEye { bool valid; float q[4]; float fov[4]; UINT x0, w, h; };
+    struct Item { UINT slot; uint64_t ready; int64_t ts; int64_t disp; ItemEye eye[2]; };
     std::mutex qm;
     std::condition_variable qcv;
     std::deque<Item> queue;
@@ -190,6 +229,24 @@ struct Recorder::Impl {
     ComPtr<ID3D11Texture2D> linTex;
     ComPtr<ID3D11UnorderedAccessView> linUav;
     ComPtr<ID3D11VideoProcessorInputView> linView;
+    // head-motion smoothing (only when s.head.Enabled())
+    std::atomic<bool> smooth{false};   // written by Start / worker init, read by SubmitFrame
+    HeadSmoother smoother;
+    ComPtr<ID3D11VertexShader> rpVs;
+    ComPtr<ID3D11PixelShader> rpPs;
+    ComPtr<ID3D11Buffer> rpCb;
+    ComPtr<ID3D11SamplerState> rpSmp;
+    ComPtr<ID3D11Texture2D> rpTex;
+    ComPtr<ID3D11RenderTargetView> rpRtv;
+    ComPtr<ID3D11VideoProcessorInputView> rpView;
+    std::vector<ComPtr<ID3D11ShaderResourceView>> rpRingSrv;   // sRGB path: the ring slots
+    ComPtr<ID3D11ShaderResourceView> rpLinSrv;                 // linear path: the pre-pass output
+    struct TsQuery { ComPtr<ID3D11Query> disjoint, begin, end; bool pending = false; };
+    std::vector<TsQuery> rpQ;
+    UINT rpQi = 0;
+    // smoothing stats (worker thread only)
+    uint64_t smFrames = 0, smGuarded = 0, smUncovered = 0, smCatch = 0, smNoPose = 0, smResets = 0, gpuN = 0;
+    double smCorrSum = 0, smCorrMax = 0, gpuSum = 0, gpuMax = 0, cpuSum = 0, cpuMax = 0;
     HANDLE devHandle = nullptr;   // IMFDXGIDeviceManager handle, to lock the device around our GPU work
     std::vector<ComPtr<ID3D11Texture2D>> nv12;
     std::vector<ComPtr<ID3D11VideoProcessorOutputView>> outViews;
@@ -208,6 +265,8 @@ struct Recorder::Impl {
 
     // timing (t0 = first video frame on the QPC clock)
     std::atomic<int64_t> t0{INT64_MIN};
+    std::atomic<int64_t> t0Disp{0};  // displayTime (ns) of the frame at t = 0
+    bool loggedFirst = false;        // worker
     int64_t lastTs = INT64_MIN;      // game thread
     int64_t nextDue = INT64_MIN;     // game thread (max_fps)
     std::atomic<int64_t> lastWrittenTs{0};
@@ -223,6 +282,9 @@ struct Recorder::Impl {
     bool Init();
     bool InitVideoProcessor();
     bool InitLinearPass();
+    bool InitReprojection(DXGI_FORMAT vpFmt);
+    void Reproject(ID3D11ShaderResourceView* srcSrv, const RpConstants& c);
+    void ReadTimings();
     HRESULT CreateWriter(bool useHevc, bool hardware, std::string& why);
     void LogTransforms();
     void Process(const Item& it);
@@ -257,6 +319,12 @@ bool Recorder::Start(IFrameSource* src, const RecorderSettings& s, UINT w, UINT 
     m.nextDue = INT64_MIN;
     m.lastWrittenTs = 0;
     m.written = 0; m.dropRing = 0; m.dropGpu = 0; m.dropPool = 0; m.dropDup = 0; m.decimated = 0; m.audioFrames = 0; m.writeErrors = 0;
+    m.t0Disp = 0;
+    m.loggedFirst = false;
+    m.smooth = s.head.Enabled();
+    m.smoother.Configure(s.head);   // also resets the filter: every recording starts at the actual head pose
+    m.smFrames = m.smGuarded = m.smUncovered = m.smCatch = m.smNoPose = m.smResets = m.gpuN = 0;
+    m.smCorrSum = m.smCorrMax = m.gpuSum = m.gpuMax = m.cpuSum = m.cpuMax = 0;
     m.queue.clear();
     m.SetMessage("");
     m.startTick = GetTickCount64();
@@ -265,7 +333,7 @@ bool Recorder::Start(IFrameSource* src, const RecorderSettings& s, UINT w, UINT 
     return true;
 }
 
-bool Recorder::SubmitFrame(int64_t ts, const EyeView& L, const EyeView& R) {
+bool Recorder::SubmitFrame(int64_t ts, const EyeView& L, const EyeView& R, int64_t displayTimeNs) {
     Impl& m = *impl_;
     m.gameBusy.fetch_add(1);
     struct Guard { std::atomic<int>& c; ~Guard() { c.fetch_sub(1); } } guard{m.gameBusy};
@@ -298,12 +366,31 @@ bool Recorder::SubmitFrame(int64_t ts, const EyeView& L, const EyeView& R) {
         ++m.dropGpu;
         return false;
     }
+    const int64_t disp = displayTimeNs ? displayTimeNs : ts * 100;
     int64_t expected = INT64_MIN;
-    m.t0.compare_exchange_strong(expected, ts);
+    if (m.t0.compare_exchange_strong(expected, ts)) m.t0Disp = disp;
     m.lastTs = ts;
+    Impl::Item item{};
+    item.slot = slot; item.ready = ready; item.ts = ts; item.disp = disp;
+    if (m.smooth) {
+        const EyeView* ev[2] = {&l, &r};
+        const UINT x0[2] = {0, m.leftW};
+        for (int e = 0; e < 2; ++e) {
+            Impl::ItemEye& ie = item.eye[e];
+            const EyeView& v = *ev[e];
+            ie.x0 = x0[e]; ie.w = v.w; ie.h = v.h;
+            // usable pose: finite fov, left < right, down < up, all within +-89 degrees
+            bool ok = v.hasPose;
+            for (int i = 0; ok && i < 4; ++i) ok = std::isfinite(v.fov[i]) && std::fabs(v.fov[i]) < 1.553f && std::isfinite(v.orientation[i]);
+            ok = ok && v.fov[0] < v.fov[1] && v.fov[3] < v.fov[2];
+            ie.valid = ok;
+            memcpy(ie.q, v.orientation, sizeof(ie.q));
+            memcpy(ie.fov, v.fov, sizeof(ie.fov));
+        }
+    }
     {
         std::lock_guard<std::mutex> lk(m.qm);
-        m.queue.push_back({slot, ready, ts});
+        m.queue.push_back(item);
     }
     m.qcv.notify_one();
     return true;
@@ -438,6 +525,17 @@ void Recorder::Impl::Run() {
              hasAudio ? "AAC" : "none", (unsigned long long)audioFrames.load(), audioFrames.load() / 48000.0,
              HrText(fhr).c_str(), st3dReport.c_str());
     if (fileOk) LOGI("%s", sum); else LOGE("%s", sum);
+    if (smooth) {
+        const double n = smFrames ? (double)smFrames : 1.0;
+        LOGI("head smoothing summary: %llu frames | correction mean %.2f deg, max %.2f deg | edge guard limited the "
+             "correction in %llu frames | source did not cover the output (black edges) in %llu frames | follow / "
+             "catch-up active in %llu frames | no usable pose in %llu frames | filter resets %llu | re-projection %ux%u: "
+             "GPU %.3f ms avg, %.3f ms max (%llu samples), worker CPU %.3f ms avg, %.3f ms max",
+             (unsigned long long)smFrames, smCorrSum / n, smCorrMax, (unsigned long long)smGuarded,
+             (unsigned long long)smUncovered, (unsigned long long)smCatch, (unsigned long long)smNoPose,
+             (unsigned long long)smResets, W, H, gpuN ? gpuSum / gpuN : 0.0, gpuMax, (unsigned long long)gpuN,
+             cpuSum / n, cpuMax);
+    }
     SetMessage(fileOk ? std::string("saved ") + file : std::string("recording failed (no frames or finalize error)"));
     owner->state_ = RecState::Idle;
 }
@@ -476,6 +574,14 @@ bool Recorder::Impl::Init() {
     LOGI("recorder: init %s -- SBS %ux%u (left %u) %s %s -> %ux%u %s %.0f Mb/s, %u fps nominal, GOP %u",
          GfxApiName(src->Api()), W, H, leftW, DxgiFormatName(fmt), srgb ? "sRGB-encoded" : "linear", outW, outH,
          hevc ? "HEVC" : "H.264", bitrate / 1e6, fps, fps * 2);
+
+    if (smooth)
+        LOGI("recorder: head smoothing ON -- head_smoothing %.2f (time constant %.3f s), head_follow_deg %.1f, roll_lock %d, "
+             "output_fov_scale %.2f, edge_guard %d",
+             s.head.smoothing, HeadSmoothingTimeConstant(s.head.smoothing), s.head.followDeg, s.head.rollLock ? 1 : 0,
+             s.head.fovScale, s.head.edgeGuard ? 1 : 0);
+    else
+        LOGI("recorder: head smoothing off (head_smoothing = 0)");
 
     // --- shared ring ---
     if (!src->CreateRing(enc.Get(), W, H, fmt, kRingSize, ring)) { SetMessage("shared ring creation failed"); return false; }
@@ -605,14 +711,19 @@ bool Recorder::Impl::InitVideoProcessor() {
         hr = vdev->CreateVideoProcessorInputView(linTex.Get(), venum.Get(), &iv, &linView);
         if (FAILED(hr)) { LOGE("recorder: input view on the linear pre-pass texture hr=0x%08lx", (unsigned long)hr); SetMessage("video processor input view"); return false; }
     }
+    if (smooth && !InitReprojection(vpFmt)) {
+        LOGW("recorder: head smoothing disabled for this recording (re-projection setup failed)");
+        smooth = false;
+    }
+    const bool vpFromRing = srgb && !smooth;   // otherwise the VP reads the pre-pass / re-projection output
     bool direct = true;
     for (auto& t : ring.tex) {
-        if (!srgb) break;
+        if (!vpFromRing) break;
         ComPtr<ID3D11VideoProcessorInputView> v;
         if (FAILED(vdev->CreateVideoProcessorInputView(t.Get(), venum.Get(), &iv, &v))) { direct = false; break; }
         inViews.push_back(v);
     }
-    if (srgb && !direct) {
+    if (vpFromRing && !direct) {
         LOGW("recorder: video processor cannot read the shared ring directly -- adding one GPU copy per frame");
         inViews.clear();
         for (size_t i = 0; i < ring.tex.size(); ++i) {
@@ -691,6 +802,145 @@ bool Recorder::Impl::InitLinearPass() {
     if (FAILED(hr)) { LOGE("recorder: linear->sRGB pre-pass setup failed hr=0x%08lx", (unsigned long)hr); SetMessage("linear pre-pass"); return false; }
     LOGI("recorder: linear swapchain format -> sRGB-encoding pre-pass (compute) on the encoder device");
     return true;
+}
+
+bool Recorder::Impl::InitReprojection(DXGI_FORMAT vpFmt) {
+    ComPtr<ID3DBlob> vsCode, psCode, errs;
+    HRESULT hr = D3DCompile(kReprojVs, sizeof(kReprojVs) - 1, "reproject_vs", nullptr, nullptr, "main", "vs_5_0",
+                            D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &vsCode, &errs);
+    if (SUCCEEDED(hr)) {
+        errs.Reset();
+        hr = D3DCompile(kReprojPs, sizeof(kReprojPs) - 1, "reproject_ps", nullptr, nullptr, "main", "ps_5_0",
+                        D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &psCode, &errs);
+    }
+    if (FAILED(hr)) {
+        LOGE("recorder: re-projection shader compile failed hr=0x%08lx %s", (unsigned long)hr,
+             errs ? (const char*)errs->GetBufferPointer() : "");
+        return false;
+    }
+    hr = enc->CreateVertexShader(vsCode->GetBufferPointer(), vsCode->GetBufferSize(), nullptr, &rpVs);
+    if (SUCCEEDED(hr)) hr = enc->CreatePixelShader(psCode->GetBufferPointer(), psCode->GetBufferSize(), nullptr, &rpPs);
+    if (SUCCEEDED(hr)) {
+        D3D11_BUFFER_DESC bd{};
+        bd.ByteWidth = sizeof(RpConstants);
+        bd.Usage = D3D11_USAGE_DYNAMIC;
+        bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        hr = enc->CreateBuffer(&bd, nullptr, &rpCb);
+    }
+    if (SUCCEEDED(hr)) {
+        D3D11_SAMPLER_DESC sd{};
+        sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+        sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+        sd.MaxLOD = D3D11_FLOAT32_MAX;
+        hr = enc->CreateSamplerState(&sd, &rpSmp);
+    }
+    if (SUCCEEDED(hr)) {
+        D3D11_TEXTURE2D_DESC d{};
+        d.Width = W; d.Height = H; d.MipLevels = 1; d.ArraySize = 1; d.Format = vpFmt; d.SampleDesc.Count = 1;
+        d.Usage = D3D11_USAGE_DEFAULT; d.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        hr = enc->CreateTexture2D(&d, nullptr, &rpTex);
+    }
+    if (SUCCEEDED(hr)) hr = enc->CreateRenderTargetView(rpTex.Get(), nullptr, &rpRtv);
+    if (SUCCEEDED(hr)) {
+        D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC iv{};
+        iv.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
+        hr = vdev->CreateVideoProcessorInputView(rpTex.Get(), venum.Get(), &iv, &rpView);
+    }
+    rpRingSrv.clear();
+    rpLinSrv.Reset();
+    if (SUCCEEDED(hr)) {
+        if (srgb) {
+            for (size_t i = 0; SUCCEEDED(hr) && i < ring.tex.size(); ++i) {
+                D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
+                sd.Format = fmt;   // typed UNORM / float member of the copy family: no sRGB decode on sampling
+                sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+                sd.Texture2D.MipLevels = 1;
+                ComPtr<ID3D11ShaderResourceView> v;
+                hr = enc->CreateShaderResourceView(ring.tex[i].Get(), &sd, &v);
+                rpRingSrv.push_back(v);
+            }
+        } else {
+            hr = enc->CreateShaderResourceView(linTex.Get(), nullptr, &rpLinSrv);
+        }
+    }
+    if (FAILED(hr)) { LOGE("recorder: re-projection setup failed hr=0x%08lx", (unsigned long)hr); return false; }
+    rpQ.clear();
+    rpQ.resize(kTimingQueries);
+    rpQi = 0;
+    for (auto& q : rpQ) {
+        D3D11_QUERY_DESC qd{D3D11_QUERY_TIMESTAMP_DISJOINT, 0};
+        D3D11_QUERY_DESC qt{D3D11_QUERY_TIMESTAMP, 0};
+        if (FAILED(enc->CreateQuery(&qd, &q.disjoint)) || FAILED(enc->CreateQuery(&qt, &q.begin)) ||
+            FAILED(enc->CreateQuery(&qt, &q.end))) {
+            rpQ.clear();   // timing is optional
+            break;
+        }
+    }
+    LOGI("recorder: head smoothing re-projection pass on the encoder device: %ux%u, %s -> %s, +%.0f MB VRAM",
+         W, H, srgb ? "ring" : "linear pre-pass output", DxgiFormatName(vpFmt),
+         (double)W * H * (vpFmt == DXGI_FORMAT_R16G16B16A16_FLOAT ? 8 : 4) / (1024.0 * 1024.0));
+    return true;
+}
+
+void Recorder::Impl::ReadTimings() {
+    for (auto& q : rpQ) {
+        if (!q.pending) continue;
+        D3D11_QUERY_DATA_TIMESTAMP_DISJOINT dj{};
+        UINT64 a = 0, b = 0;
+        if (encCtx->GetData(q.disjoint.Get(), &dj, sizeof(dj), D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK) continue;
+        if (encCtx->GetData(q.begin.Get(), &a, sizeof(a), D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK) continue;
+        if (encCtx->GetData(q.end.Get(), &b, sizeof(b), D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK) continue;
+        q.pending = false;
+        if (dj.Disjoint || !dj.Frequency || b < a) continue;
+        const double ms = (double)(b - a) * 1000.0 / (double)dj.Frequency;
+        gpuSum += ms;
+        if (ms > gpuMax) gpuMax = ms;
+        ++gpuN;
+    }
+}
+
+void Recorder::Impl::Reproject(ID3D11ShaderResourceView* srcSrv, const RpConstants& c) {
+    D3D11_MAPPED_SUBRESOURCE ms{};
+    if (SUCCEEDED(encCtx->Map(rpCb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &ms))) {
+        memcpy(ms.pData, &c, sizeof(c));
+        encCtx->Unmap(rpCb.Get(), 0);
+    }
+    ReadTimings();
+    TsQuery* tq = nullptr;
+    if (!rpQ.empty()) {
+        TsQuery& q = rpQ[rpQi++ % rpQ.size()];
+        if (!q.pending) tq = &q;   // still in flight: skip timing this frame rather than wait
+    }
+    if (tq) { encCtx->Begin(tq->disjoint.Get()); encCtx->End(tq->begin.Get()); }
+
+    ID3D11Buffer* cb = rpCb.Get();
+    ID3D11SamplerState* smp = rpSmp.Get();
+    ID3D11RenderTargetView* rtv = rpRtv.Get();
+    const D3D11_VIEWPORT vpt{0.0f, 0.0f, (float)W, (float)H, 0.0f, 1.0f};
+    encCtx->IASetInputLayout(nullptr);
+    encCtx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    encCtx->VSSetShader(rpVs.Get(), nullptr, 0);
+    encCtx->GSSetShader(nullptr, nullptr, 0);
+    encCtx->HSSetShader(nullptr, nullptr, 0);
+    encCtx->DSSetShader(nullptr, nullptr, 0);
+    encCtx->PSSetShader(rpPs.Get(), nullptr, 0);
+    encCtx->PSSetConstantBuffers(0, 1, &cb);
+    encCtx->PSSetShaderResources(0, 1, &srcSrv);
+    encCtx->PSSetSamplers(0, 1, &smp);
+    encCtx->RSSetState(nullptr);
+    encCtx->RSSetViewports(1, &vpt);
+    encCtx->OMSetBlendState(nullptr, nullptr, 0xffffffff);
+    encCtx->OMSetDepthStencilState(nullptr, 0);
+    encCtx->OMSetRenderTargets(1, &rtv, nullptr);
+    encCtx->Draw(3, 0);
+    ID3D11ShaderResourceView* nullSrv = nullptr;
+    encCtx->OMSetRenderTargets(0, nullptr, nullptr);
+    encCtx->PSSetShaderResources(0, 1, &nullSrv);
+    encCtx->VSSetShader(nullptr, nullptr, 0);
+    encCtx->PSSetShader(nullptr, nullptr, 0);
+
+    if (tq) { encCtx->End(tq->end.Get()); encCtx->End(tq->disjoint.Get()); tq->pending = true; }
 }
 
 HRESULT Recorder::Impl::CreateWriter(bool useHevc, bool hardware, std::string& why) {
@@ -809,7 +1059,48 @@ void Recorder::Impl::LogTransforms() {
 }
 
 void Recorder::Impl::Process(const Item& it) {
+    if (!loggedFirst) {
+        loggedFirst = true;
+        LOGI("recorder: first video frame (t = 0 in the file): displayTime %lld ns", (long long)t0Disp.load());
+    }
     encCtx4->Wait(ring.ready.Get(), it.ready);
+
+    // head smoothing, CPU part: filter + per-eye re-projection constants (before taking the device lock)
+    RpConstants rc{};
+    int64_t cpuTicks = 0;   // our own CPU time on the worker (filter + constants + draw submission), not lock / pool waits
+    if (smooth) {
+        const int64_t c0 = QpcNow100ns();
+        SmoothEyeIn in[2];
+        for (int e = 0; e < 2; ++e) {
+            const ItemEye& ie = it.eye[e];
+            in[e].valid = ie.valid;
+            in[e].q.x = ie.q[0]; in[e].q.y = ie.q[1]; in[e].q.z = ie.q[2]; in[e].q.w = ie.q[3];
+            in[e].tanL = std::tan((double)ie.fov[0]); in[e].tanR = std::tan((double)ie.fov[1]);
+            in[e].tanU = std::tan((double)ie.fov[2]); in[e].tanD = std::tan((double)ie.fov[3]);
+        }
+        SmoothFrame sf;
+        smoother.Update(it.disp, in, sf);
+        ++smFrames;
+        if (sf.guarded) ++smGuarded;
+        if (sf.uncovered) ++smUncovered;
+        if (sf.catchUp) ++smCatch;
+        if (sf.noPose) ++smNoPose;
+        if (sf.reset) ++smResets;
+        smCorrSum += sf.correctionDeg;
+        if (sf.correctionDeg > smCorrMax) smCorrMax = sf.correctionDeg;
+        for (int e = 0; e < 2; ++e) {
+            const SmoothEyeOut& eo = sf.eye[e];
+            RpEye& re = rc.eye[e];
+            for (int c = 0; c < 3; ++c) { re.r0[c] = eo.m[c]; re.r1[c] = eo.m[3 + c]; re.r2[c] = eo.m[6 + c]; }
+            for (int c = 0; c < 4; ++c) { re.outTan[c] = eo.outTan[c]; re.srcTan[c] = eo.srcTan[c]; }
+            const ItemEye& ie = it.eye[e];
+            re.rect[0] = (float)ie.x0; re.rect[1] = 0.0f;
+            re.rect[2] = (float)std::max<UINT>(1, ie.w); re.rect[3] = (float)std::max<UINT>(1, ie.h);
+        }
+        rc.misc[0] = 1.0f / (float)W; rc.misc[1] = 1.0f / (float)H; rc.misc[2] = (float)leftW; rc.misc[3] = 0.0f;
+        cpuTicks += QpcNow100ns() - c0;
+    }
+
     const int n = pool->Acquire(3000);
     if (n < 0) {
         ++dropPool;
@@ -821,6 +1112,7 @@ void Recorder::Impl::Process(const Item& it) {
     ComPtr<ID3D11Device> locked;
     const bool haveLock = devHandle && SUCCEEDED(devMgr->LockDevice(devHandle, IID_PPV_ARGS(&locked), TRUE));
     ID3D11VideoProcessorInputView* view = nullptr;
+    ID3D11ShaderResourceView* rpSrc = nullptr;
     if (!srgb) {
         ID3D11ShaderResourceView* srv = linSrv[it.slot].Get();
         ID3D11UnorderedAccessView* uav = linUav.Get();
@@ -834,9 +1126,18 @@ void Recorder::Impl::Process(const Item& it) {
         encCtx->CSSetUnorderedAccessViews(0, 1, &nullUav, nullptr);
         encCtx->CSSetShader(nullptr, nullptr, 0);
         view = linView.Get();
+        rpSrc = rpLinSrv.Get();
+    } else if (smooth) {
+        rpSrc = rpRingSrv[it.slot].Get();
     } else {
         view = inViews[it.slot].Get();
         if (!localCopies.empty()) encCtx->CopyResource(localCopies[it.slot].Get(), ring.tex[it.slot].Get());
+    }
+    if (smooth) {
+        const int64_t c0 = QpcNow100ns();
+        Reproject(rpSrc, rc);   // after the pre-pass (linear formats), so the colour path is unchanged
+        view = rpView.Get();
+        cpuTicks += QpcNow100ns() - c0;
     }
     D3D11_VIDEO_PROCESSOR_STREAM st{};
     st.Enable = TRUE;
@@ -846,6 +1147,11 @@ void Recorder::Impl::Process(const Item& it) {
     encCtx4->Signal(ring.free.Get(), freeCounter);
     encCtx->Flush();
     if (haveLock) devMgr->UnlockDevice(devHandle, FALSE);
+    if (smooth) {
+        const double ms = cpuTicks / 1e4;
+        cpuSum += ms;
+        if (ms > cpuMax) cpuMax = ms;
+    }
     FreeSlot(it.slot, freeCounter, true);
     if (FAILED(hr)) {
         pool->Release(n);
@@ -922,6 +1228,8 @@ void Recorder::Impl::Cleanup() {
     inViews.clear();
     localCopies.clear();
     linView.Reset(); linUav.Reset(); linTex.Reset(); linSrv.clear(); linCs.Reset();
+    rpView.Reset(); rpRtv.Reset(); rpTex.Reset(); rpRingSrv.clear(); rpLinSrv.Reset(); rpQ.clear();
+    rpCb.Reset(); rpSmp.Reset(); rpVs.Reset(); rpPs.Reset();
     outViews.clear();
     nv12.clear();
     poolCb.clear();

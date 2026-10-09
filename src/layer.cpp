@@ -7,7 +7,8 @@
 //   xrDestroySession       stop + finalize the recording, release
 //   xrCreateSwapchain / xrDestroySwapchain / xrEnumerateSwapchainImages   track images + format/size/array/samples
 //   xrAcquireSwapchainImage / xrReleaseSwapchainImage                     track the most recently released image
-//   xrEndFrame             first projection layer: views[0] = left, views[1] = right -> Recorder::SubmitFrame, then forward
+//   xrEndFrame             first projection layer: views[0] = left, views[1] = right (images + pose + fov)
+//                          -> Recorder::SubmitFrame, then forward
 //   xrDestroyInstance      clean up
 // Rule: any internal failure logs and passes through. The game's calls are always forwarded and their results returned
 // unchanged; capture work in xrEndFrame is wrapped in SEH so a fault disables capture instead of crashing the game.
@@ -159,6 +160,8 @@ void InitProcess() {
     if (!outOverride.empty()) g_cfg.outputDir = outOverride;
     const std::wstring autoRec = EnvW(L"XR_EYE_CAPTURE_AUTORECORD");
     if (!autoRec.empty()) g_autoRecordSec = _wtof(autoRec.c_str());
+    const std::wstring cfgOverride = EnvW(L"XR_EYE_CAPTURE_CONFIG");   // test-only: "key=value;key=value"
+    if (!cfgOverride.empty()) ApplyConfigOverrides(cfgOverride, g_cfg);
     elog::SetLevel(g_cfg.logLevel);
     elog::SetMirror(g_cfg.outputDir + L"\\eye_capture.log");
     wchar_t exe[MAX_PATH] = L"";
@@ -173,6 +176,13 @@ void InitProcess() {
          g_cfg.audioEnabled ? "on" : "off", g_cfg.audioDevice.empty() ? "" : " device~",
          elog::Narrow(g_cfg.audioDevice).c_str(),
          g_cfg.gamma == GammaMode::Auto ? "auto" : g_cfg.gamma == GammaMode::Srgb ? "srgb" : "linear");
+    if (g_cfg.head.Enabled())
+        LOGI("head smoothing: head_smoothing %.2f (time constant %.3f s) | head_follow_deg %.1f | roll_lock %d | "
+             "output_fov_scale %.2f | edge_guard %d",
+             g_cfg.head.smoothing, HeadSmoothingTimeConstant(g_cfg.head.smoothing), g_cfg.head.followDeg,
+             g_cfg.head.rollLock ? 1 : 0, g_cfg.head.fovScale, g_cfg.head.edgeGuard ? 1 : 0);
+    else
+        LOGI("head smoothing: off (head_smoothing = 0)");
     if (g_autoRecordSec > 0) LOGI("XR_EYE_CAPTURE_AUTORECORD=%.1f s: recording starts at the first frame", g_autoRecordSec);
     const std::wstring reqTray = EnvW(L"XR_EYE_CAPTURE_REQUIRE_TRAY");
     if (!reqTray.empty()) {
@@ -279,6 +289,7 @@ void StartRecording(SessionData* sd, const EyeView& L, const EyeView& R) {
     rs.maxWidth = g_cfg.maxWidth;
     rs.audio = g_cfg.audioEnabled;
     rs.audioDevice = g_cfg.audioDevice;
+    rs.head = g_cfg.head;
     const UINT W = L.w + R.w, H = L.h > R.h ? L.h : R.h;
     LOGI("record: start %s | %s | %ux%u SBS (eyes %ux%u + %ux%u) | %u fps from %s (display refresh %.1f, measured %.2f) | %s",
          elog::Narrow(rs.path).c_str(), GfxApiName(sd->api), W, H, L.w, L.h, R.w, R.h, fps, fpsFrom, refresh,
@@ -381,13 +392,21 @@ void CaptureImpl(SessionData* sd, const XrFrameEndInfo* info) {
             return;
         }
         e.x = x; e.y = y; e.w = (uint32_t)w; e.h = (uint32_t)h;
+        // rendering pose of this view (head-motion smoothing); in proj->space, which is the same for both views
+        const XrCompositionLayerProjectionView& pv = proj->views[v];
+        e.hasPose = true;
+        e.orientation[0] = pv.pose.orientation.x; e.orientation[1] = pv.pose.orientation.y;
+        e.orientation[2] = pv.pose.orientation.z; e.orientation[3] = pv.pose.orientation.w;
+        e.position[0] = pv.pose.position.x; e.position[1] = pv.pose.position.y; e.position[2] = pv.pose.position.z;
+        e.fov[0] = pv.fov.angleLeft; e.fov[1] = pv.fov.angleRight; e.fov[2] = pv.fov.angleUp; e.fov[3] = pv.fov.angleDown;
     }
     if (g_cfg.swapEyes) std::swap(eyes[0], eyes[1]);   // swap_eyes = 1: right eye goes into the left half
     LogLayout(sd, info, proj, eyes[0], eyes[1]);
 
     const RecState rs = sd->rec->State();
     if (wantStart && rs != RecState::Starting && rs != RecState::Recording) StartRecording(sd, eyes[0], eyes[1]);
-    if (sd->rec->State() == RecState::Recording) sd->rec->SubmitFrame(VideoClock(sd, info->displayTime), eyes[0], eyes[1]);
+    if (sd->rec->State() == RecState::Recording)
+        sd->rec->SubmitFrame(VideoClock(sd, info->displayTime), eyes[0], eyes[1], (int64_t)info->displayTime);
 }
 
 // SEH wrapper: no C++ objects with destructors in this function.

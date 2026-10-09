@@ -34,6 +34,7 @@ add_library(eye_capture_core STATIC
     src/source_d3d12.cpp
     src/source_vulkan.cpp
     src/recorder.cpp
+    src/head_smoothing.cpp
     src/audio_capture.cpp
     src/st3d.cpp)
 target_include_directories(eye_capture_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -75,6 +76,12 @@ if (EYE_BUILD_TESTS)
     target_link_libraries(encoder_selftest PRIVATE eye_capture_core)
     target_include_directories(encoder_selftest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
 
+    # Head-smoothing filter unit test (CPU only).
+    add_executable(head_smoothing_test tests/head_smoothing_test.cpp)
+    target_compile_options(head_smoothing_test PRIVATE ${EYE_WARN_FLAGS})
+    target_link_libraries(head_smoothing_test PRIVATE eye_capture_core)
+    target_include_directories(head_smoothing_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+
     # Loader test: the real OpenXR loader + whatever runtime is active (VDXR here) + our installed layer.
     add_executable(layer_loadtest tests/layer_loadtest.cpp)
     target_compile_options(layer_loadtest PRIVATE ${EYE_WARN_FLAGS})
@@ -86,13 +93,14 @@ if (EYE_BUILD_TESTS)
     add_library(mock_runtime SHARED tests/mock_runtime.cpp)
     target_compile_options(mock_runtime PRIVATE ${EYE_WARN_FLAGS})
     target_link_libraries(mock_runtime PRIVATE OpenXR::headers d3d11 d3d12 dxgi)
+    target_include_directories(mock_runtime PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
     target_compile_definitions(mock_runtime PRIVATE XR_USE_PLATFORM_WIN32 XR_USE_GRAPHICS_API_D3D11 XR_USE_GRAPHICS_API_D3D12 NOMINMAX)
     configure_file(${CMAKE_CURRENT_SOURCE_DIR}/tests/mock_runtime.json.in
                    ${CMAKE_CURRENT_BINARY_DIR}/mock_runtime.json COPYONLY)
 
     add_executable(layer_e2e tests/layer_e2e.cpp)
     target_compile_options(layer_e2e PRIVATE ${EYE_WARN_FLAGS})
-    target_link_libraries(layer_e2e PRIVATE OpenXR::openxr_loader OpenXR::headers d3d11 d3d12 dxgi)
+    target_link_libraries(layer_e2e PRIVATE OpenXR::openxr_loader OpenXR::headers d3d11 d3d12 dxgi d3dcompiler)
     target_include_directories(layer_e2e PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
     target_compile_definitions(layer_e2e PRIVATE XR_USE_PLATFORM_WIN32 XR_USE_GRAPHICS_API_D3D11 XR_USE_GRAPHICS_API_D3D12 UNICODE _UNICODE NOMINMAX)
     add_dependencies(layer_e2e mock_runtime eye_capture)

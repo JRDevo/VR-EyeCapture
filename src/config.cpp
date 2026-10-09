@@ -32,6 +32,14 @@ bool ParseUInt(const std::wstring& v, unsigned& out) {
     out = (unsigned)x;
     return true;
 }
+bool ParseFloat(const std::wstring& v, float& out) {
+    if (v.empty()) return false;
+    wchar_t* end = nullptr;
+    const double d = wcstod(v.c_str(), &end);
+    if (!end || *end != L'\0' || !(d == d)) return false;
+    out = (float)d;
+    return true;
+}
 bool ParseBool(const std::wstring& v, bool& out) {
     const std::wstring l = Lower(v);
     if (l == L"1" || l == L"true" || l == L"yes" || l == L"on") { out = true; return true; }
@@ -91,6 +99,11 @@ bool ParseHotkey(const std::wstring& s, Hotkey& out) {
     return true;
 }
 
+namespace {
+enum class KeyResult { Ok, Bad, Unknown };
+KeyResult ApplyKey(Config& c, const std::wstring& key, std::wstring val);
+} // namespace
+
 std::wstring ConfigPath(const std::wstring& dllDir) {
     wchar_t appdata[MAX_PATH];
     const DWORD n = GetEnvironmentVariableW(L"APPDATA", appdata, MAX_PATH);
@@ -139,53 +152,87 @@ void LoadConfig(const std::wstring& dllDir, Config& c) {
         }
         if (val.size() >= 2 && val.front() == L'"' && val.back() == L'"') val = val.substr(1, val.size() - 2);
         const std::string k8 = elog::Narrow(key), v8 = elog::Narrow(val);
-        bool ok = true;
-        unsigned u = 0;
-        bool b = false;
-        if (key == L"hotkey") {
-            Hotkey h;
-            if (ParseHotkey(val, h)) c.hotkey = h; else ok = false;
-        } else if (key == L"output_dir") {
-            while (!val.empty() && (val.back() == L'\\' || val.back() == L'/')) val.pop_back();
-            if (!val.empty()) c.outputDir = val;
-        } else if (key == L"codec") {
-            const std::wstring l = Lower(val);
-            if (l == L"hevc" || l == L"h265" || l == L"h.265") c.hevc = true;
-            else if (l == L"h264" || l == L"h.264" || l == L"avc") c.hevc = false;
-            else ok = false;
-        } else if (key == L"bitrate_mbps") {
-            if (ParseUInt(val, u) && u <= 1000) c.bitrateMbps = u; else ok = false;
-        } else if (key == L"fps") {
-            if (ParseUInt(val, u) && u >= 10 && u <= 240) c.fps = u; else ok = false;
-        } else if (key == L"max_fps") {
-            if (ParseUInt(val, u) && u <= 240) c.maxFps = u; else ok = false;
-        } else if (key == L"max_width") {
-            if (ParseUInt(val, u) && (u == 0 || (u >= 256 && u <= 16384))) c.maxWidth = u & ~1u; else ok = false;
-        } else if (key == L"audio_enabled") {
-            if (ParseBool(val, b)) c.audioEnabled = b; else ok = false;
-        } else if (key == L"audio_device") {
-            c.audioDevice = val;
-        } else if (key == L"gamma") {
-            const std::wstring l = Lower(val);
-            if (l == L"auto") c.gamma = GammaMode::Auto;
-            else if (l == L"srgb") c.gamma = GammaMode::Srgb;
-            else if (l == L"linear") c.gamma = GammaMode::Linear;
-            else ok = false;
-        } else if (key == L"require_tray") {
-            if (ParseBool(val, b)) c.requireTray = b; else ok = false;
-        } else if (key == L"swap_eyes") {
-            if (ParseBool(val, b)) c.swapEyes = b; else ok = false;
-        } else if (key == L"log_level") {
-            const std::wstring l = Lower(val);
-            if (l == L"error") c.logLevel = LogLevel::Error;
-            else if (l == L"warn" || l == L"warning") c.logLevel = LogLevel::Warn;
-            else if (l == L"info") c.logLevel = LogLevel::Info;
-            else if (l == L"debug") c.logLevel = LogLevel::Debug;
-            else ok = false;
-        } else {
-            LOGW("config line %d: unknown key '%s' (ignored)", lineNo, k8.c_str());
-            continue;
-        }
-        if (!ok) LOGW("config line %d: bad value '%s' for '%s' (default kept)", lineNo, v8.c_str(), k8.c_str());
+        const KeyResult r = ApplyKey(c, key, val);
+        if (r == KeyResult::Unknown) LOGW("config line %d: unknown key '%s' (ignored)", lineNo, k8.c_str());
+        else if (r == KeyResult::Bad) LOGW("config line %d: bad value '%s' for '%s' (default kept)", lineNo, v8.c_str(), k8.c_str());
     }
 }
+
+void ApplyConfigOverrides(const std::wstring& list, Config& c) {
+    std::wstring rest = list;
+    while (!rest.empty()) {
+        const size_t semi = rest.find(L';');
+        const std::wstring item = Trim(rest.substr(0, semi));
+        rest = semi == std::wstring::npos ? std::wstring() : rest.substr(semi + 1);
+        if (item.empty()) continue;
+        const size_t eq = item.find(L'=');
+        const std::wstring key = Lower(Trim(item.substr(0, eq)));
+        const std::wstring val = eq == std::wstring::npos ? std::wstring() : Trim(item.substr(eq + 1));
+        const KeyResult r = eq == std::wstring::npos ? KeyResult::Bad : ApplyKey(c, key, val);
+        if (r == KeyResult::Ok) LOGI("config override: %s = %s", elog::Narrow(key).c_str(), elog::Narrow(val).c_str());
+        else LOGW("config override '%s' ignored (%s)", elog::Narrow(item).c_str(), r == KeyResult::Unknown ? "unknown key" : "bad value");
+    }
+}
+
+namespace {
+KeyResult ApplyKey(Config& c, const std::wstring& key, std::wstring val) {
+    bool ok = true;
+    unsigned u = 0;
+    bool b = false;
+    float fl = 0;
+    if (key == L"hotkey") {
+        Hotkey h;
+        if (ParseHotkey(val, h)) c.hotkey = h; else ok = false;
+    } else if (key == L"output_dir") {
+        while (!val.empty() && (val.back() == L'\\' || val.back() == L'/')) val.pop_back();
+        if (!val.empty()) c.outputDir = val;
+    } else if (key == L"codec") {
+        const std::wstring l = Lower(val);
+        if (l == L"hevc" || l == L"h265" || l == L"h.265") c.hevc = true;
+        else if (l == L"h264" || l == L"h.264" || l == L"avc") c.hevc = false;
+        else ok = false;
+    } else if (key == L"bitrate_mbps") {
+        if (ParseUInt(val, u) && u <= 1000) c.bitrateMbps = u; else ok = false;
+    } else if (key == L"fps") {
+        if (ParseUInt(val, u) && u >= 10 && u <= 240) c.fps = u; else ok = false;
+    } else if (key == L"max_fps") {
+        if (ParseUInt(val, u) && u <= 240) c.maxFps = u; else ok = false;
+    } else if (key == L"max_width") {
+        if (ParseUInt(val, u) && (u == 0 || (u >= 256 && u <= 16384))) c.maxWidth = u & ~1u; else ok = false;
+    } else if (key == L"audio_enabled") {
+        if (ParseBool(val, b)) c.audioEnabled = b; else ok = false;
+    } else if (key == L"audio_device") {
+        c.audioDevice = val;
+    } else if (key == L"gamma") {
+        const std::wstring l = Lower(val);
+        if (l == L"auto") c.gamma = GammaMode::Auto;
+        else if (l == L"srgb") c.gamma = GammaMode::Srgb;
+        else if (l == L"linear") c.gamma = GammaMode::Linear;
+        else ok = false;
+    } else if (key == L"require_tray") {
+        if (ParseBool(val, b)) c.requireTray = b; else ok = false;
+    } else if (key == L"swap_eyes") {
+        if (ParseBool(val, b)) c.swapEyes = b; else ok = false;
+    } else if (key == L"head_smoothing") {
+        if (ParseFloat(val, fl) && fl >= 0.0f && fl <= 1.0f) c.head.smoothing = fl; else ok = false;
+    } else if (key == L"head_follow_deg") {
+        if (ParseFloat(val, fl) && fl >= 1.0f && fl <= 90.0f) c.head.followDeg = fl; else ok = false;
+    } else if (key == L"roll_lock") {
+        if (ParseBool(val, b)) c.head.rollLock = b; else ok = false;
+    } else if (key == L"output_fov_scale") {
+        if (ParseFloat(val, fl) && fl >= 0.5f && fl <= 1.0f) c.head.fovScale = fl; else ok = false;
+    } else if (key == L"edge_guard") {
+        if (ParseBool(val, b)) c.head.edgeGuard = b; else ok = false;
+    } else if (key == L"log_level") {
+        const std::wstring l = Lower(val);
+        if (l == L"error") c.logLevel = LogLevel::Error;
+        else if (l == L"warn" || l == L"warning") c.logLevel = LogLevel::Warn;
+        else if (l == L"info") c.logLevel = LogLevel::Info;
+        else if (l == L"debug") c.logLevel = LogLevel::Debug;
+        else ok = false;
+    } else {
+        return KeyResult::Unknown;
+    }
+    return ok ? KeyResult::Ok : KeyResult::Bad;
+}
+} // namespace

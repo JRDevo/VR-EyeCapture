@@ -1,7 +1,9 @@
 // mock_runtime -- a minimal OpenXR runtime for testing the layer without a headset (selected with XR_RUNTIME_JSON).
 // Supports XR_KHR_D3D11_enable, XR_KHR_D3D12_enable and XR_FB_display_refresh_rate; swapchains are real textures on the
 // app's device (TYPELESS for 8-bit formats, like real runtimes), 3 images each; xrWaitFrame paces at 90 Hz;
-// xrEndFrame only validates and counts. Not a conformant runtime -- just enough for tests/layer_e2e.
+// xrEndFrame only validates and counts. xrLocateViews reports an identity head pose with a +-0.8 rad fov, or with
+// EYECAP_MOCK_MOTION=jitter the head motion of tests/test_motion.h (jitter + a deliberate turn) and an asymmetric fov.
+// Not a conformant runtime -- just enough for tests/layer_e2e.
 #include <windows.h>
 #include <d3d11.h>
 #include <d3d12.h>
@@ -17,6 +19,7 @@
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
 #include <openxr/openxr_loader_negotiation.h>
+#include "test_motion.h"
 
 using Microsoft::WRL::ComPtr;
 
@@ -31,6 +34,7 @@ struct Session {
     ComPtr<ID3D12Device> dev12;
     uint64_t frames = 0, projFrames = 0;
     int64_t nextDisplay = 0;
+    int64_t motionOrigin = 0;   // first predictedDisplayTime: t = 0 of tests/test_motion.h
     LARGE_INTEGER nextWake{};
 };
 struct Swapchain {
@@ -134,7 +138,7 @@ XrResult XRAPI_CALL WaitFrame(XrSession s, const XrFrameWaitInfo*, XrFrameState*
     Session* ss;
     { std::lock_guard<std::mutex> lk(g_m); auto it = g_sessions.find((uint64_t)s); if (it == g_sessions.end()) return XR_ERROR_HANDLE_INVALID; ss = &it->second; }
     int64_t now = NowNs();
-    if (!ss->nextDisplay) ss->nextDisplay = now + 2 * kPeriodNs;
+    if (!ss->nextDisplay) ss->nextDisplay = ss->motionOrigin = now + 2 * kPeriodNs;
     const int64_t wake = ss->nextDisplay - 2 * kPeriodNs;
     while ((now = NowNs()) < wake) { if (wake - now > 2000000) Sleep(1); }
     fs->predictedDisplayTime = ss->nextDisplay;
@@ -145,6 +149,31 @@ XrResult XRAPI_CALL WaitFrame(XrSession s, const XrFrameWaitInfo*, XrFrameState*
     return XR_SUCCESS;
 }
 XrResult XRAPI_CALL BeginFrame(XrSession, const XrFrameBeginInfo*) { return XR_SUCCESS; }
+XrResult XRAPI_CALL LocateViews(XrSession s, const XrViewLocateInfo* li, XrViewState* vs, uint32_t cap, uint32_t* count, XrView* views) {
+    int64_t origin = 0;
+    { std::lock_guard<std::mutex> lk(g_m); auto it = g_sessions.find((uint64_t)s); if (it == g_sessions.end()) return XR_ERROR_HANDLE_INVALID; origin = it->second.motionOrigin; }
+    *count = 2;
+    if (!cap) return XR_SUCCESS;
+    if (cap < 2) return XR_ERROR_SIZE_INSUFFICIENT;
+    char motion[32] = "";
+    GetEnvironmentVariableA("EYECAP_MOCK_MOTION", motion, sizeof(motion));
+    const bool jitter = strcmp(motion, "jitter") == 0;
+    const double t = origin ? (double)(li->displayTime - origin) * 1e-9 : 0.0;
+    const test_motion::Quat q = jitter ? test_motion::Head(t) : test_motion::Quat{0, 0, 0, 1};
+    float m[9];
+    test_motion::Matrix(q, m);
+    for (uint32_t e = 0; e < 2; ++e) {
+        const float ipd = e == 0 ? -0.032f : 0.032f;
+        views[e].pose.orientation = {(float)q.x, (float)q.y, (float)q.z, (float)q.w};
+        views[e].pose.position = {m[0] * ipd, 1.6f + m[3] * ipd, m[6] * ipd};
+        const float* f = e == 0 ? test_motion::kFovLeft : test_motion::kFovRight;
+        if (jitter) views[e].fov = {f[0], f[1], f[2], f[3]};
+        else views[e].fov = {-0.8f, 0.8f, 0.8f, -0.8f};
+    }
+    vs->viewStateFlags = XR_VIEW_STATE_ORIENTATION_VALID_BIT | XR_VIEW_STATE_POSITION_VALID_BIT |
+                         XR_VIEW_STATE_ORIENTATION_TRACKED_BIT | XR_VIEW_STATE_POSITION_TRACKED_BIT;
+    return XR_SUCCESS;
+}
 XrResult XRAPI_CALL EndFrame(XrSession s, const XrFrameEndInfo* info) {
     std::lock_guard<std::mutex> lk(g_m);
     auto it = g_sessions.find((uint64_t)s);
@@ -249,6 +278,7 @@ const Entry kTable[] = {
     E("xrGetD3D12GraphicsRequirementsKHR", GetD3D12Req), E("xrGetDisplayRefreshRateFB", GetDisplayRefreshRateFB),
     E("xrCreateSession", CreateSession), E("xrDestroySession", DestroySession), E("xrBeginSession", BeginSession),
     E("xrEndSession", EndSession), E("xrPollEvent", PollEvent), E("xrWaitFrame", WaitFrame), E("xrBeginFrame", BeginFrame),
+    E("xrLocateViews", LocateViews),
     E("xrEndFrame", EndFrame), E("xrEnumerateSwapchainFormats", EnumerateSwapchainFormats),
     E("xrCreateSwapchain", CreateSwapchain), E("xrDestroySwapchain", DestroySwapchain),
     E("xrEnumerateSwapchainImages", EnumerateSwapchainImages), E("xrAcquireSwapchainImage", AcquireSwapchainImage),

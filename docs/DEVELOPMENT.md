@@ -30,7 +30,8 @@ zip. Re-run it after every build you want the games to pick up (a running game k
 | `src/source_d3d11.cpp` | D3D11 games: ring created on the encoder device, opened on the game device; fences created on the game device |
 | `src/source_d3d12.cpp` | D3D12 games: ring = D3D12 shared committed resources opened on the encoder device; D3D12 shared fences |
 | `src/source_vulkan.cpp` | Stub (logs "not yet supported") |
-| `src/recorder.h/.cpp` | Recording: ring bookkeeping, video processor RGBA→NV12, linear→sRGB pre-pass, MF sink writer, AAC, finalize, st3d |
+| `src/recorder.h/.cpp` | Recording: ring bookkeeping, video processor RGBA→NV12, linear→sRGB pre-pass, head-smoothing re-projection pass, MF sink writer, AAC, finalize, st3d |
+| `src/head_smoothing.h/.cpp` | Head-motion smoothing, CPU side: orientation filter (follow, catch-up, roll lock, edge guard) and the per-eye re-projection parameters |
 | `src/audio_capture.h/.cpp` | WASAPI loopback → continuous 48 kHz stereo int16 on the QPC clock |
 | `src/st3d.h/.cpp` | Post-finalize MP4 patch: `st3d` box into the video sample entry |
 | `src/control.h/.cpp` | Control thread: hotkey, tray IPC, status publishing, beeps |
@@ -45,7 +46,7 @@ zip. Re-run it after every build you want the games to pick up (a running game k
 game thread, inside xrEndFrame (before forwarding):
   first XR_TYPE_COMPOSITION_LAYER_PROJECTION, views[0] = left, views[1] = right
   each view: subImage.swapchain -> tracked swapchain -> image = most recently RELEASED index
-             (xrReleaseSwapchainImage releases the oldest acquired one), imageRect, imageArrayIndex
+             (xrReleaseSwapchainImage releases the oldest acquired one), imageRect, imageArrayIndex, pose, fov
   Recorder::SubmitFrame(ts, L, R):
      free ring slot? (else drop, counted "ring full")
      IFrameSource::CopyEyes: GPU-wait(free fence) + copy L -> (0,0), R -> (leftWidth,0) + signal(ready fence)
@@ -53,7 +54,8 @@ game thread, inside xrEndFrame (before forwarding):
        D3D12: one command list on the game's queue: barriers RT->COPY_SOURCE, CopyTextureRegion x2, barriers back
   -> queue {slot, ready value, ts}
 encoder worker thread (private D3D11 device on the game's adapter, by LUID):
-  Wait(ready) -> [linear formats: compute pass, sRGB encode] -> VideoProcessorBlt RGBA->NV12 (BT.709 limited)
+  Wait(ready) -> [linear formats: compute pass, sRGB encode] -> [head_smoothing > 0: re-projection pass]
+  -> VideoProcessorBlt RGBA->NV12 (BT.709 limited)
   -> Signal(free) -> IMFTrackedSample(DXGI surface) -> IMFSinkWriter::WriteSample (hardware HEVC / H.264 MFT)
 audio thread: WASAPI loopback -> int16 48 kHz -> WriteSample (AAC)
 stop: drain, Finalize, st3d patch, summary line in the log
@@ -76,6 +78,49 @@ The ring uses the typed UNORM member of the swapchain's copy family (`B8G8R8A8_U
 those get a compute pre-pass that sRGB-encodes. Measured: the NVIDIA video processor accepts `RGB_FULL_G10` input but
 passes values through without the curve (grey 128 stayed 128 instead of 188), hence the explicit pass.
 `config.ini gamma = srgb | linear` overrides the decision. Output is tagged BT.709 primaries / transfer / matrix, limited range.
+
+### Head-motion smoothing
+
+Off (`head_smoothing = 0`) the stage does not exist: no resources, no pass, the video processor reads the ring (or the
+linear pre-pass output) exactly as before. On:
+
+- **Input.** The layer copies each `XrCompositionLayerProjectionView`'s `pose` and `fov` into `EyeView` (pose in the
+  projection layer's space; same space for both views). `SubmitFrame` also gets `XrFrameEndInfo::displayTime`. The
+  game thread only packs these numbers into the queue item.
+- **Filter** (`HeadSmoother`, encoder worker thread, once per written frame). Head `H = slerp(qLeft, qRight, 0.5)`.
+  Filter state `S <- slerp(S, H, a)` with `a = 1 - exp(-dt / tau)`, dt from displayTime, `tau = 0.05 s * 30^((s - 0.1) / 0.9)`.
+  Follow: `a += (1 - a) * smoothstep((e - f) / f)` with `e = angle(S, H)`, `f = head_follow_deg` (full speed at 2f), and
+  a catch-up level that ramps to 1 in 0.1 s while `e > f` and back to 0 in 0.3 s once `e < f/4`, blending `tau` towards
+  `min(tau, 60 ms)` (without it a turn ends with a slow `tau` tail from `f` down). Reset to `H` at the first frame of a
+  recording and after a gap > 0.5 s. Output head `O = S`, with roll removed if `roll_lock` (same forward vector, camera
+  +X perpendicular to the space's +Y; LOCAL / STAGE are gravity-aligned).
+- **Edge guard** (`edge_guard = 1`): if the output frustum of either eye is not inside its source frustum (exact test:
+  both are convex cones, so the 4 corner rays decide), `O` is replaced by `slerp(O, H, b)` with the smallest `b`
+  (14-step bisection) that is covered. Only the output is clamped; `S` keeps filtering. Why it exists: with
+  `output_fov_scale = 0.9` the margin is ~3 degrees per side, and +-2 degree yaw + pitch + roll jitter at the corners
+  exceeds that in ~30 % of frames (measured: `run_jitter.ps1` noguard case), so without it black corners flicker.
+- **Per eye.** Smoothed eye orientation `O * H^-1 * q_e` (keeps each eye's offset from the head, e.g. canted
+  displays). GPU matrix `C_e = q_e^-1 * O * H^-1 * q_e`: a ray of the smoothed (output) camera -> the actual eye camera.
+- **GPU pass** (`Recorder::Impl::Reproject`, encoder device, inside the device-manager lock): one full-screen triangle
+  over the whole W x H SBS target, the pixel shader picks the eye by x. For output pixel `uv` (0..1, v down) of an eye:
+  `d = (lerp(k tanL, k tanR, u), lerp(k tanU, k tanD, v), -1)` with `k = output_fov_scale`; `a = C_e d`; behind
+  (`a.z >= 0`) = black; `t = a.xy / -a.z`; source `s = ((t.x - tanL) / (tanR - tanL), (tanU - t.y) / (tanU - tanD))`;
+  outside [0,1] = black, else a bilinear sample in that eye's half of the source (clamped half a texel inside the half,
+  so the other eye never bleeds in). OpenXR conventions: right-handed, -Z forward, +X right, +Y up; `angleLeft` and
+  `angleDown` are negative.
+- **Colour.** Source SRV = the ring's typed UNORM (or float) format, target = a texture of the video processor's input
+  format (`fmt`, or `R8G8B8A8_UNORM` after the linear pre-pass): no sRGB decode / encode anywhere, bilinear filtering
+  works on the encoded values. The linear pre-pass runs first and the pass reads its output, so the colour path is the
+  same as without smoothing; `run_selftests.ps1`'s `*_smooth` cases (identity pose, `output_fov_scale 1` = exact
+  identity mapping) pass the same grey-step check (worst 1 code value).
+- **Cost.** One extra W x H texture (+318 MB at 12240 x 6496) and the pass: 0.20 ms avg / 0.74 ms max GPU at
+  12240 x 6496 on an RTX 5090 (D3D11 timestamp queries, logged), 0.01 ms worker CPU. The game thread's `SubmitFrame`
+  is unchanged apart from copying 2 x 8 floats.
+- **Stats** in `head smoothing summary`: mean / max correction (angle O vs H), frames where the edge guard limited it,
+  frames with uncovered output (black), frames with follow / catch-up active, frames without a usable pose (identity
+  pass-through), filter resets, GPU / CPU cost.
+- **Translation** is ignored on purpose (needs depth). Head-locked projection spaces (VIEW) give identity poses:
+  nothing to smooth.
 
 ### Timestamps and A/V sync
 
@@ -126,10 +171,13 @@ the DLL (`GetModuleHandleEx` + `FreeLibraryAndExitThread`), so an early unload c
 | `layer_loadtest.exe` | Real loader + active runtime (VDXR here): our layer is enumerated, negotiates, an instance is created and destroyed through it. |
 | `tests\run_e2e.ps1` | Real loader → installed layer → `mock_runtime.dll`, a normal app frame loop for every layout and both D3D APIs, recording through `XR_EYE_CAPTURE_AUTORECORD`; each MP4 verified. |
 | dormant case (last case of `run_e2e.ps1`) | Without `XR_EYE_CAPTURE_REQUIRE_TRAY=0` and without the tray: `layer_e2e --expect-dormant` loop completes, no MP4, log has the "layer dormant" line and no `control:` / recorder lines. (Fails if a tray is running.) |
+| `head_smoothing_test.exe` | Filter math on the CPU: time-constant mapping, first frame = identity, correction direction for yaw / pitch (OpenXR conventions), gap reset, roll lock, follow + catch-up (lag bound, settle), edge guard on / off, no-pose pass-through. |
+| `tests\run_jitter.ps1` | Head smoothing end to end (installed layer, real loader, mock runtime): `layer_e2e --jitter` renders a world-locked grid + marker for the pose the mock reports (+-2 degree yaw / pitch / roll jitter at 3.3 / 4.1 / 4.7 Hz, a 30 degree yaw turn at t = 4..5 s; `tests/test_motion.h`). Three recordings (smoothing 0; 0.6 with `output_fov_scale` 0.9; same with `edge_guard` 0), ffmpeg-decoded, marker located per frame in the left eye. Checks: raw marker = analytic expectation (RMS < 0.15 degree), jitter-phase std-dev raw / smoothed >= 5, settles within 0.5 s after the turn (1 degree), final position 30 / 0 degrees, no black border pixels in the jitter phase. Measured: raw 2.00 degree, smoothed 0.34 degree (5.8x; 7.5x without the edge guard), settle 0.16 s (0.20 s without the guard), RMS 0.006 degree. |
 | tray IPC | Start `EyeCaptureTray.exe` (GUI), then `layer_e2e --record 0` (it must be started with the tray running, or with `XR_EYE_CAPTURE_REQUIRE_TRAY=0`) + `EyeCaptureTray.exe --start / --status / --stop`. |
 
 Test-only environment variables read by the layer: `XR_EYE_CAPTURE_AUTORECORD=<seconds>` (start at the first frame,
-stop after N s) and `XR_EYE_CAPTURE_OUTPUT_DIR=<dir>`, `XR_EYE_CAPTURE_REQUIRE_TRAY=0|1` (overrides `require_tray`; `run_e2e.ps1` sets 0 for the
+stop after N s), `XR_EYE_CAPTURE_CONFIG=key=value;key=value` (applied on top of `config.ini`, same keys and checks,
+each logged as `config override:`; `run_jitter.ps1` uses it for the smoothing settings) and `XR_EYE_CAPTURE_OUTPUT_DIR=<dir>`, `XR_EYE_CAPTURE_REQUIRE_TRAY=0|1` (overrides `require_tray`; `run_e2e.ps1` sets 0 for the
 recording cases).
 
 ## Not verified without a headset
@@ -138,3 +186,5 @@ recording cases).
   textures would be logged with `KEYED MUTEX`), real frame pacing, the beeps inside the headset.
 - The hotkey path (`GetAsyncKeyState`) was not pressed in a test; the same start / stop code was driven through the tray IPC.
 - YouTube's handling of the uploaded file (ffprobe parses the `st3d` box; YouTube's processing was not tried).
+- Head smoothing with real head motion and a real runtime's view poses (the mock reports synthetic motion; the pass
+  itself is runtime-independent). Whether the default strength / follow / fov scale feel right is a viewing judgement.

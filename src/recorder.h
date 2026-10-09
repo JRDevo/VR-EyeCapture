@@ -5,8 +5,9 @@
 // Threads:
 //   * game thread  : SubmitFrame() -- picks a free ring slot, IFrameSource::CopyEyes (GPU work only), queues it.
 //                    Never waits: a full ring (or a slot still busy on the GPU) drops the frame and counts it.
-//   * worker thread: everything else (device + ring creation, sink writer, per-frame NV12 conversion and
-//                    WriteSample, finalize, st3d). One worker per recording.
+//   * worker thread: everything else (device + ring creation, sink writer, per-frame [linear->sRGB pre-pass],
+//                    [head-motion smoothing re-projection], NV12 conversion and WriteSample, finalize, st3d).
+//                    One worker per recording.
 //   * audio thread : AudioCapture -> WriteSample on the audio stream.
 // The encoder device is private (created on the game's adapter); Media Foundation never touches the game's device.
 #pragma once
@@ -20,6 +21,7 @@
 #include <string>
 #include <thread>
 #include "frame_source.h"
+#include "head_smoothing.h"
 
 struct RecorderSettings {
     std::wstring path;               // output .mp4
@@ -30,6 +32,7 @@ struct RecorderSettings {
     unsigned     maxWidth = 0;       // 0 = native
     bool         audio = true;
     std::wstring audioDevice;
+    HeadSmoothingSettings head;      // head-motion smoothing (head.smoothing = 0: stage bypassed)
 };
 
 enum class RecState { Idle, Starting, Recording, Stopping, Failed };
@@ -53,8 +56,9 @@ public:
     // w x h = SBS size (left eye width = leftWidth). fmt = typed staging format. srgbEncoded = data is gamma-encoded.
     bool Start(IFrameSource* src, const RecorderSettings& s, UINT w, UINT h, UINT leftWidth, DXGI_FORMAT fmt, bool srgbEncoded);
     // Game thread. ts100ns = presentation time on the QPC clock (100-ns units). L/R are clipped here.
+    // displayTimeNs = the frame's XrFrameEndInfo::displayTime (head smoothing dt); 0 = derive from ts100ns.
     // Returns true if the frame was queued.
-    bool SubmitFrame(int64_t ts100ns, const EyeView& L, const EyeView& R);
+    bool SubmitFrame(int64_t ts100ns, const EyeView& L, const EyeView& R, int64_t displayTimeNs = 0);
     void Stop();                        // async; any thread
     bool WaitIdle(DWORD ms);            // waits for the worker to finish (finalize + st3d)
     RecState State() const { return state_.load(); }

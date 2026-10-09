@@ -45,6 +45,12 @@ struct EyeView {
     uint32_t             arrayIndex = 0;
     int32_t              x = 0, y = 0;
     uint32_t             w = 0, h = 0;
+    // The view's rendering pose (XrCompositionLayerProjectionView::pose / fov, in the projection layer's space).
+    // Only head-motion smoothing reads it; the frame sources ignore it.
+    bool                 hasPose = false;
+    float                orientation[4] = {0, 0, 0, 1};   // x, y, z, w
+    float                position[3] = {0, 0, 0};
+    float                fov[4] = {0, 0, 0, 0};           // angleLeft, angleRight, angleUp, angleDown (radians)
 };
 
 // The ring as the encoder device sees it.

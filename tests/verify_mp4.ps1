@@ -20,6 +20,8 @@ param(
     [switch]$ExpectAudio,
     [switch]$ExpectSound,          # audio must not be silent (a tone was played)
     [switch]$SkipPixels,           # for scaled outputs
+    [int]$OutW = 0,                # expected encoded size when the encoder scaled the SBS frame (0 = 2*EyeW x EyeH)
+    [int]$OutH = 0,
     [string]$FfmpegDir = ''
 )
 $ErrorActionPreference = 'Stop'
@@ -48,6 +50,7 @@ Check ($v -ne $null) 'video stream present'
 if ($v) {
     Check ($v.codec_name -eq $Codec) "codec $($v.codec_name) (want $Codec)"
     $wantW = 2 * $EyeW - ((2 * $EyeW) % 2); $wantH = $EyeH - ($EyeH % 2)
+    if ($OutW -gt 0) { $wantW = $OutW; $wantH = $OutH }
     Check (($v.width -eq $wantW) -and ($v.height -eq $wantH)) "size $($v.width)x$($v.height) (want ${wantW}x${wantH})"
     $p = $v.avg_frame_rate.Split('/'); $rate = [double]$p[0] / [double]$p[1]
     Check ([math]::Abs($rate - $Fps) -le 2) ("avg frame rate {0:N2} (want ~{1})" -f $rate, $Fps)

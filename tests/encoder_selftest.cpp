@@ -6,6 +6,10 @@
 //   encoder_selftest [--api d3d11|d3d12] [--layout two|array|wide|msaa] [--eye 1920x1080] [--seconds 5] [--fps 90]
 //                    [--format srgb|unorm] [--codec hevc|h264] [--out file.mp4] [--no-audio] [--no-tone]
 //                    [--max-width N] [--max-fps N]
+//                    [--head-smoothing S] [--fov-scale K] [--follow-deg D] [--roll-lock] [--no-edge-guard]
+// Head smoothing: every view is submitted with an identity pose and a +-0.8 rad fov, so with --fov-scale 1 the
+// re-projection is an exact identity mapping and verify_mp4.ps1's pixel checks (grey steps, eye id) still apply:
+// that proves the stage keeps the colour path (sRGB data and the linear pre-pass) unchanged.
 // Exit code 0 = file written with >= 90 % of the frames.
 #include <windows.h>
 #include <d3d11_4.h>
@@ -31,6 +35,7 @@ struct Args {
     double seconds = 5;
     std::wstring out;
     bool audio = true, tone = true;
+    HeadSmoothingSettings head;
 };
 
 std::wstring ExeDir() {
@@ -82,6 +87,11 @@ int main(int argc, char** argv) {
         else if (k == "--max-width") a.maxWidth = (UINT)atoi(next().c_str());
         else if (k == "--max-fps") a.maxFps = (UINT)atoi(next().c_str());
         else if (k == "--no-tone") a.tone = false;
+        else if (k == "--head-smoothing") a.head.smoothing = (float)atof(next().c_str());
+        else if (k == "--fov-scale") a.head.fovScale = (float)atof(next().c_str());
+        else if (k == "--follow-deg") a.head.followDeg = (float)atof(next().c_str());
+        else if (k == "--roll-lock") a.head.rollLock = true;
+        else if (k == "--no-edge-guard") a.head.edgeGuard = false;
         else { printf("unknown argument %s\n", k.c_str()); return 2; }
     }
     const bool d3d12 = a.api == "d3d12";
@@ -211,6 +221,8 @@ int main(int argc, char** argv) {
         eyes[e].y = 0;
         eyes[e].w = w;
         eyes[e].h = h;
+        eyes[e].hasPose = true;   // identity orientation (default), symmetric fov
+        eyes[e].fov[0] = -0.8f; eyes[e].fov[1] = 0.8f; eyes[e].fov[2] = 0.8f; eyes[e].fov[3] = -0.8f;
     }
 
     DXGI_FORMAT stage{};
@@ -224,6 +236,7 @@ int main(int argc, char** argv) {
     rs.audio = a.audio;
     rs.maxWidth = a.maxWidth;
     rs.maxFps = a.maxFps;
+    rs.head = a.head;
     Recorder rec;
     rec.Start(src.get(), rs, 2 * w, h, w, stage, srgbData);
     {
@@ -284,7 +297,7 @@ int main(int argc, char** argv) {
         }
         // the layer's xrEndFrame work
         const int64_t c0 = QpcNow100ns();
-        if (rec.SubmitFrame(due, eyes[0], eyes[1])) ++submitted;
+        if (rec.SubmitFrame(due, eyes[0], eyes[1], due * 100)) ++submitted;
         const double ms = (QpcNow100ns() - c0) / 1e4;
         cpuSum += ms;
         if (ms > cpuMax) cpuMax = ms;

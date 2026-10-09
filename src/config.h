@@ -4,6 +4,7 @@
 // Unknown keys and bad values are logged and ignored (the default is kept).
 #pragma once
 #include <string>
+#include "head_smoothing.h"
 #include "log.h"
 
 struct Hotkey {
@@ -31,11 +32,15 @@ struct Config {
     GammaMode    gamma = GammaMode::Auto;
     bool         requireTray = true;     // require_tray: layer stays dormant unless EyeCaptureTray.exe is running
     bool         swapEyes = false;       // swap_eyes: put the right eye in the left half (for players that flip SBS)
+    HeadSmoothingSettings head;          // head_smoothing, head_follow_deg, roll_lock, output_fov_scale, edge_guard
     LogLevel     logLevel = LogLevel::Info;
     std::wstring loadedFrom;             // path of the ini that was read ("" = defaults only)
 };
 
 // dllDir: folder of eye_capture.dll (no trailing slash). Always fills `out` with defaults first.
 void LoadConfig(const std::wstring& dllDir, Config& out);
+// "key=value;key=value" applied on top (same keys and checks as config.ini; each one logged). Used for the test-only
+// environment variable XR_EYE_CAPTURE_CONFIG.
+void ApplyConfigOverrides(const std::wstring& list, Config& c);
 // Path LoadConfig would read (may not exist): %APPDATA% copy if present, else <dllDir>\config.ini.
 std::wstring ConfigPath(const std::wstring& dllDir);
