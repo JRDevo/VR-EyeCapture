@@ -2,7 +2,8 @@
 
 Records **both eye images** of an OpenXR game, at exactly the resolution and quality the headset receives, into a
 **side-by-side (left | right) 3D MP4** with the game's audio. Press a hotkey (or use the tray icon) to start and stop.
-The MP4 carries the standard stereo flag (`st3d`, left-right), so YouTube and 3D players recognise it as 3D.
+The MP4 carries the standard stereo flag (`st3d`, left-right) for 3D players; for YouTube the tray app also converts every
+recording to a `.mkv` with the Matroska stereo tag, which YouTube reliably recognises as 3D (see "Upload to YouTube").
 
 It is an **OpenXR API layer**: it sits between the game and the OpenXR runtime, so it works the same with
 Virtual Desktop (VDXR), SteamVR, Oculus / Meta Link, or any other runtime. Nothing is injected into the game and no
@@ -53,25 +54,33 @@ Set `require_tray = 0` in `config.ini` to always arm without the tray (old behav
 Recording also stops and the file is finalized when the game closes its VR session (quitting the game normally).
 If the game crashes or is killed while recording, the MP4 is lost (it is only finalized at the end).
 
-**Tray icon**: grey = no VR game, green = ready, red = recording, amber = starting / finalizing / failed.
-Right-click: Start / Stop recording, Open captures folder, Open log, Edit config, Exit. The tooltip shows game,
-resolution, fps, dropped frames and elapsed time. `EyeCaptureTray.exe --start | --stop | --toggle | --status` does the
+**Tray icon**: grey = no VR game, green = ready, red = recording, amber = starting / finalizing / failed,
+blue = converting a finished recording (see "Upload to YouTube").
+Right-click: Start / Stop recording, Open captures folder, Convert last recording now, Open log, Edit config, Exit. The tooltip shows game,
+resolution, fps, dropped frames and elapsed time, and "converting <file> (MKV)..." / "last: <file>.mkv ready". `EyeCaptureTray.exe --start | --stop | --toggle | --status` does the
 same from a script or a Stream Deck button (`--start` / `--toggle` print an error if the tray app is not running).
 
 ## Upload to YouTube
 
-Upload the MP4 as it is. YouTube reads the stereo flag (Spherical Video V2 `st3d`, left-right) and processes it as a 3D
-video; viewers in a headset (YouTube VR) get 3D. Processing of large files takes a while; the 3D version can appear later
-than the first standard-definition version.
+**The tray app converts every recording to a `.mkv` automatically; upload the `.mkv`.** YouTube only reliably recognises
+the 3D tag as the Matroska `stereo_mode = left_right` tag (it ignored the MP4 `st3d` box), so when a recording is saved
+the tray (it must be running, which it is anyway for the layer to be active) remuxes the MP4 with ffmpeg: no re-encode, takes
+seconds, and the picture is untouched. YouTube then processes it as a 3D video; viewers in a headset (YouTube VR) get 3D.
+Processing of large files takes a while; the 3D version can appear later than the first standard-definition version.
 
-If YouTube shows it as a flat side-by-side video after processing has finished, make an MKV copy (no re-encode, takes
-seconds) and upload that instead:
-
-```
-powershell -ExecutionPolicy Bypass -File scripts\make_mkv.ps1 captures\eurotrucks2_20261009_201512_SBS.mp4
-```
-
-This needs ffmpeg (`winget install Gyan.FFmpeg.Essentials`); the MKV gets the Matroska `stereo_mode = left_right` tag.
+- While it runs the tray icon is **blue** and the tooltip says "converting <file> (MKV)..."; afterwards the tooltip says
+  "last: <file>.mkv ready" and a balloon says "Ready for YouTube: <file>.mkv". One recording at a time, in order.
+- The MP4 is deleted only after the MKV exists and is larger than 90% of the MP4 (`keep_mp4 = 1` keeps both). If anything
+  fails (a balloon shows the first line of ffmpeg's error) the MP4 is left untouched. **Tray menu > Convert last recording
+  now** retries the most recent recording (it needs the MP4, so use `keep_mp4 = 1` if you want to be able to redo it).
+- Needs ffmpeg: `winget install Gyan.FFmpeg.Essentials`. The tray finds it on `PATH`, else in the WinGet packages folder, else
+  in an `ffmpeg` folder next to the tray app (or set `ffmpeg_path`). Without ffmpeg you get one balloon "ffmpeg not found"
+  and the MP4 stays as it is.
+- Only recordings that finish while the tray runs are converted; older ones: `scripts\make_mkv.ps1 <file.mp4>` (the manual
+  path, same result) or "Convert last recording now".
+- `post_flat = 1` also writes `<name>_FLAT.mp4` (normal 2D video: left eye, 16:9 centre crop, 3840 wide, NVENC HEVC or x264;
+  same as `scripts\make_flat.ps1`) for viewers without a headset. The tray log is `logs\tray.log` (each ffmpeg command line,
+  duration and result).
 
 ## Settings — `config.ini`
 
@@ -96,6 +105,10 @@ starts its OpenXR instance.
 | `roll_lock` | `0` | Smoothing: `1` = keep the horizon level. |
 | `output_fov_scale` | `0.9` | Smoothing: fraction of the game's field of view in the recording (room for the correction). |
 | `edge_guard` | `1` | Smoothing: `1` = never show black edges (the correction is limited to what the game rendered). |
+| `post_mkv` | `1` | Tray app: after each recording, remux the MP4 to `<name>.mkv` with the Matroska 3D tag (what YouTube reads). |
+| `keep_mp4` | `0` | Tray app: `0` = delete the MP4 once the MKV (and the flat file, if requested) is verified; `1` = keep both. |
+| `post_flat` | `0` | Tray app: also write `<name>_FLAT.mp4`, a normal 2D video (left eye, 16:9 centre crop, 3840 wide). |
+| `ffmpeg_path` | *(empty)* = auto | Tray app: full path of `ffmpeg.exe`. Empty = `PATH`, then WinGet packages, then an `ffmpeg` folder next to the tray app. |
 | `require_tray` | `1` | `1` = the layer is only active while `EyeCaptureTray.exe` is running (checked when the game creates its VR session). `0` = always active. |
 | `log_level` | `info` | `error`, `warn`, `info`, `debug`. |
 

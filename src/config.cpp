@@ -213,6 +213,14 @@ KeyResult ApplyKey(Config& c, const std::wstring& key, std::wstring val) {
         if (ParseBool(val, b)) c.requireTray = b; else ok = false;
     } else if (key == L"swap_eyes") {
         if (ParseBool(val, b)) c.swapEyes = b; else ok = false;
+    } else if (key == L"post_mkv") {
+        if (ParseBool(val, b)) c.postMkv = b; else ok = false;
+    } else if (key == L"keep_mp4") {
+        if (ParseBool(val, b)) c.keepMp4 = b; else ok = false;
+    } else if (key == L"post_flat") {
+        if (ParseBool(val, b)) c.postFlat = b; else ok = false;
+    } else if (key == L"ffmpeg_path") {
+        c.ffmpegPath = val;
     } else if (key == L"head_smoothing") {
         if (ParseFloat(val, fl) && fl >= 0.0f && fl <= 1.0f) c.head.smoothing = fl; else ok = false;
     } else if (key == L"head_follow_deg") {

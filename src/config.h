@@ -32,6 +32,11 @@ struct Config {
     GammaMode    gamma = GammaMode::Auto;
     bool         requireTray = true;     // require_tray: layer stays dormant unless EyeCaptureTray.exe is running
     bool         swapEyes = false;       // swap_eyes: put the right eye in the left half (for players that flip SBS)
+    // Post-processing, done by EyeCaptureTray.exe after each recording (the layer parses but ignores these).
+    bool         postMkv = true;         // post_mkv: remux the MP4 to <name>.mkv with Matroska stereo_mode=left_right
+    bool         keepMp4 = false;        // keep_mp4: keep the MP4 after a verified MKV (and flat) conversion
+    bool         postFlat = false;       // post_flat: also write <name>_FLAT.mp4 (left eye, 16:9, 3840 wide)
+    std::wstring ffmpegPath;             // ffmpeg_path: empty = PATH, then WinGet packages, then <dll folder>fmpegfmpeg.exe
     HeadSmoothingSettings head;          // head_smoothing, head_follow_deg, roll_lock, output_fov_scale, edge_guard, symmetric_fov
     LogLevel     logLevel = LogLevel::Info;
     std::wstring loadedFrom;             // path of the ini that was read ("" = defaults only)

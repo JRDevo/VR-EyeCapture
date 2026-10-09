@@ -63,7 +63,7 @@ add_custom_command(TARGET eye_capture POST_BUILD
             $<TARGET_FILE_DIR:eye_capture>/${EYE_LAYER_NAME}.json)
 
 # --- tray control app (optional; the layer works without it) ---
-add_executable(EyeCaptureTray WIN32 tray/tray.cpp)
+add_executable(EyeCaptureTray WIN32 tray/tray.cpp tray/postprocess.cpp)
 target_compile_options(EyeCaptureTray PRIVATE ${EYE_WARN_FLAGS})
 target_link_libraries(EyeCaptureTray PRIVATE eye_capture_core comctl32)
 
@@ -75,6 +75,12 @@ if (EYE_BUILD_TESTS)
     target_compile_options(encoder_selftest PRIVATE ${EYE_WARN_FLAGS})
     target_link_libraries(encoder_selftest PRIVATE eye_capture_core)
     target_include_directories(encoder_selftest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+
+    # Plays the layer's side of the tray IPC (ready/recording/stopping/saved) on a private block, for testing the tray's post-processing.
+    add_executable(status_sim tests/status_sim.cpp)
+    target_compile_options(status_sim PRIVATE ${EYE_WARN_FLAGS})
+    target_compile_definitions(status_sim PRIVATE UNICODE _UNICODE NOMINMAX)
+    target_include_directories(status_sim PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
     # Head-smoothing filter unit test (CPU only).
     add_executable(head_smoothing_test tests/head_smoothing_test.cpp)

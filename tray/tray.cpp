@@ -1,33 +1,41 @@
 // EyeCaptureTray -- tray control for the OpenXR-EyeCapture layer (Win32, no frameworks). The layer is dormant (pure
 // pass-through) unless this app is running: it holds the named mutex Local\OpenXR-EyeCapture-TrayAlive while it runs.
 //
-// Tray icon: grey = no game, green = game running (ready), red = recording, amber = starting / finalizing / failed.
-// Right-click (or left-click) menu: Start / Stop recording, Open captures folder, Open log, Edit config, Exit.
-// Tooltip: game, API, resolution, fps, frames dropped, elapsed. Talks to the layer through src/shared_status.h.
+// Tray icon: grey = no game, green = game running (ready), red = recording, amber = starting / finalizing / failed,
+// blue = converting a finished recording (post-processing, see tray/postprocess.h).
+// Right-click (or left-click) menu: Start / Stop recording, Open captures folder, Convert last recording now, Open log,
+// Edit config, Exit.
+// Tooltip: game, API, resolution, fps, frames dropped, elapsed, conversion progress. Talks to the layer through
+// src/shared_status.h. After each recording the tray remuxes it to .mkv (YouTube 3D tag) in a worker thread.
 // Start it BEFORE the game: the layer decides at xrCreateSession whether to arm (config require_tray=0 = always arm).
 #include <windows.h>
 #include <shellapi.h>
 #include <cmath>
 #include <string>
 #include "config.h"
+#include "postprocess.h"
 #include "shared_status.h"
 
 namespace {
 const UINT WM_TRAY = WM_APP + 1;
+const UINT WM_PP = WM_APP + 2;     // the post-processing worker changed state / queued a notice
 const UINT kTimer = 1;
-enum : UINT { ID_TOGGLE = 100, ID_FOLDER, ID_LOG, ID_CONFIG, ID_EXIT };
+enum : UINT { ID_TOGGLE = 100, ID_FOLDER, ID_CONVERT, ID_LOG, ID_CONFIG, ID_EXIT };
 
 HINSTANCE      g_inst;
 HWND           g_wnd;
 NOTIFYICONDATAW g_nid{};
 EyeCapShared*  g_shm = nullptr;
 HANDLE         g_map = nullptr;
-HICON          g_icons[4] = {};   // 0 grey, 1 green, 2 red, 3 amber
+HICON          g_icons[5] = {};   // 0 grey, 1 green, 2 red, 3 amber, 4 blue (converting)
 int            g_iconIdx = -1;
 EyeCapShared   g_st{};
 bool           g_live = false;    // a live owner exists
 uint32_t       g_prevState = ECS_NONE;
 std::wstring   g_exeDir;
+pp::Processor  g_pp;
+bool           g_baselineDone = false;   // the first status read only sets the baseline (no job for older recordings)
+std::wstring   g_lastSaved;              // last "saved" file seen (dedupe)
 
 HICON MakeDotIcon(COLORREF c) {
     const int s = 32;
@@ -74,18 +82,46 @@ std::wstring ExeDir() {
     return s.substr(0, s.find_last_of(L"\\/"));
 }
 
+// Queue a finished recording for post-processing (MP4 only; a no-op when both post_mkv and post_flat are 0).
+void QueueRecording(const std::wstring& mp4, bool force) {
+    Config cfg;
+    LoadConfig(g_exeDir, cfg);
+    if (!force && !cfg.postMkv && !cfg.postFlat) {
+        LOGI("tray: recording %s saved; post_mkv and post_flat are both 0 -- not converting", elog::Narrow(mp4).c_str());
+        return;
+    }
+    if (g_pp.Enqueue(mp4)) LOGI("tray: queued %s for conversion", elog::Narrow(mp4).c_str());
+    else LOGI("tray: %s is already queued / running", elog::Narrow(mp4).c_str());
+}
+
 void Refresh() {
     g_live = false;
-    if (g_shm && EyeCapReadStatus(g_shm, g_st) && g_st.ownerPid && EyeCapProcessAlive(g_st.ownerPid) &&
-        GetTickCount64() - g_st.heartbeatTick < 3000)
+    const bool read = g_shm && EyeCapReadStatus(g_shm, g_st);
+    if (read && g_st.ownerPid && EyeCapProcessAlive(g_st.ownerPid) && GetTickCount64() - g_st.heartbeatTick < 3000)
         g_live = true;
     const uint32_t state = g_live ? g_st.state : ECS_NONE;
+
+    // A recording just finished: the layer reports "saved <file>" (it stays in the block even after the game exits).
+    // The first read only sets the baseline, so a recording that finished before the tray started is not converted.
+    if (read) {
+        const bool saved = wcsncmp(g_st.message, L"saved ", 6) == 0 && g_st.file[0];
+        if (!g_baselineDone) {
+            g_baselineDone = true;
+            if (saved) g_lastSaved = g_st.file;
+        } else if (saved && g_lastSaved != g_st.file) {
+            g_lastSaved = g_st.file;
+            QueueRecording(g_lastSaved, false);
+        }
+    }
+
+    const pp::State job = g_pp.GetState();
     int idx = 0;
     if (state == ECS_READY) idx = 1;
     else if (state == ECS_RECORDING) idx = 2;
     else if (state == ECS_STARTING || state == ECS_STOPPING || state == ECS_FAILED) idx = 3;
+    if (job.busy && idx != 2 && idx != 3) idx = 4;   // converting (red recording / amber transitions keep priority)
 
-    wchar_t tip[128];
+    wchar_t tip[256];
     if (!g_live) {
         swprintf_s(tip, L"OpenXR-EyeCapture: no OpenXR game running\n(games started after this app are recorded)");
     } else if (state == ECS_RECORDING) {
@@ -99,11 +135,33 @@ void Refresh() {
     } else {
         swprintf_s(tip, L"%s (%s): ready\n%s toggles recording", g_st.game, g_st.api, g_st.hotkey);
     }
+    // conversion line: "converting <file> (MKV)..." while a job runs, "last: <file>.mkv ready" after
+    std::wstring jobLine;
+    if (job.busy) {
+        jobLine = L"converting " + job.file + L" (" + job.step + L")...";
+        if (job.queued) jobLine += L" +" + std::to_wstring(job.queued) + L" queued";
+    } else if (!job.lastLine.empty()) {
+        jobLine = job.lastLine;
+    }
+    static std::wstring s_prevJobLine;
+    if (jobLine != s_prevJobLine) { s_prevJobLine = jobLine; LOGI("tray: tooltip job line: %s", elog::Narrow(jobLine).c_str()); }
+    if (idx != g_iconIdx && (idx == 4 || g_iconIdx == 4)) LOGI("tray: icon %s", idx == 4 ? "blue (converting)" : "no longer blue");
+    wchar_t full[256];
+    if (jobLine.empty()) wcsncpy_s(full, tip, _TRUNCATE);
+    else if (state == ECS_RECORDING) swprintf_s(full, L"%s\n%s", tip, jobLine.c_str());   // recording info first
+    else swprintf_s(full, L"%s\n%s", jobLine.c_str(), tip);
     g_nid.uFlags = NIF_TIP | NIF_ICON;
-    wcsncpy_s(g_nid.szTip, tip, _TRUNCATE);
+    wcsncpy_s(g_nid.szTip, full, _TRUNCATE);     // szTip holds 127 characters
     g_nid.hIcon = g_icons[idx];
-    // balloon when a recording finishes
-    if (g_live && g_prevState == ECS_STOPPING && state == ECS_READY && g_st.message[0]) {
+    // balloon: a conversion result wins over "Recording saved"
+    pp::Notice notice;
+    if (g_pp.PopNotice(notice)) {
+        g_nid.uFlags |= NIF_INFO;
+        wcsncpy_s(g_nid.szInfoTitle, notice.title.c_str(), _TRUNCATE);
+        wcsncpy_s(g_nid.szInfo, notice.text.c_str(), _TRUNCATE);
+        g_nid.dwInfoFlags = notice.error ? NIIF_ERROR : NIIF_INFO;
+        LOGI("tray: balloon [%s] %s", elog::Narrow(notice.title).c_str(), elog::Narrow(notice.text).c_str());
+    } else if (g_live && g_prevState == ECS_STOPPING && state == ECS_READY && g_st.message[0]) {
         g_nid.uFlags |= NIF_INFO;
         wcsncpy_s(g_nid.szInfoTitle, L"Recording saved", _TRUNCATE);
         wcsncpy_s(g_nid.szInfo, g_st.message, _TRUNCATE);
@@ -128,6 +186,7 @@ void ShowMenu() {
     AppendMenuW(m, MF_STRING | ((g_live && state != ECS_STOPPING) ? 0 : MF_GRAYED), ID_TOGGLE, label.c_str());
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING, ID_FOLDER, L"Open captures folder");
+    AppendMenuW(m, MF_STRING, ID_CONVERT, L"Convert last recording now");
     AppendMenuW(m, MF_STRING, ID_LOG, L"Open log");
     AppendMenuW(m, MF_STRING, ID_CONFIG, L"Edit config");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
@@ -147,6 +206,38 @@ void ShowMenu() {
         if (dir.empty()) { LoadConfig(g_exeDir, cfg); dir = cfg.outputDir; }
         CreateDirectoryW(dir.c_str(), nullptr);
         OpenPath(dir, L"explore");
+        break;
+    }
+    case ID_CONVERT: {
+        // The most recent recording: the last one this tray saw / converted, else the newest *.mp4 in the captures folder.
+        std::wstring file = g_pp.LastQueued();
+        if (file.empty() || GetFileAttributesW(file.c_str()) == INVALID_FILE_ATTRIBUTES) {
+            std::wstring dir = g_live ? g_st.outputDir : L"";
+            if (dir.empty()) { LoadConfig(g_exeDir, cfg); dir = cfg.outputDir; }
+            WIN32_FIND_DATAW fd;
+            HANDLE h = FindFirstFileW((dir + L"\\*.mp4").c_str(), &fd);
+            FILETIME newest{};
+            file.clear();
+            if (h != INVALID_HANDLE_VALUE) {
+                do {
+                    const std::wstring n = fd.cFileName;
+                    if (n.size() >= 9 && _wcsicmp(n.c_str() + n.size() - 9, L"_FLAT.mp4") == 0) continue;
+                    if (file.empty() || CompareFileTime(&fd.ftLastWriteTime, &newest) > 0) { file = dir + L"\\" + n; newest = fd.ftLastWriteTime; }
+                } while (FindNextFileW(h, &fd));
+                FindClose(h);
+            }
+        }
+        if (file.empty() || GetFileAttributesW(file.c_str()) == INVALID_FILE_ATTRIBUTES) {
+            LOGI("tray: convert now: no MP4 found to convert");
+            g_nid.uFlags = NIF_INFO;
+            wcsncpy_s(g_nid.szInfoTitle, L"Nothing to convert", _TRUNCATE);
+            wcsncpy_s(g_nid.szInfo, L"No MP4 found. (Converted recordings have their MP4 removed unless keep_mp4 = 1.)", _TRUNCATE);
+            g_nid.dwInfoFlags = NIIF_INFO;
+            Shell_NotifyIconW(NIM_MODIFY, &g_nid);
+        } else {
+            LOGI("tray: convert now requested for %s", elog::Narrow(file).c_str());
+            QueueRecording(file, true);
+        }
         break;
     }
     case ID_LOG:
@@ -170,6 +261,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == s_taskbarCreated) { Shell_NotifyIconW(NIM_ADD, &g_nid); return 0; }
     switch (msg) {
     case WM_TIMER:
+    case WM_PP:
         Refresh();
         return 0;
     case WM_TRAY:
@@ -177,6 +269,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_DESTROY:
         KillTimer(h, kTimer);
+        g_pp.Stop();   // cancels a running ffmpeg and deletes its partial output
         Shell_NotifyIconW(NIM_DELETE, &g_nid);
         PostQuitMessage(0);
         return 0;
@@ -236,22 +329,32 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
         while (!a.empty() && a.back() == L' ') a.pop_back();
         if (a == L"--start" || a == L"--stop" || a == L"--toggle" || a == L"--status") return RunCli(a);
     }
-    HANDLE single = CreateMutexW(nullptr, TRUE, L"Local\\OpenXR-EyeCapture-Tray");
-    if (GetLastError() == ERROR_ALREADY_EXISTS) return 0;
+    // Test-only: EYECAP_TRAY_TEST_SHM=<name> runs an extra tray instance on a private status block (no single-instance
+    // check, no tray-alive marker), so tests/status_sim.exe can drive it without touching a real game's status.
+    wchar_t testShm[128];
+    const bool testMode = GetEnvironmentVariableW(L"EYECAP_TRAY_TEST_SHM", testShm, 128) > 0;
+    HANDLE single = nullptr;
+    if (!testMode) {
+        single = CreateMutexW(nullptr, TRUE, L"Local\\OpenXR-EyeCapture-Tray");
+        if (GetLastError() == ERROR_ALREADY_EXISTS) return 0;
+    }
     // "tray is alive" marker the layer looks for (GUI mode only; the CLI modes never create it). Null DACL so a game
     // running at a different integrity level can still open it.
     SECURITY_DESCRIPTOR sd;
     SECURITY_ATTRIBUTES sa{sizeof(sa), &sd, FALSE};
     InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION);
     SetSecurityDescriptorDacl(&sd, TRUE, nullptr, FALSE);
-    HANDLE alive = CreateMutexW(&sa, FALSE, EYECAP_TRAY_ALIVE_NAME);
+    HANDLE alive = testMode ? nullptr : CreateMutexW(&sa, FALSE, EYECAP_TRAY_ALIVE_NAME);
     g_inst = inst;
     g_exeDir = ExeDir();
-    g_shm = EyeCapOpenShared(&g_map);
+    elog::Init(g_exeDir + L"\\logs\\tray.log", false);
+    LOGI("tray: started%s (exe folder %s)", testMode ? " [TEST MODE, private status block]" : "", elog::Narrow(g_exeDir).c_str());
+    g_shm = testMode ? EyeCapOpenShared(&g_map, testShm) : EyeCapOpenShared(&g_map);
     g_icons[0] = MakeDotIcon(RGB(140, 140, 140));
     g_icons[1] = MakeDotIcon(RGB(40, 190, 70));
     g_icons[2] = MakeDotIcon(RGB(230, 30, 30));
     g_icons[3] = MakeDotIcon(RGB(240, 170, 20));
+    g_icons[4] = MakeDotIcon(RGB(50, 130, 240));
 
     WNDCLASSW wc{};
     wc.lpfnWndProc = WndProc;
@@ -269,6 +372,16 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     wcsncpy_s(g_nid.szTip, L"OpenXR-EyeCapture", _TRUNCATE);
     Shell_NotifyIconW(NIM_ADD, &g_nid);
     SetTimer(g_wnd, kTimer, 500, nullptr);
+    g_pp.Start(g_exeDir, g_wnd, WM_PP);
+    {
+        // resolve ffmpeg once at start so the log says what a job would use (jobs resolve again when they run)
+        Config cfg;
+        LoadConfig(g_exeDir, cfg);
+        std::wstring how;
+        const std::wstring ff = pp::ResolveFfmpeg(cfg, g_exeDir, how);
+        if (ff.empty()) LOGW("tray: ffmpeg not found at start (%s)", elog::Narrow(how).c_str());
+        else LOGI("tray: ffmpeg = %s (%s)", elog::Narrow(ff).c_str(), elog::Narrow(how).c_str());
+    }
     Refresh();
 
     MSG m;

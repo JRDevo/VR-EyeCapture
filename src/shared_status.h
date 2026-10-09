@@ -55,8 +55,9 @@ struct EyeCapShared {
 };
 
 // Opens (or creates) the block. Returns nullptr on failure. Close with UnmapViewOfFile + CloseHandle(*mapping).
-inline EyeCapShared* EyeCapOpenShared(HANDLE* mapping) {
-    *mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, (DWORD)sizeof(EyeCapShared), EYECAP_SHM_NAME);
+// `name` is only changed by tests (a private block so a test tray / status simulator never touch a real game's status).
+inline EyeCapShared* EyeCapOpenShared(HANDLE* mapping, const wchar_t* name = EYECAP_SHM_NAME) {
+    *mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, (DWORD)sizeof(EyeCapShared), name);
     if (!*mapping) return nullptr;
     const bool created = GetLastError() != ERROR_ALREADY_EXISTS;
     auto* p = (EyeCapShared*)MapViewOfFile(*mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(EyeCapShared));
