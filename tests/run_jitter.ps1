@@ -109,8 +109,9 @@ $cases = @(
     @{ name = 'smooth';  cfg = 'head_smoothing=0.6;output_fov_scale=0.9';              k = 0.9; tans = $symTans },
     @{ name = 'noguard'; cfg = 'head_smoothing=0.6;output_fov_scale=0.9;edge_guard=0'; k = 0.9; tans = $symTans }
 )
-$prevTray = $env:XR_EYE_CAPTURE_REQUIRE_TRAY; $prevCfg = $env:XR_EYE_CAPTURE_CONFIG
+$prevTray = $env:XR_EYE_CAPTURE_REQUIRE_TRAY; $prevCfg = $env:XR_EYE_CAPTURE_CONFIG; $prevIpc = $env:XR_EYE_CAPTURE_TRAY_IPC
 $env:XR_EYE_CAPTURE_REQUIRE_TRAY = '0'
+$env:XR_EYE_CAPTURE_TRAY_IPC = '0'   # a running tray must not post-process (and delete) the test recordings
 $data = @{}
 $summ = @{}
 $fails = New-Object System.Collections.Generic.List[string]
@@ -164,6 +165,7 @@ foreach ($c in $cases) {
 }
 if ($null -ne $prevTray) { $env:XR_EYE_CAPTURE_REQUIRE_TRAY = $prevTray } else { Remove-Item Env:\XR_EYE_CAPTURE_REQUIRE_TRAY -ErrorAction SilentlyContinue }
 if ($null -ne $prevCfg) { $env:XR_EYE_CAPTURE_CONFIG = $prevCfg } else { Remove-Item Env:\XR_EYE_CAPTURE_CONFIG -ErrorAction SilentlyContinue }
+if ($null -ne $prevIpc) { $env:XR_EYE_CAPTURE_TRAY_IPC = $prevIpc } else { Remove-Item Env:\XR_EYE_CAPTURE_TRAY_IPC -ErrorAction SilentlyContinue }
 
 function JitterStd($rows) {
     $j = @($rows | Where-Object { $_.t -ge 1.0 -and $_.t -le 3.9 -and -not [double]::IsNaN($_.x) })

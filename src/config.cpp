@@ -231,6 +231,18 @@ KeyResult ApplyKey(Config& c, const std::wstring& key, std::wstring val) {
         if (ParseFloat(val, fl) && fl >= 0.5f && fl <= 1.0f) c.head.fovScale = fl; else ok = false;
     } else if (key == L"edge_guard") {
         if (ParseBool(val, b)) c.head.edgeGuard = b; else ok = false;
+    } else if (key == L"vr_indicator") {
+        if (ParseBool(val, b)) c.indicator.enabled = b; else ok = false;
+    } else if (key == L"indicator_x") {
+        if (ParseFloat(val, fl) && fl >= -2.0f && fl <= 2.0f) c.indicator.x = fl; else ok = false;
+    } else if (key == L"indicator_y") {
+        if (ParseFloat(val, fl) && fl >= -2.0f && fl <= 2.0f) c.indicator.y = fl; else ok = false;
+    } else if (key == L"indicator_z") {
+        if (ParseFloat(val, fl) && fl >= -10.0f && fl <= -0.05f) c.indicator.z = fl; else ok = false;
+    } else if (key == L"indicator_size") {
+        if (ParseFloat(val, fl) && fl >= 0.002f && fl <= 0.5f) c.indicator.size = fl; else ok = false;
+    } else if (key == L"indicator_opacity") {
+        if (ParseFloat(val, fl) && fl >= 0.0f && fl <= 1.0f) c.indicator.opacity = fl; else ok = false;
     } else if (key == L"symmetric_fov") {
         if (ParseBool(val, b)) c.head.symmetricFov = b; else ok = false;
     } else if (key == L"log_level") {

@@ -3,6 +3,8 @@
 // app's device (TYPELESS for 8-bit formats, like real runtimes), 3 images each; xrWaitFrame paces at 90 Hz;
 // xrEndFrame only validates and counts. xrLocateViews reports an identity head pose with a +-0.8 rad fov, or with
 // EYECAP_MOCK_MOTION=jitter the head motion of tests/test_motion.h (jitter + a deliberate turn) and an asymmetric fov.
+// Quad layers (the layer's in-headset indicator) are validated and counted: frames with a valid quad layer, invalid
+// ones, and the first one's parameters are printed at session destroy ("[mock runtime] ... quad layers ...").
 // Not a conformant runtime -- just enough for tests/layer_e2e.
 #include <windows.h>
 #include <d3d11.h>
@@ -11,6 +13,7 @@
 #include <wrl/client.h>
 #include <atomic>
 #include <cstdio>
+#include <cmath>
 #include <cstring>
 #include <map>
 #include <mutex>
@@ -32,19 +35,23 @@ struct Session {
     bool d3d12 = false;
     ComPtr<ID3D11Device> dev11;
     ComPtr<ID3D12Device> dev12;
-    uint64_t frames = 0, projFrames = 0;
+    uint64_t frames = 0, projFrames = 0, quadFrames = 0, badQuads = 0, maxLayers = 0;
+    std::string firstQuad;
     int64_t nextDisplay = 0;
     int64_t motionOrigin = 0;   // first predictedDisplayTime: t = 0 of tests/test_motion.h
     LARGE_INTEGER nextWake{};
 };
 struct Swapchain {
     XrSession session;
+    uint32_t w = 0, h = 0;
+    int64_t format = 0;
     std::vector<ComPtr<ID3D11Texture2D>> t11;
     std::vector<ComPtr<ID3D12Resource>> t12;
     uint32_t next = 0;
 };
 std::map<uint64_t, Session> g_sessions;
 std::map<uint64_t, Swapchain> g_swapchains;
+std::map<uint64_t, XrReferenceSpaceType> g_spaces;
 
 int64_t NowNs() {
     LARGE_INTEGER f, c;
@@ -128,6 +135,10 @@ XrResult XRAPI_CALL DestroySession(XrSession s) {
     if (it == g_sessions.end()) return XR_ERROR_HANDLE_INVALID;
     printf("[mock runtime] session destroyed: %llu frames, %llu with a valid projection layer\n",
            (unsigned long long)it->second.frames, (unsigned long long)it->second.projFrames);
+    printf("[mock runtime] quad layers: valid on %llu frames, invalid %llu, max layers per frame %llu%s%s\n",
+           (unsigned long long)it->second.quadFrames, (unsigned long long)it->second.badQuads,
+           (unsigned long long)it->second.maxLayers, it->second.firstQuad.empty() ? "" : ", first: ", it->second.firstQuad.c_str());
+    fflush(stdout);
     g_sessions.erase(it);
     return XR_SUCCESS;
 }
@@ -179,13 +190,42 @@ XrResult XRAPI_CALL EndFrame(XrSession s, const XrFrameEndInfo* info) {
     auto it = g_sessions.find((uint64_t)s);
     if (it == g_sessions.end()) return XR_ERROR_HANDLE_INVALID;
     ++it->second.frames;
+    if (info->layerCount > it->second.maxLayers) it->second.maxLayers = info->layerCount;
+    if (info->layerCount > 16) return XR_ERROR_LAYER_LIMIT_EXCEEDED;
+    bool quadOk = false;
     for (uint32_t i = 0; i < info->layerCount; ++i) {
+        if (!info->layers[i]) return XR_ERROR_LAYER_INVALID;
+        if (info->layers[i]->type == XR_TYPE_COMPOSITION_LAYER_QUAD) {
+            auto* q = (const XrCompositionLayerQuad*)info->layers[i];
+            auto sc = g_swapchains.find((uint64_t)q->subImage.swapchain);
+            auto sp = g_spaces.find((uint64_t)q->space);
+            const bool ok = sc != g_swapchains.end() && sp != g_spaces.end() && q->size.width > 0 && q->size.height > 0 &&
+                            q->subImage.imageRect.offset.x >= 0 && q->subImage.imageRect.offset.y >= 0 &&
+                            (uint32_t)(q->subImage.imageRect.offset.x + q->subImage.imageRect.extent.width) <= sc->second.w &&
+                            (uint32_t)(q->subImage.imageRect.offset.y + q->subImage.imageRect.extent.height) <= sc->second.h &&
+                            (q->layerFlags & XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT) &&
+                            std::fabs(q->pose.orientation.w * q->pose.orientation.w + q->pose.orientation.x * q->pose.orientation.x +
+                                      q->pose.orientation.y * q->pose.orientation.y + q->pose.orientation.z * q->pose.orientation.z - 1.0f) < 1e-3f;
+            if (!ok) { ++it->second.badQuads; return XR_ERROR_LAYER_INVALID; }
+            quadOk = true;
+            if (it->second.firstQuad.empty()) {
+                char b[300];
+                sprintf_s(b, "%ux%u format %lld, %s space, pos (%.2f, %.2f, %.2f), size %.3fx%.3f, flags 0x%llx, eyes %d, layer %u of %u",
+                          sc->second.w, sc->second.h, (long long)sc->second.format,
+                          sp->second == XR_REFERENCE_SPACE_TYPE_VIEW ? "VIEW" : "non-VIEW", q->pose.position.x, q->pose.position.y,
+                          q->pose.position.z, q->size.width, q->size.height, (unsigned long long)q->layerFlags,
+                          (int)q->eyeVisibility, i + 1, info->layerCount);
+                it->second.firstQuad = b;
+            }
+            continue;
+        }
         if (info->layers[i]->type != XR_TYPE_COMPOSITION_LAYER_PROJECTION) continue;
         auto* p = (const XrCompositionLayerProjection*)info->layers[i];
         bool ok = p->viewCount == 2;
         for (uint32_t v = 0; ok && v < 2; ++v) ok = g_swapchains.count((uint64_t)p->views[v].subImage.swapchain) != 0;
         if (ok) ++it->second.projFrames;
     }
+    if (quadOk) ++it->second.quadFrames;
     return XR_SUCCESS;
 }
 XrResult XRAPI_CALL EnumerateSwapchainFormats(XrSession, uint32_t cap, uint32_t* count, int64_t* fmts) {
@@ -202,6 +242,7 @@ XrResult XRAPI_CALL CreateSwapchain(XrSession s, const XrSwapchainCreateInfo* ci
     { std::lock_guard<std::mutex> lk(g_m); auto it = g_sessions.find((uint64_t)s); if (it == g_sessions.end()) return XR_ERROR_HANDLE_INVALID; ss = it->second; }
     Swapchain sc;
     sc.session = s;
+    sc.w = ci->width; sc.h = ci->height; sc.format = ci->format;
     const DXGI_FORMAT tf = Typeless((DXGI_FORMAT)ci->format);
     for (int i = 0; i < 3; ++i) {
         if (!ss.d3d12) {
@@ -260,8 +301,17 @@ XrResult XRAPI_CALL AcquireSwapchainImage(XrSwapchain s, const XrSwapchainImageA
 }
 XrResult XRAPI_CALL WaitSwapchainImage(XrSwapchain, const XrSwapchainImageWaitInfo*) { return XR_SUCCESS; }
 XrResult XRAPI_CALL ReleaseSwapchainImage(XrSwapchain, const XrSwapchainImageReleaseInfo*) { return XR_SUCCESS; }
-XrResult XRAPI_CALL CreateReferenceSpace(XrSession, const XrReferenceSpaceCreateInfo*, XrSpace* sp) { *sp = (XrSpace)g_nextHandle++; return XR_SUCCESS; }
-XrResult XRAPI_CALL DestroySpace(XrSpace) { return XR_SUCCESS; }
+XrResult XRAPI_CALL CreateReferenceSpace(XrSession, const XrReferenceSpaceCreateInfo* ci, XrSpace* sp) {
+    const uint64_t h = g_nextHandle++;
+    std::lock_guard<std::mutex> lk(g_m);
+    g_spaces[h] = ci->referenceSpaceType;
+    *sp = (XrSpace)h;
+    return XR_SUCCESS;
+}
+XrResult XRAPI_CALL DestroySpace(XrSpace sp) {
+    std::lock_guard<std::mutex> lk(g_m);
+    return g_spaces.erase((uint64_t)sp) ? XR_SUCCESS : XR_ERROR_HANDLE_INVALID;
+}
 XrResult XRAPI_CALL ResultToString(XrInstance, XrResult r, char buf[XR_MAX_RESULT_STRING_SIZE]) { sprintf_s(buf, XR_MAX_RESULT_STRING_SIZE, "XR_RESULT_%d", (int)r); return XR_SUCCESS; }
 XrResult XRAPI_CALL StructureTypeToString(XrInstance, XrStructureType t, char buf[XR_MAX_STRUCTURE_NAME_SIZE]) { sprintf_s(buf, XR_MAX_STRUCTURE_NAME_SIZE, "XR_TYPE_%d", (int)t); return XR_SUCCESS; }
 

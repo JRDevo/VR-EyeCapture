@@ -19,6 +19,14 @@ bool ParseHotkey(const std::wstring& s, Hotkey& out);
 
 enum class GammaMode { Auto, Srgb, Linear };
 
+// In-headset recording indicator ([indicator] section; see indicator.h).
+struct IndicatorSettings {
+    bool  enabled = true;                    // vr_indicator
+    float x = 0.22f, y = -0.16f, z = -0.8f;  // indicator_x / _y / _z: centre in VIEW space, metres (-Z = ahead)
+    float size = 0.02f;                      // indicator_size: edge length of the square quad, metres
+    float opacity = 1.0f;                    // indicator_opacity: maximum alpha 0..1
+};
+
 struct Config {
     Hotkey       hotkey;                 // default Ctrl+Shift+F10
     std::wstring outputDir;              // default <dll folder>\captures
@@ -37,6 +45,7 @@ struct Config {
     bool         keepMp4 = false;        // keep_mp4: keep the MP4 after a verified MKV (and flat) conversion
     bool         postFlat = false;       // post_flat: also write <name>_FLAT.mp4 (left eye, 16:9, 3840 wide)
     std::wstring ffmpegPath;             // ffmpeg_path: empty = PATH, then WinGet packages, then <dll folder>fmpegfmpeg.exe
+    IndicatorSettings indicator;         // vr_indicator, indicator_x/_y/_z, indicator_size, indicator_opacity
     HeadSmoothingSettings head;          // head_smoothing, head_follow_deg, roll_lock, output_fov_scale, edge_guard, symmetric_fov
     LogLevel     logLevel = LogLevel::Info;
     std::wstring loadedFrom;             // path of the ini that was read ("" = defaults only)

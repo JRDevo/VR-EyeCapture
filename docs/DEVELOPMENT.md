@@ -31,6 +31,7 @@ zip. Re-run it after every build you want the games to pick up (a running game k
 | `src/source_d3d12.cpp` | D3D12 games: ring = D3D12 shared committed resources opened on the encoder device; D3D12 shared fences |
 | `src/source_vulkan.cpp` | Stub (logs "not yet supported") |
 | `src/recorder.h/.cpp` | Recording: ring bookkeeping, video processor RGBA→NV12, linear→sRGB pre-pass, head-smoothing re-projection pass, MF sink writer, AAC, finalize, st3d |
+| `src/indicator.h/.cpp` | In-headset recording indicator: state tracker, 64x64 straight-alpha picture, the quad layer's swapchain / VIEW space (D3D11) |
 | `src/head_smoothing.h/.cpp` | Head-motion smoothing, CPU side: orientation filter (follow, catch-up, roll lock, edge guard) and the per-eye re-projection parameters |
 | `src/audio_capture.h/.cpp` | WASAPI loopback → continuous 48 kHz stereo int16 on the QPC clock |
 | `src/st3d.h/.cpp` | Post-finalize MP4 patch: `st3d` box into the video sample entry |
@@ -140,6 +141,24 @@ WxH per eye`). Tested: `run_jitter.ps1` raw vs rawasym (far marker same x in bot
 - **Translation** is ignored on purpose (needs depth). Head-locked projection spaces (VIEW) give identity poses:
   nothing to smooth.
 
+### In-headset indicator
+
+`Hook_EndFrame`, under `g_lock`, AFTER `CaptureSafe` (so the recording has already taken this frame's projection views):
+`IndicatorTracker` maps the recorder state to what to show (starting / stopping = amber, recording = red pulsing
+0.35..1.0 alpha at 1 Hz, idle after a recording: green 1.5 s if the message starts with `saved `, else red X 2 s;
+`Failed` = red X 2 s; otherwise hidden). Hidden = no call at all. Visible: on first use `VrIndicator` creates, through
+the NEXT layer's entry points (our hooks never see them, so they are not tracked as game swapchains), a 64x64 swapchain
+(`R8G8B8A8_UNORM_SRGB` / `B8G8R8A8_UNORM_SRGB` if the game's colour swapchains are sRGB, else the UNORM ones; whatever
+the runtime offers) and a VIEW reference space. Each shown frame: acquire / wait (100 ms) / `UpdateSubresource` of the
+CPU picture on the game's immediate context / release, then an `XrCompositionLayerQuad` (BLEND_TEXTURE_SOURCE_ALPHA |
+UNPREMULTIPLIED_ALPHA, straight alpha, both eyes, pose `indicator_x/y/z`, size `indicator_size`) is appended to a copy
+of the layer pointer array (the game's pointers unchanged, both arrays on the hook's stack for the call). Skipped when
+the game already uses `maxLayerCount` layers. Any failure (formats, create, acquire / wait / release, SEH fault) = log
+once, destroy our objects, indicator off for the session. If `xrEndFrame` with our quad fails with a layer-type error,
+the indicator is switched off and the game's original frame info is submitted again. `xrDestroySession` destroys our
+swapchain / space before forwarding. Dormant sessions and sessions without a recorder never create anything.
+D3D12 / Vulkan: not implemented (logged once at the first moment the dot would show). Settings snapshot per session.
+
 ### Timestamps and A/V sync
 
 Video: `XrFrameEndInfo::displayTime` deltas, anchored to QPC at the first recorded frame (re-anchored if the two clocks
@@ -187,8 +206,9 @@ the DLL (`GetModuleHandleEx` + `FreeLibraryAndExitThread`), so an early unload c
 | `tests\run_selftests.ps1` | `encoder_selftest` over D3D11/D3D12 x two/array/wide/msaa, unorm (linear), h264 and 3072x3264 per eye: the frame-source + recorder + audio + st3d path the layer uses, with a game-like device created without video support. Each file checked by `verify_mp4.ps1`. |
 | `tests\verify_mp4.ps1` | ffprobe: codec, size, fps, duration, `Stereo 3D / side by side`, BT.709 tags, raw `st3d` bytes, AAC present / not silent; decoded pixels: grey steps within 6 code values in both eyes (gamma), left half = left eye. |
 | `layer_loadtest.exe` | Real loader + active runtime (VDXR here): our layer is enumerated, negotiates, an instance is created and destroyed through it. |
-| `tests\run_e2e.ps1` | Real loader → installed layer → `mock_runtime.dll`, a normal app frame loop for every layout and both D3D APIs, recording through `XR_EYE_CAPTURE_AUTORECORD`; each MP4 verified. |
+| `tests\run_e2e.ps1` | Real loader → installed layer → `mock_runtime.dll`, a normal app frame loop for every layout and both D3D APIs, recording through `XR_EYE_CAPTURE_AUTORECORD`; each MP4 verified. Indicator: the mock validates every quad layer (known swapchain and space, rect inside the image, blend flag, unit quaternion) and prints the counts; D3D11 cases need a valid quad on >= the recorded frames and not on all frames, D3D12 none; an extra `vr_indicator = 0` case checks the recorded pixels where the dot would be (both eyes) equal the pattern and the indicator-on recording. |
 | dormant case (last case of `run_e2e.ps1`) | Without `XR_EYE_CAPTURE_REQUIRE_TRAY=0` and without the tray: `layer_e2e --expect-dormant` loop completes, no MP4, log has the "layer dormant" line and no `control:` / recorder lines. (Fails if a tray is running.) |
+| `indicator_test.exe` | Indicator state machine (starting / recording / stopping / saved 1.5 s / failed 2 s / hidden) and the picture (colours, sRGB vs linear, RGBA / BGRA, pulse 0.35..1.0, opacity cap, anti-aliased edge, X vs disc, hidden = transparent). |
 | `head_smoothing_test.exe` | Symmetric fov intersection, output size (density, even rounding), parallel-camera mapping without smoothing; filter math on the CPU: time-constant mapping, first frame = identity, correction direction for yaw / pitch (OpenXR conventions), gap reset, roll lock, follow + catch-up (lag bound, settle), edge guard on / off, no-pose pass-through. |
 | `tests\run_jitter.ps1` | Head smoothing end to end (installed layer, real loader, mock runtime): `layer_e2e --jitter` renders a world-locked grid + marker for the pose the mock reports (+-2 degree yaw / pitch / roll jitter at 3.3 / 4.1 / 4.7 Hz, a 30 degree yaw turn at t = 4..5 s; `tests/test_motion.h`). The mock's views have asymmetric fovs (left -50/+40, right -40/+50, +-45 degrees). Four recordings (smoothing 0 with `symmetric_fov` 1; smoothing 0 with `symmetric_fov` 0; 0.6 with `output_fov_scale` 0.9; same with `edge_guard` 0), ffmpeg-decoded, marker located per frame in both eyes. Checks: marker = analytic expectation (RMS < 0.15 degree), far marker at the same x in both halves with `symmetric_fov` 1 (<= 1 px) and not with 0, jitter-phase std-dev raw / smoothed >= 5, settles within 0.5 s after the turn (1 degree), final position 30 / 0 degrees, no black border pixels in the jitter phase. Measured: raw 2.00 degree, smoothed 0.31 degree (6.5x; 7.6x without the edge guard), settle 0.16 s (0.20 s without the guard), RMS 0.006 degree; far-marker x right - left: symmetric 0.29 px max (smoothed 0.50 px), raw asymmetric -244.5 px mean. |
 | tray post-processing | Manual (no GPU): `build\Release\status_sim.exe <private shm name> <hold s> <file.mp4>...` plays the layer's ready / recording / stopping / `saved <file>` sequence on a private status block; start a second tray on the same block with `EYECAP_TRAY_TEST_SHM=<name>` (and `APPDATA` pointing at a folder with a test `OpenXR-EyeCapture\config.ini`) from a copy of `EyeCaptureTray.exe` in a scratch folder (its `logs\tray.log` lands there). Check: `.mkv` made (ffprobe `Stereo 3D / side by side`, tag `stereo_mode=left_right`), MP4 deleted / kept per `keep_mp4`, `_FLAT.mp4` 3840x2160, `ffmpeg_path` pointing at a missing file = "ffmpeg not found" balloon and MP4 untouched, a garbage MP4 = failure balloon and MP4 untouched, two files in a row = FIFO. |
@@ -199,7 +219,9 @@ the DLL (`GetModuleHandleEx` + `FreeLibraryAndExitThread`), so an early unload c
 Test-only environment variables read by the tray: `EYECAP_TRAY_TEST_SHM=<name>` (private status block, no single-instance check, no tray-alive marker) and `EYECAP_TRAY_TEST_NO_NVENC=1` (the flat step uses libx264 and never touches the GPU).
 
 Test-only environment variables read by the layer: `XR_EYE_CAPTURE_AUTORECORD=<seconds>` (start at the first frame,
-stop after N s), `XR_EYE_CAPTURE_CONFIG=key=value;key=value` (applied on top of `config.ini`, same keys and checks,
+stop after N s), `XR_EYE_CAPTURE_TRAY_IPC=0` (no control thread: no hotkey, nothing published to a running tray -- otherwise
+the tray's post-processing would remux and delete the test MP4s; `run_e2e.ps1` / `run_jitter.ps1` set it for their
+recording cases), `XR_EYE_CAPTURE_CONFIG=key=value;key=value` (applied on top of `config.ini`, same keys and checks,
 each logged as `config override:`; `run_jitter.ps1` uses it for the smoothing settings) and `XR_EYE_CAPTURE_TEST_SHM=<name>` (private status block + `<name>-Command` event; used by `control_final_test`), `XR_EYE_CAPTURE_OUTPUT_DIR=<dir>`, `XR_EYE_CAPTURE_REQUIRE_TRAY=0|1` (overrides `require_tray`; `run_e2e.ps1` sets 0 for the
 recording cases).
 

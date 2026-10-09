@@ -9,6 +9,7 @@
 //   xrAcquireSwapchainImage / xrReleaseSwapchainImage                     track the most recently released image
 //   xrEndFrame             first projection layer: views[0] = left, views[1] = right (images + pose + fov)
 //                          -> Recorder::SubmitFrame, then forward
+//                          + in-headset recording indicator: one quad layer appended AFTER the capture (indicator.h)
 //   xrDestroyInstance      clean up
 // Rule: any internal failure logs and passes through. The game's calls are always forwarded and their results returned
 // unchanged; capture work in xrEndFrame is wrapped in SEH so a fault disables capture instead of crashing the game.
@@ -33,6 +34,7 @@
 #include "config.h"
 #include "control.h"
 #include "frame_source.h"
+#include "indicator.h"
 #include "log.h"
 #include "recorder.h"
 #include "shared_status.h"
@@ -57,6 +59,12 @@ struct InstanceData {
     PFN_xrEndFrame EndFrame = nullptr;
     PFN_xrGetInstanceProperties GetInstanceProperties = nullptr;
     PFN_xrGetDisplayRefreshRateFB GetDisplayRefreshRateFB = nullptr;   // only if the app enabled the extension
+    // used by the in-headset indicator (called directly on the next layer: our own hooks never see these objects)
+    PFN_xrEnumerateSwapchainFormats EnumerateSwapchainFormats = nullptr;
+    PFN_xrWaitSwapchainImage WaitSwapchainImage = nullptr;
+    PFN_xrCreateReferenceSpace CreateReferenceSpace = nullptr;
+    PFN_xrDestroySpace DestroySpace = nullptr;
+    PFN_xrGetSystemProperties GetSystemProperties = nullptr;
     std::string runtimeName;
     std::string appName;
 };
@@ -97,6 +105,13 @@ struct SessionData {
     // autorecord (XR_EYE_CAPTURE_AUTORECORD=<seconds>, for tests / automation)
     bool autoDone = false;
     int64_t autoStopAt = 0;
+    // in-headset recording indicator (armed sessions with a recorder only; created on first use)
+    IndicatorSettings indCfg;
+    IndicatorTracker indTracker;
+    std::unique_ptr<VrIndicator> ind;
+    ComPtr<ID3D11Device> dev11;          // D3D11 sessions: the game's device (indicator uploads)
+    uint32_t maxLayers = 16;             // XrSystemGraphicsProperties::maxLayerCount
+    bool indOff = false, loggedIndAppend = false, loggedIndLimit = false;
 };
 
 // Heap-allocated and never freed on purpose: if the game exits without xrDestroySession, static destructors at DLL
@@ -119,6 +134,7 @@ std::once_flag g_initOnce;
 Config g_cfg;
 std::wstring g_dllDir, g_exeName, g_logPath;
 double g_autoRecordSec = 0;
+bool g_trayIpc = true;   // test-only XR_EYE_CAPTURE_TRAY_IPC=0: no control thread (no hotkey, nothing published to a tray)
 
 // ------------------------------------------------------------------------------------------------ helpers
 
@@ -187,6 +203,10 @@ void InitProcess() {
          g_cfg.head.symmetricFov ? "both eyes re-projected to one common symmetric view (standard 3D SBS)"
                                  : "raw eye images (asymmetric per-eye fov)");
     if (g_autoRecordSec > 0) LOGI("XR_EYE_CAPTURE_AUTORECORD=%.1f s: recording starts at the first frame", g_autoRecordSec);
+    if (EnvW(L"XR_EYE_CAPTURE_TRAY_IPC") == L"0") {
+        g_trayIpc = false;
+        LOGI("XR_EYE_CAPTURE_TRAY_IPC=0: no control thread -- no hotkey, nothing published to the tray (test runs)");
+    }
     const std::wstring reqTray = EnvW(L"XR_EYE_CAPTURE_REQUIRE_TRAY");
     if (!reqTray.empty()) {
         g_cfg.requireTray = _wtoi(reqTray.c_str()) != 0;
@@ -425,10 +445,90 @@ bool CaptureSafe(SessionData* sd, const XrFrameEndInfo* info) {
     }
 }
 
+// ------------------------------------------------------------------------------------------------ indicator
+
+IndicatorDispatch IndDispatch(const InstanceData* id) {
+    IndicatorDispatch d;
+    d.EnumerateSwapchainFormats = id->EnumerateSwapchainFormats;
+    d.CreateSwapchain = id->CreateSwapchain;
+    d.DestroySwapchain = id->DestroySwapchain;
+    d.EnumerateSwapchainImages = id->EnumerateSwapchainImages;
+    d.AcquireSwapchainImage = id->AcquireSwapchainImage;
+    d.WaitSwapchainImage = id->WaitSwapchainImage;
+    d.ReleaseSwapchainImage = id->ReleaseSwapchainImage;
+    d.CreateReferenceSpace = id->CreateReferenceSpace;
+    d.DestroySpace = id->DestroySpace;
+    return d;
+}
+
+// Under g_lock, after the capture of this frame. true = `quad` is to be appended to this frame's layers.
+bool IndicatorImpl(SessionData* sd, const XrFrameEndInfo* info, XrCompositionLayerQuad& quad) {
+    const RecState st = sd->rec->State();
+    std::string msg;
+    if (sd->indTracker.NeedsMessage(st)) msg = sd->rec->Status().message;
+    const double now = (double)QpcNow100ns() * 1e-7;
+    const IndShow show = sd->indTracker.Update(st, msg, now);
+    if (show == IndShow::Hidden) return false;                    // hidden: nothing at all is done
+    if (info->layerCount + 1 > sd->maxLayers) {
+        if (!sd->loggedIndLimit) {
+            sd->loggedIndLimit = true;
+            LOGW("indicator: the game already submits %u layers (runtime limit %u) -- indicator skipped on such frames",
+                 info->layerCount, sd->maxLayers);
+        }
+        return false;
+    }
+    if (!sd->ind) {
+        bool srgb = true;   // follow the game's colour swapchains (sRGB unless all of them are linear)
+        bool any = false, anySrgb = false;
+        for (auto& kv : g_swapchains) {
+            const SwapchainData* s = kv.second.get();
+            if (s->session != sd || !s->info.format || (s->info.usageFlags & XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)) continue;
+            any = true;
+            if (IsSrgbDxgi((DXGI_FORMAT)s->info.format)) anySrgb = true;
+        }
+        if (any) srgb = anySrgb;
+        sd->ind = std::make_unique<VrIndicator>(sd->indCfg, sd->api, sd->dev11.Get(), srgb);
+    }
+    if (sd->ind->Disabled()) { sd->indOff = true; return false; }
+    if (!sd->ind->Frame(sd->handle, IndDispatch(sd->inst), show, now, quad)) {
+        if (sd->ind->Disabled()) sd->indOff = true;
+        return false;
+    }
+    if (!sd->loggedIndAppend) {
+        sd->loggedIndAppend = true;
+        LOGI("indicator: quad layer appended AFTER the capture on frame %llu (%u game layers + 1, state %s) -- shown in the "
+             "headset only, never in the recording", (unsigned long long)sd->frames, info->layerCount, IndShowName(show));
+    }
+    return true;
+}
+
+// SEH wrapper: no C++ objects with destructors in this function.
+bool IndicatorSafe(SessionData* sd, const XrFrameEndInfo* info, XrCompositionLayerQuad* quad, bool* fault) {
+    __try {
+        return IndicatorImpl(sd, info, *quad);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        *fault = true;
+        return false;
+    }
+}
+
+// Errors of xrEndFrame that our extra layer could have caused (then: retry without it, indicator off).
+bool LayerError(XrResult r) {
+    return r == XR_ERROR_LAYER_INVALID || r == XR_ERROR_LAYER_LIMIT_EXCEEDED || r == XR_ERROR_SWAPCHAIN_RECT_INVALID ||
+           r == XR_ERROR_HANDLE_INVALID || r == XR_ERROR_VALIDATION_FAILURE || r == XR_ERROR_POSE_INVALID ||
+           r == XR_ERROR_SWAPCHAIN_FORMAT_UNSUPPORTED || r == XR_ERROR_RUNTIME_FAILURE;
+}
+
 // ------------------------------------------------------------------------------------------------ hooks
 
 XrResult XRAPI_CALL Hook_EndFrame(XrSession session, const XrFrameEndInfo* info) {
     PFN_xrEndFrame next = nullptr;
+    // Indicator: the game's layer pointers are forwarded untouched, plus our quad last. Both arrays live on this stack
+    // frame for the whole call to the next layer.
+    XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD};
+    std::vector<const XrCompositionLayerBaseHeader*> layers;
+    XrFrameEndInfo withInd{};
+    bool appended = false;
     {
         std::lock_guard<std::mutex> lk(g_lock);
         SessionData* sd = FindSession(session);
@@ -444,11 +544,42 @@ XrResult XRAPI_CALL Hook_EndFrame(XrSession session, const XrFrameEndInfo* info)
                     sd->rec->Stop();
                 }
             }
+            // after the capture: the recording has already taken this frame's projection views
+            if (info && sd->armed && sd->rec && sd->indCfg.enabled && !sd->indOff) {
+                bool fault = false;
+                try { appended = IndicatorSafe(sd, info, &quad, &fault); } catch (...) { fault = true; appended = false; }
+                if (fault) {
+                    sd->indOff = true;
+                    LOGE("indicator faulted inside xrEndFrame -- indicator off for this session (capture unaffected)");
+                }
+                if (appended) {
+                    layers.reserve((size_t)info->layerCount + 1);
+                    for (uint32_t i = 0; info->layers && i < info->layerCount; ++i) layers.push_back(info->layers[i]);
+                    layers.push_back(reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad));
+                    withInd = *info;
+                    withInd.layerCount = (uint32_t)layers.size();
+                    withInd.layers = layers.data();
+                }
+            }
         } else if (!g_instances.empty()) {
             next = g_instances.begin()->second->EndFrame;
         }
     }
-    return next ? next(session, info) : XR_ERROR_HANDLE_INVALID;
+    if (!next) return XR_ERROR_HANDLE_INVALID;
+    if (!appended) return next(session, info);
+    const XrResult r = next(session, &withInd);
+    if (XR_SUCCEEDED(r) || !LayerError(r)) return r;
+    // The runtime rejected the frame with our quad: switch the indicator off and submit the game's frame as it was.
+    LOGE("indicator: xrEndFrame with the indicator layer failed (%d) -- indicator off, resubmitting the game's layers", (int)r);
+    {
+        std::lock_guard<std::mutex> lk(g_lock);
+        if (SessionData* sd = FindSession(session)) {
+            sd->indOff = true;
+            if (sd->ind) sd->ind->Disable(IndDispatch(sd->inst), nullptr);
+        }
+    }
+    const XrResult r2 = next(session, info);
+    return XR_SUCCEEDED(r2) ? r2 : r;
 }
 
 XrResult XRAPI_CALL Hook_AcquireSwapchainImage(XrSwapchain swapchain, const XrSwapchainImageAcquireInfo* ai, uint32_t* index) {
@@ -616,6 +747,7 @@ XrResult XRAPI_CALL Hook_CreateSession(XrInstance instance, const XrSessionCreat
         for (auto* p = reinterpret_cast<const XrBaseInStructure*>(ci->next); sd->armed && p; p = p->next) {
             if (p->type == XR_TYPE_GRAPHICS_BINDING_D3D11_KHR) {
                 sd->api = GfxApi::D3D11;
+                sd->dev11 = reinterpret_cast<const XrGraphicsBindingD3D11KHR*>(p)->device;
                 sd->src = CreateD3D11FrameSource(reinterpret_cast<const XrGraphicsBindingD3D11KHR*>(p)->device);
                 break;
             }
@@ -641,6 +773,18 @@ XrResult XRAPI_CALL Hook_CreateSession(XrInstance instance, const XrSessionCreat
             if (sd->src) sd->rec = std::make_unique<Recorder>();
             LOGI("session %p created: graphics API %s -> capture %s", (void*)*session, GfxApiName(sd->api),
                  sd->src ? "AVAILABLE" : "DISABLED");
+            sd->indCfg = g_cfg.indicator;
+            if (id->GetSystemProperties) {
+                XrSystemProperties sp{XR_TYPE_SYSTEM_PROPERTIES};
+                if (XR_SUCCEEDED(id->GetSystemProperties(instance, ci->systemId, &sp)) && sp.graphicsProperties.maxLayerCount)
+                    sd->maxLayers = sp.graphicsProperties.maxLayerCount;
+            }
+            if (sd->rec && sd->indCfg.enabled)
+                LOGI("indicator: on (vr_indicator = 1) -- dot in the headset while recording at (%.2f, %.2f, %.2f) m view space, "
+                     "%.3f m, opacity %.2f%s", sd->indCfg.x, sd->indCfg.y, sd->indCfg.z, sd->indCfg.size, sd->indCfg.opacity,
+                     sd->api == GfxApi::D3D11 ? "" : " (D3D11 only for now)");
+            else if (sd->rec)
+                LOGI("indicator: off (vr_indicator = 0)");
         }
         armedSession = sd->armed;
         {
@@ -688,6 +832,10 @@ XrResult XRAPI_CALL Hook_DestroySession(XrSession session) {
         }
     }
     if (sd) {
+        if (sd->ind) {   // our swapchain / space go first, through the next layer, before the session is destroyed
+            try { sd->ind->Destroy(IndDispatch(sd->inst)); } catch (...) { LOGE("indicator: cleanup failed (ignored)"); }
+            sd->ind.reset();
+        }
         if (sd->rec) {
             const RecState st = sd->rec->State();
             bool finalized = false;
@@ -804,6 +952,7 @@ XrResult XRAPI_CALL Layer_GetInstanceProcAddr(XrInstance instance, const char* n
 }
 
 void EnsureControl() {
+    if (!g_trayIpc) return;
     std::lock_guard<std::mutex> lk(g_ctlLock);
     ControlStart(g_cfg, g_logPath, g_cfg.loadedFrom.empty() ? ConfigPath(g_dllDir) : g_cfg.loadedFrom,
                  ControlHooks{Snapshot, RequestStart, RequestStop});   // no-op if already running
@@ -845,6 +994,8 @@ XrResult XRAPI_CALL Layer_CreateApiLayerInstance(const XrInstanceCreateInfo* inf
         RESOLVE(DestroyInstance); RESOLVE(CreateSession); RESOLVE(DestroySession); RESOLVE(CreateSwapchain);
         RESOLVE(DestroySwapchain); RESOLVE(EnumerateSwapchainImages); RESOLVE(AcquireSwapchainImage);
         RESOLVE(ReleaseSwapchainImage); RESOLVE(EndFrame); RESOLVE(GetInstanceProperties);
+        RESOLVE(EnumerateSwapchainFormats); RESOLVE(WaitSwapchainImage); RESOLVE(CreateReferenceSpace); RESOLVE(DestroySpace);
+        RESOLVE(GetSystemProperties);
 #undef RESOLVE
         std::string exts;
         bool fb = false;

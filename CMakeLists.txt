@@ -35,6 +35,7 @@ add_library(eye_capture_core STATIC
     src/source_vulkan.cpp
     src/recorder.cpp
     src/head_smoothing.cpp
+    src/indicator.cpp
     src/audio_capture.cpp
     src/st3d.cpp)
 target_include_directories(eye_capture_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -43,7 +44,7 @@ target_compile_definitions(eye_capture_core PUBLIC
     EYE_CAPTURE_VERSION="${PROJECT_VERSION}")
 target_compile_options(eye_capture_core PRIVATE ${EYE_WARN_FLAGS})
 target_link_libraries(eye_capture_core PUBLIC
-    d3d11 d3d12 dxgi d3dcompiler mfplat mfreadwrite mfuuid ole32 strmiids shell32 winmm)
+    d3d11 d3d12 dxgi d3dcompiler mfplat mfreadwrite mfuuid ole32 strmiids shell32 winmm OpenXR::headers)
 
 # --- the API layer DLL ---
 add_library(eye_capture SHARED
@@ -92,6 +93,11 @@ if (EYE_BUILD_TESTS)
     target_compile_options(head_smoothing_test PRIVATE ${EYE_WARN_FLAGS})
     target_link_libraries(head_smoothing_test PRIVATE eye_capture_core)
     target_include_directories(head_smoothing_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+
+    # In-headset indicator logic unit test (CPU only).
+    add_executable(indicator_test tests/indicator_test.cpp)
+    target_compile_options(indicator_test PRIVATE ${EYE_WARN_FLAGS})
+    target_link_libraries(indicator_test PRIVATE eye_capture_core)
 
     # Loader test: the real OpenXR loader + whatever runtime is active (VDXR here) + our installed layer.
     add_executable(layer_loadtest tests/layer_loadtest.cpp)

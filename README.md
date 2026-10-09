@@ -99,6 +99,10 @@ starts its OpenXR instance.
 | `gamma` | `auto` | `auto` from the swapchain format; `srgb` / `linear` only if colours look washed out or too dark. |
 | `audio_enabled` | `1` | Record the sound (what plays on the playback device). |
 | `audio_device` | *(empty)* = default playback device | Part of the device name, e.g. `Virtual Desktop Audio`. |
+| `vr_indicator` | `1` | Small recording dot in the headset (never in the video). See "In-headset indicator". |
+| `indicator_x` / `_y` / `_z` | `0.22` / `-0.16` / `-0.8` | Dot position in metres relative to your head (right / up / forward is negative z). |
+| `indicator_size` | `0.02` | Dot size in metres. |
+| `indicator_opacity` | `1.0` | Maximum opacity of the dot (0..1). |
 | `symmetric_fov` | `1` | Re-project both eyes to one common symmetric view (standard 3D SBS). See "Why the eyes are re-projected to a symmetric view". `0` = raw eye images. |
 | `head_smoothing` | `0` | Head-motion smoothing strength, `0` = off. See "Head-motion smoothing". |
 | `head_follow_deg` | `12` | Smoothing: how far (degrees) the view may lag a deliberate turn before it catches up. |
@@ -111,6 +115,18 @@ starts its OpenXR instance.
 | `ffmpeg_path` | *(empty)* = auto | Tray app: full path of `ffmpeg.exe`. Empty = `PATH`, then WinGet packages, then an `ffmpeg` folder next to the tray app. |
 | `require_tray` | `1` | `1` = the layer is only active while `EyeCaptureTray.exe` is running (checked when the game creates its VR session). `0` = always active. |
 | `log_level` | `info` | `error`, `warn`, `info`, `debug`. |
+
+## In-headset indicator
+
+While a recording runs you see a small dot at the lower right of your view, in the headset only: **amber** while the
+recording starts (and while it is being finished), **red, pulsing** while recording, **green** for 1.5 s when the file
+was saved, a **red X** for 2 s if it failed. Otherwise nothing is shown and nothing is done. The dot is a separate
+OpenXR layer that the layer adds after it has copied the game's eye images, so it never appears in the video.
+Settings in `config.ini` `[indicator]`: `vr_indicator = 0` turns it off; `indicator_x/y/z` move it (metres, relative
+to your head), `indicator_size` and `indicator_opacity` change size and maximum opacity. Direct3D 11 games (ETS2 / ATS)
+only for now; on Direct3D 12 the log says `indicator: not available on D3D12 yet` and recording works as before.
+If the runtime ever rejects the extra layer, the indicator switches itself off for the session and the game's frame is
+submitted unchanged (logged).
 
 ## Head-motion smoothing
 
