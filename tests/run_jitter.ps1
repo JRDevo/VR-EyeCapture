@@ -20,7 +20,9 @@
       ratio   std-dev of the marker position, jitter-only phase t in [1.0, 3.9] s: raw / smooth >= 5
       settle  smooth and noguard: after the turn ends (t = 5 s) the marker (0.1 s moving average) stays within 1 deg
               of its final rest position from t <= 5.5 s on; final rest position within 0.5 deg of 30 deg / 0 deg
-      edges   smooth: no black pixels (Y < 30) in a 3 px border of either eye during the jitter phase
+      edges   raw, rawasym, smooth: no black pixels (Y < 30) in a 3 px border of either eye, in the jitter phase AND over
+              the whole recording (turn and catch-up included); smooth: the layer's summary reports 0 uncovered frames
+              and the edge guard acted (> 0 frames). noguard (edge_guard = 0) is info only: black edges are expected.
     The recording cases set XR_EYE_CAPTURE_REQUIRE_TRAY=0 and XR_EYE_CAPTURE_CONFIG (test-only overrides).
       powershell -ExecutionPolicy Bypass -File tests\run_jitter.ps1
 #>
@@ -110,6 +112,7 @@ $cases = @(
 $prevTray = $env:XR_EYE_CAPTURE_REQUIRE_TRAY; $prevCfg = $env:XR_EYE_CAPTURE_CONFIG
 $env:XR_EYE_CAPTURE_REQUIRE_TRAY = '0'
 $data = @{}
+$summ = @{}
 $fails = New-Object System.Collections.Generic.List[string]
 function Check($ok, $what) {
     if ($ok) { Write-Host "  ok   $what" -ForegroundColor Green } else { Write-Host "  FAIL $what" -ForegroundColor Red; $fails.Add($what) }
@@ -127,8 +130,13 @@ foreach ($c in $cases) {
     $mFirst = [regex]::Match($log, 'first video frame \(t = 0 in the file\): displayTime (\d+) ns')
     $mSum = [regex]::Match($log, 're-projection summary[^\r\n]+')
     $mSym = [regex]::Match($log, 'symmetric fov[^\r\n]+')
-    if ($mSym.Success) { Write-Host "  $($mSym.Value)" }
-    if ($mSum.Success) { Write-Host "  $($mSum.Value)" }
+    if ($mSym.Success) { Write-Host "  [$($c.name)] $($mSym.Value)" }
+    if ($mSum.Success) {
+        Write-Host "  [$($c.name)] $($mSum.Value)"
+        $g = [regex]::Match($mSum.Value, 'edge guard limited the correction in (\d+) frames')
+        $u = [regex]::Match($mSum.Value, 'did not cover the output \(black edges\) in (\d+) frames')
+        $summ[$c.name] = @{ guarded = [int]$g.Groups[1].Value; uncovered = [int]$u.Groups[1].Value; line = $mSum.Value }
+    }
     if (-not $mFirst.Success) { Check $false "$($c.name): first-frame displayTime in the log"; continue }
     $offset = ([double]$mFirst.Groups[1].Value - [double]$mT0.Groups[1].Value) / 1e9
     $probe = & $ffprobe -v error -print_format json -show_streams $file | Out-String | ConvertFrom-Json
@@ -221,9 +229,20 @@ foreach ($name in @('raw', 'rawasym', 'smooth', 'noguard')) {
     $bf = @($j | Where-Object { $_.black -gt 0 }).Count
     $maxB = ($j | Measure-Object black -Maximum).Maximum
     $turn = @($data[$name] | Where-Object { $_.t -gt 3.9 -and $_.black -gt 0 }).Count
-    if ($name -eq 'noguard') { Write-Host ("  info noguard: black border pixels in {0} of {1} jitter-phase frames (max {2} px), {3} frames after t = 3.9 s" -f $bf, $j.Count, $maxB, $turn) }
-    else { Check ($bf -eq 0) ("{0}: no black border pixels during the jitter phase ({1} frames; {2} frames with black after t = 3.9 s)" -f $name, $j.Count, $turn) }
+    $all = $data[$name].ToArray()
+    $allB = @($all | Where-Object { $_.black -gt 0 }).Count
+    if ($name -eq 'noguard') { Write-Host ("  info noguard (edge_guard = 0): black border pixels in {0} of {1} jitter-phase frames (max {2} px), {3} of {4} frames over the whole recording" -f $bf, $j.Count, $maxB, $allB, $all.Count) }
+    else {
+        Check ($bf -eq 0) ("{0}: no black border pixels during the jitter phase ({1} frames)" -f $name, $j.Count)
+        Check ($allB -eq 0) ("{0}: no black border pixels over the whole recording, both eyes ({1} frames, turn + catch-up included)" -f $name, $all.Count)
+    }
 }
+if ($summ.ContainsKey('smooth')) {
+    $sm = $summ['smooth']
+    Check ($sm.uncovered -eq 0) ("smooth: layer summary reports 0 frames with uncovered output (got {0})" -f $sm.uncovered)
+    Check ($sm.guarded -gt 0) ("smooth: the edge guard acted ({0} frames)" -f $sm.guarded)
+} else { Check $false 'smooth: re-projection summary line in the log' }
+if ($summ.ContainsKey('noguard')) { Write-Host ("  info noguard: layer summary {0} frames uncovered, guard {1}" -f $summ['noguard'].uncovered, $summ['noguard'].guarded) }
 if ($fails.Count -eq 0) { Write-Host "`nPASS head smoothing" -ForegroundColor Green; exit 0 }
 Write-Host "`nFAIL head smoothing ($($fails.Count) checks)" -ForegroundColor Red
 exit 1

@@ -170,6 +170,37 @@ int main() {
         hs.Update(dt, in2, f);
         Check(!f.reset && f.correctionDeg < 1e-9, "smoothing off: no filtering, no correction", f.correctionDeg);
     }
+    {   // edge guard with the symmetric output: the guard tests the symmetric frustum x scale against each eye's own
+        // source fov. A lagging smoothed view (fast turn, follow off) must be pulled back until both eyes are covered.
+        const double D = test_motion::kDeg;
+        const float fl[4] = {(float)(-50 * D), (float)(40 * D), (float)(45 * D), (float)(-45 * D)};
+        const float fr[4] = {(float)(-40 * D), (float)(50 * D), (float)(45 * D), (float)(-45 * D)};
+        const SymmetricFov sf = ComputeSymmetricFov(fl, fr, 1408, 1440, 1408, 1440);
+        int bad = 0, guarded = 0;
+        for (int guard = 1; guard >= 0; --guard) {
+            HeadSmoothingSettings s; s.smoothing = 0.6f; s.fovScale = 0.9f; s.edgeGuard = guard != 0;
+            HeadSmoother hs(s);
+            hs.SetSymmetricOutput(sf.tanH, sf.tanV);
+            int unc = 0, grd = 0;
+            for (int i = 0; i <= 180; ++i) {   // 30 deg turn in 0.5 s + jitter, 2 s
+                const double t = i / 90.0;
+                const double yaw = (t < 0.5 ? 0 : t < 1.0 ? 60 * (t - 0.5) : 30) + 2 * std::sin(2 * test_motion::kPi * 3.3 * t);
+                SmoothEyeIn e2[2];
+                Eyes(e2, YawPitchRoll(yaw, 2 * std::sin(2 * test_motion::kPi * 4.1 * t), 2 * std::sin(2 * test_motion::kPi * 4.7 * t)));
+                for (int e = 0; e < 2; ++e) {
+                    const float* fv = e == 0 ? fl : fr;
+                    e2[e].tanL = std::tan((double)fv[0]); e2[e].tanR = std::tan((double)fv[1]);
+                    e2[e].tanU = std::tan((double)fv[2]); e2[e].tanD = std::tan((double)fv[3]);
+                }
+                hs.Update(i * dt, e2, f);
+                if (f.uncovered) ++unc;
+                if (f.guarded) ++grd;
+            }
+            if (guard) { bad = unc; guarded = grd; }
+            else Check(unc > 0, "symmetric + edge_guard = 0: the same motion uncovers the output", unc);
+        }
+        Check(bad == 0 && guarded > 0, "symmetric + edge guard: never uncovered, guard acted", guarded);
+    }
     {   // no usable pose -> pass-through
         HeadSmoothingSettings s; s.smoothing = 0.6f;
         HeadSmoother hs(s);
