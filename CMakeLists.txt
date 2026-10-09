@@ -38,7 +38,7 @@ target_compile_definitions(eye_capture_core PUBLIC
     EYE_CAPTURE_VERSION="${PROJECT_VERSION}")
 target_compile_options(eye_capture_core PRIVATE ${EYE_WARN_FLAGS})
 target_link_libraries(eye_capture_core PUBLIC
-    d3d11 d3d12 dxgi mfplat mfreadwrite mfuuid ole32 strmiids shell32 winmm)
+    d3d11 d3d12 dxgi d3dcompiler mfplat mfreadwrite mfuuid ole32 strmiids shell32 winmm)
 
 # --- the API layer DLL ---
 add_library(eye_capture SHARED

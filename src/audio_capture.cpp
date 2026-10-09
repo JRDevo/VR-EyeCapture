@@ -279,6 +279,10 @@ void AudioCapture::Run() {
         }
     }
     client->Stop();
+    {   // close the timeline up to the stop time so the audio track is as long as the video
+        const int64_t endTarget = (QpcNow100ns() - t0_) * (int64_t)kRate / 10000000LL;
+        if (endTarget > (int64_t)written_) EmitSilence((uint64_t)endTarget - written_);
+    }
 
 done:
     if (wfx) CoTaskMemFree(wfx);

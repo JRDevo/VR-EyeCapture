@@ -2,6 +2,7 @@
 #include <initguid.h>   // CODECAPI_* GUIDs (selectany, no clash with mfuuid / strmiids)
 #include "recorder.h"
 #include <codecapi.h>
+#include <d3dcompiler.h>
 #include <mfapi.h>
 #include <mferror.h>
 #include <mfidl.h>
@@ -17,6 +18,21 @@ namespace {
 
 const UINT kRingSize = 3;   // shared SBS slots (game thread never waits; full ring = dropped frame)
 const UINT kNv12Pool = 4;   // NV12 surfaces in flight inside the encoder
+
+// Linear swapchain formats (UNORM / R10G10B10A2 / FP16 without _SRGB) hold linear light per the OpenXR spec. The D3D11
+// video processor accepts a G10 input colour space but (measured on NVIDIA) does not apply the curve, so linear input
+// is sRGB-encoded here first, on the private encoder device (no game state is touched).
+const char kLinearToSrgbCs[] =
+    "Texture2D<float4> src : register(t0);\n"
+    "RWTexture2D<unorm float4> dst : register(u0);\n"
+    "float3 Enc(float3 l) {\n"
+    "    l = saturate(l);\n"
+    "    return l <= 0.0031308 ? 12.92 * l : 1.055 * pow(l, 1.0 / 2.4) - 0.055;\n"
+    "}\n"
+    "[numthreads(8, 8, 1)]\n"
+    "void main(uint3 id : SV_DispatchThreadID) {\n"
+    "    dst[id.xy] = float4(Enc(src[id.xy].rgb), 1.0);\n"
+    "}\n";
 
 // ---- NV12 pool: tracked samples return their surface here when Media Foundation releases them ----
 struct Nv12Pool {
@@ -168,6 +184,13 @@ struct Recorder::Impl {
     ComPtr<ID3D11VideoProcessor> vp;
     std::vector<ComPtr<ID3D11VideoProcessorInputView>> inViews;
     std::vector<ComPtr<ID3D11Texture2D>> localCopies;   // only if the VP cannot read the shared textures directly
+    // linear -> sRGB pre-pass (linear swapchain formats only)
+    ComPtr<ID3D11ComputeShader> linCs;
+    std::vector<ComPtr<ID3D11ShaderResourceView>> linSrv;
+    ComPtr<ID3D11Texture2D> linTex;
+    ComPtr<ID3D11UnorderedAccessView> linUav;
+    ComPtr<ID3D11VideoProcessorInputView> linView;
+    HANDLE devHandle = nullptr;   // IMFDXGIDeviceManager handle, to lock the device around our GPU work
     std::vector<ComPtr<ID3D11Texture2D>> nv12;
     std::vector<ComPtr<ID3D11VideoProcessorOutputView>> outViews;
     std::vector<ComPtr<IMFAsyncCallback>> poolCb;
@@ -199,6 +222,7 @@ struct Recorder::Impl {
     void Run();
     bool Init();
     bool InitVideoProcessor();
+    bool InitLinearPass();
     HRESULT CreateWriter(bool useHevc, bool hardware, std::string& why);
     void LogTransforms();
     void Process(const Item& it);
@@ -504,6 +528,7 @@ bool Recorder::Impl::Init() {
     }
     if (FAILED(hr)) { SetMessage("no usable video encoder"); return false; }
     LogTransforms();
+    if (FAILED(devMgr->OpenDeviceHandle(&devHandle))) devHandle = nullptr;
     if (stopReq.load()) LOGW("recorder: stop requested during start");
     return true;
 }
@@ -522,29 +547,28 @@ bool Recorder::Impl::InitVideoProcessor() {
     cd.Usage = D3D11_VIDEO_USAGE_OPTIMAL_QUALITY;
     hr = vdev->CreateVideoProcessorEnumerator(&cd, &venum);
     if (FAILED(hr)) { LOGE("recorder: CreateVideoProcessorEnumerator hr=0x%08lx", (unsigned long)hr); SetMessage("video processor"); return false; }
+    const DXGI_FORMAT vpFmt = srgb ? fmt : DXGI_FORMAT_R8G8B8A8_UNORM;   // linear input goes through the pre-pass
     UINT inSup = 0, outSup = 0;
-    venum->CheckVideoProcessorFormat(fmt, &inSup);
+    venum->CheckVideoProcessorFormat(vpFmt, &inSup);
     venum->CheckVideoProcessorFormat(DXGI_FORMAT_NV12, &outSup);
     if (!(inSup & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT) || !(outSup & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT)) {
-        LOGE("recorder: video processor cannot convert %s -> NV12 (in 0x%x out 0x%x)", DxgiFormatName(fmt), inSup, outSup);
+        LOGE("recorder: video processor cannot convert %s -> NV12 (in 0x%x out 0x%x)", DxgiFormatName(vpFmt), inSup, outSup);
         SetMessage("format not supported by the video processor");
         return false;
     }
     hr = vdev->CreateVideoProcessor(venum.Get(), 0, &vp);
     if (FAILED(hr)) { LOGE("recorder: CreateVideoProcessor hr=0x%08lx", (unsigned long)hr); SetMessage("video processor"); return false; }
 
-    // Colour: input = full-range RGB (sRGB-encoded -> G22, linear formats -> G10), output = BT.709 limited range.
-    const DXGI_COLOR_SPACE_TYPE inCs = srgb ? DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709 : DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709;
+    // Colour: input = full-range sRGB-encoded RGB (linear formats are encoded by the pre-pass), output = BT.709 limited.
+    const DXGI_COLOR_SPACE_TYPE inCs = DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
     const DXGI_COLOR_SPACE_TYPE outCs = DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709;
     ComPtr<ID3D11VideoContext1> vctx1;
     ComPtr<ID3D11VideoProcessorEnumerator1> venum1;
     bool cs1 = SUCCEEDED(vctx.As(&vctx1));
     if (cs1 && SUCCEEDED(venum.As(&venum1))) {
         BOOL sup = FALSE;
-        if (SUCCEEDED(venum1->CheckVideoProcessorFormatConversion(fmt, inCs, DXGI_FORMAT_NV12, outCs, &sup)) && !sup) {
-            LOGW("recorder: the video processor reports no %s %s -> NV12 BT.709 conversion; output gamma may be off "
-                 "(try gamma = srgb in config.ini)", DxgiFormatName(fmt), srgb ? "G22" : "G10/linear");
-        }
+        if (SUCCEEDED(venum1->CheckVideoProcessorFormatConversion(vpFmt, inCs, DXGI_FORMAT_NV12, outCs, &sup)) && !sup)
+            LOGW("recorder: the video processor reports no %s RGB -> NV12 BT.709 conversion; colours may be off", DxgiFormatName(vpFmt));
     }
     if (cs1) {
         vctx1->VideoProcessorSetStreamColorSpace1(vp.Get(), 0, inCs);
@@ -576,13 +600,19 @@ bool Recorder::Impl::InitVideoProcessor() {
     localCopies.clear();
     D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC iv{};
     iv.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
+    if (!srgb) {
+        if (!InitLinearPass()) return false;
+        hr = vdev->CreateVideoProcessorInputView(linTex.Get(), venum.Get(), &iv, &linView);
+        if (FAILED(hr)) { LOGE("recorder: input view on the linear pre-pass texture hr=0x%08lx", (unsigned long)hr); SetMessage("video processor input view"); return false; }
+    }
     bool direct = true;
     for (auto& t : ring.tex) {
+        if (!srgb) break;
         ComPtr<ID3D11VideoProcessorInputView> v;
         if (FAILED(vdev->CreateVideoProcessorInputView(t.Get(), venum.Get(), &iv, &v))) { direct = false; break; }
         inViews.push_back(v);
     }
-    if (!direct) {
+    if (srgb && !direct) {
         LOGW("recorder: video processor cannot read the shared ring directly -- adding one GPU copy per frame");
         inViews.clear();
         for (size_t i = 0; i < ring.tex.size(); ++i) {
@@ -628,6 +658,38 @@ bool Recorder::Impl::InitVideoProcessor() {
         cb.Attach(new PoolReturn(pool, (int)i));
         poolCb.push_back(cb);
     }
+    return true;
+}
+
+bool Recorder::Impl::InitLinearPass() {
+    ComPtr<ID3DBlob> code, errs;
+    HRESULT hr = D3DCompile(kLinearToSrgbCs, sizeof(kLinearToSrgbCs) - 1, "linear_to_srgb", nullptr, nullptr, "main", "cs_5_0",
+                            D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &errs);
+    if (FAILED(hr)) {
+        LOGE("recorder: linear->sRGB shader compile failed hr=0x%08lx %s", (unsigned long)hr,
+             errs ? (const char*)errs->GetBufferPointer() : "");
+        SetMessage("shader compile");
+        return false;
+    }
+    hr = enc->CreateComputeShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, &linCs);
+    D3D11_TEXTURE2D_DESC d{};
+    d.Width = W; d.Height = H; d.MipLevels = 1; d.ArraySize = 1; d.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    d.SampleDesc.Count = 1; d.Usage = D3D11_USAGE_DEFAULT;
+    d.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+    if (SUCCEEDED(hr)) hr = enc->CreateTexture2D(&d, nullptr, &linTex);
+    if (SUCCEEDED(hr)) hr = enc->CreateUnorderedAccessView(linTex.Get(), nullptr, &linUav);
+    linSrv.clear();
+    for (size_t i = 0; SUCCEEDED(hr) && i < ring.tex.size(); ++i) {
+        D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
+        sd.Format = fmt;
+        sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+        sd.Texture2D.MipLevels = 1;
+        ComPtr<ID3D11ShaderResourceView> v;
+        hr = enc->CreateShaderResourceView(ring.tex[i].Get(), &sd, &v);
+        linSrv.push_back(v);
+    }
+    if (FAILED(hr)) { LOGE("recorder: linear->sRGB pre-pass setup failed hr=0x%08lx", (unsigned long)hr); SetMessage("linear pre-pass"); return false; }
+    LOGI("recorder: linear swapchain format -> sRGB-encoding pre-pass (compute) on the encoder device");
     return true;
 }
 
@@ -755,8 +817,27 @@ void Recorder::Impl::Process(const Item& it) {
         FreeSlot(it.slot, 0, false);
         return;
     }
-    ID3D11VideoProcessorInputView* view = inViews[it.slot].Get();
-    if (!localCopies.empty()) encCtx->CopyResource(localCopies[it.slot].Get(), ring.tex[it.slot].Get());
+    // Exclusive use of the encoder device's immediate context against the MF components that share it.
+    ComPtr<ID3D11Device> locked;
+    const bool haveLock = devHandle && SUCCEEDED(devMgr->LockDevice(devHandle, IID_PPV_ARGS(&locked), TRUE));
+    ID3D11VideoProcessorInputView* view = nullptr;
+    if (!srgb) {
+        ID3D11ShaderResourceView* srv = linSrv[it.slot].Get();
+        ID3D11UnorderedAccessView* uav = linUav.Get();
+        encCtx->CSSetShader(linCs.Get(), nullptr, 0);
+        encCtx->CSSetShaderResources(0, 1, &srv);
+        encCtx->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
+        encCtx->Dispatch((W + 7) / 8, (H + 7) / 8, 1);
+        ID3D11ShaderResourceView* nullSrv = nullptr;
+        ID3D11UnorderedAccessView* nullUav = nullptr;
+        encCtx->CSSetShaderResources(0, 1, &nullSrv);
+        encCtx->CSSetUnorderedAccessViews(0, 1, &nullUav, nullptr);
+        encCtx->CSSetShader(nullptr, nullptr, 0);
+        view = linView.Get();
+    } else {
+        view = inViews[it.slot].Get();
+        if (!localCopies.empty()) encCtx->CopyResource(localCopies[it.slot].Get(), ring.tex[it.slot].Get());
+    }
     D3D11_VIDEO_PROCESSOR_STREAM st{};
     st.Enable = TRUE;
     st.pInputSurface = view;
@@ -764,6 +845,7 @@ void Recorder::Impl::Process(const Item& it) {
     ++freeCounter;
     encCtx4->Signal(ring.free.Get(), freeCounter);
     encCtx->Flush();
+    if (haveLock) devMgr->UnlockDevice(devHandle, FALSE);
     FreeSlot(it.slot, freeCounter, true);
     if (FAILED(hr)) {
         pool->Release(n);
@@ -835,8 +917,11 @@ void Recorder::Impl::Cleanup() {
         std::lock_guard<std::mutex> lk(wm);
         writer.Reset();
     }
+    if (devHandle && devMgr) devMgr->CloseDeviceHandle(devHandle);
+    devHandle = nullptr;
     inViews.clear();
     localCopies.clear();
+    linView.Reset(); linUav.Reset(); linTex.Reset(); linSrv.clear(); linCs.Reset();
     outViews.clear();
     nv12.clear();
     poolCb.clear();
