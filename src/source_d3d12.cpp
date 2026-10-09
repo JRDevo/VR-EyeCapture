@@ -258,8 +258,3 @@ std::unique_ptr<IFrameSource> CreateD3D12FrameSource(ID3D12Device* device, ID3D1
     if (!s->Init(device, queue)) return nullptr;
     return s;
 }
-
-std::unique_ptr<IFrameSource> CreateVulkanFrameSource() {
-    LOGW("Vulkan not yet supported (phase 2, see docs/VULKAN.md) -- capture disabled, the game runs normally");
-    return nullptr;
-}

@@ -63,7 +63,7 @@ int main(int argc, char** argv) {
     SetEnvironmentVariableW(L"XR_EYE_CAPTURE_OUTPUT_DIR", outDir.c_str());
     wchar_t rec[32];
     swprintf_s(rec, L"%.2f", record);
-    SetEnvironmentVariableW(L"XR_EYE_CAPTURE_AUTORECORD", rec);
+    SetEnvironmentVariableW(L"XR_EYE_CAPTURE_AUTORECORD", record > 0 ? rec : nullptr);   // --record 0: no autorecord (hotkey / tray test)
     printf("layer_e2e: api=%s layout=%s eye=%ux%u seconds=%.1f record=%.1f\n", api.c_str(), layout.c_str(), eyeW, eyeH, seconds, record);
     const ULONGLONG startTime = GetTickCount64();
     FILETIME ftStart;

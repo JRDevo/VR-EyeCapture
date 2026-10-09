@@ -96,10 +96,13 @@ struct SessionData {
     int64_t autoStopAt = 0;
 };
 
-std::mutex g_lock;
-std::unordered_map<XrInstance, std::unique_ptr<InstanceData>> g_instances;
-std::unordered_map<XrSession, std::unique_ptr<SessionData>> g_sessions;
-std::unordered_map<XrSwapchain, std::unique_ptr<SwapchainData>> g_swapchains;
+// Heap-allocated and never freed on purpose: if the game exits without xrDestroySession, static destructors at DLL
+// unload would run ~Recorder (which waits for worker threads the OS has already killed) and COM releases on a dying
+// device. Leaking them at process exit is the safe choice.
+std::mutex& g_lock = *new std::mutex;
+auto& g_instances = *new std::unordered_map<XrInstance, std::unique_ptr<InstanceData>>;
+auto& g_sessions = *new std::unordered_map<XrSession, std::unique_ptr<SessionData>>;
+auto& g_swapchains = *new std::unordered_map<XrSwapchain, std::unique_ptr<SwapchainData>>;
 SessionData* g_active = nullptr;              // newest capture-capable session (hotkey / tray act on it)
 std::atomic<bool> g_startRequested{false};
 std::atomic<uint64_t> g_faults{0};

@@ -5,6 +5,7 @@
 //
 //   encoder_selftest [--api d3d11|d3d12] [--layout two|array|wide|msaa] [--eye 1920x1080] [--seconds 5] [--fps 90]
 //                    [--format srgb|unorm] [--codec hevc|h264] [--out file.mp4] [--no-audio] [--no-tone]
+//                    [--max-width N] [--max-fps N]
 // Exit code 0 = file written with >= 90 % of the frames.
 #include <windows.h>
 #include <d3d11_4.h>
@@ -26,7 +27,7 @@ namespace {
 
 struct Args {
     std::string api = "d3d11", layout = "two", format = "srgb", codec = "hevc";
-    UINT eyeW = 1920, eyeH = 1080, fps = 90;
+    UINT eyeW = 1920, eyeH = 1080, fps = 90, maxWidth = 0, maxFps = 0;
     double seconds = 5;
     std::wstring out;
     bool audio = true, tone = true;
@@ -78,6 +79,8 @@ int main(int argc, char** argv) {
         else if (k == "--eye") { std::string v = next(); sscanf_s(v.c_str(), "%ux%u", &a.eyeW, &a.eyeH); }
         else if (k == "--out") a.out = elog::Widen(next());
         else if (k == "--no-audio") a.audio = false;
+        else if (k == "--max-width") a.maxWidth = (UINT)atoi(next().c_str());
+        else if (k == "--max-fps") a.maxFps = (UINT)atoi(next().c_str());
         else if (k == "--no-tone") a.tone = false;
         else { printf("unknown argument %s\n", k.c_str()); return 2; }
     }
@@ -219,6 +222,8 @@ int main(int argc, char** argv) {
     rs.hevc = a.codec != "h264";
     rs.fps = a.fps;
     rs.audio = a.audio;
+    rs.maxWidth = a.maxWidth;
+    rs.maxFps = a.maxFps;
     Recorder rec;
     rec.Start(src.get(), rs, 2 * w, h, w, stage, srgbData);
     {
@@ -302,7 +307,8 @@ int main(int argc, char** argv) {
         WaitForSingleObject(fenceEvt, 5000);
     }
     CloseHandle(fenceEvt);
-    const bool ok = idle && st.framesWritten >= frames * 9 / 10 && GetFileAttributesW(a.out.c_str()) != INVALID_FILE_ATTRIBUTES;
+    const UINT expected = (a.maxFps && a.maxFps < a.fps) ? frames * a.maxFps / a.fps : frames;
+    const bool ok = idle && st.framesWritten >= expected * 9 / 10 && GetFileAttributesW(a.out.c_str()) != INVALID_FILE_ATTRIBUTES;
     LOGI("=== encoder_selftest %s", ok ? "PASS" : "FAIL");
     return ok ? 0 : 1;
 }

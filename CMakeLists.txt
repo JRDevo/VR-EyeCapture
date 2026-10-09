@@ -32,6 +32,7 @@ add_library(eye_capture_core STATIC
     src/frame_source.cpp
     src/source_d3d11.cpp
     src/source_d3d12.cpp
+    src/source_vulkan.cpp
     src/recorder.cpp
     src/audio_capture.cpp
     src/st3d.cpp)

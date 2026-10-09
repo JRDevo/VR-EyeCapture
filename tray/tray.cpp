@@ -183,9 +183,54 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return DefWindowProcW(h, msg, wp, lp);
     }
 }
+// Command-line mode (no tray): EyeCaptureTray.exe --start | --stop | --toggle | --status
+// For scripts, Stream Deck buttons, and tests. Prints one status line; exit code 0 = a live game received the command.
+int RunCli(const std::wstring& arg) {
+    HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (!out || out == INVALID_HANDLE_VALUE) {
+        if (AttachConsole(ATTACH_PARENT_PROCESS))
+            out = CreateFileW(L"CONOUT$", GENERIC_WRITE, FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+    }
+    auto print = [&](const std::wstring& s) {
+        if (!out || out == INVALID_HANDLE_VALUE) return;
+        const std::string u = elog::Narrow(s + L"\r\n");
+        DWORD w = 0;
+        WriteFile(out, u.data(), (DWORD)u.size(), &w, nullptr);
+    };
+    HANDLE map = nullptr;
+    EyeCapShared* shm = EyeCapOpenShared(&map);
+    if (!shm) { print(L"error: shared memory unavailable"); return 3; }
+    int rc = 0;
+    if (arg != L"--status") {
+        const uint32_t cmd = arg == L"--start" ? ECC_START : arg == L"--stop" ? ECC_STOP : ECC_TOGGLE;
+        if (!EyeCapSendCommand(shm, cmd)) { print(L"no OpenXR game with a capture-capable session is running"); rc = 1; }
+        else Sleep(600);   // let the layer react before printing the status
+    }
+    EyeCapShared st{};
+    const bool live = EyeCapReadStatus(shm, st) && st.ownerPid && EyeCapProcessAlive(st.ownerPid);
+    static const wchar_t* names[] = {L"none", L"ready", L"starting", L"recording", L"stopping", L"failed"};
+    wchar_t line[900];
+    if (!live) {
+        swprintf_s(line, L"state=none (no game)");
+        if (arg == L"--status") rc = 1;
+    } else {
+        swprintf_s(line, L"state=%s pid=%u game=%s api=%s size=%ux%u fps=%u frames=%llu dropped=%llu file=%s msg=%s",
+                   st.state < 6 ? names[st.state] : L"?", st.ownerPid, st.game, st.api, st.width, st.height, st.fps,
+                   (unsigned long long)st.framesWritten, (unsigned long long)st.framesDropped, st.file, st.message);
+    }
+    print(line);
+    UnmapViewOfFile(shm);
+    CloseHandle(map);
+    return rc;
+}
 } // namespace
 
-int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
+int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
+    if (cmdLine && cmdLine[0] == L'-') {
+        std::wstring a = cmdLine;
+        while (!a.empty() && a.back() == L' ') a.pop_back();
+        if (a == L"--start" || a == L"--stop" || a == L"--toggle" || a == L"--status") return RunCli(a);
+    }
     HANDLE single = CreateMutexW(nullptr, TRUE, L"Local\\OpenXR-EyeCapture-Tray");
     if (GetLastError() == ERROR_ALREADY_EXISTS) return 0;
     g_inst = inst;
