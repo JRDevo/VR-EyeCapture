@@ -1,0 +1,13 @@
+/build/
+/dist/
+/captures/
+/logs/
+.vs/
+*.user
+*.suo
+CMakeSettings.json
+
+# Installed copies that scripts/install.ps1 places next to config.ini (built from source)
+/eye_capture.dll
+/eye_capture.pdb
+/XR_APILAYER_JRDEVO_eye_capture.json
