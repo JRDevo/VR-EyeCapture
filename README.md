@@ -27,13 +27,23 @@ Desktop. Any other OpenXR game that renders with Direct3D 11 or Direct3D 12 shou
    It asks for administrator rights once and registers the layer for all OpenXR apps:
    `HKLM\SOFTWARE\Khronos\OpenXR\1\ApiLayers\Implicit\<folder>\XR_APILAYER_JRDEVO_eye_capture.json = 0`.
    No admin rights? `install.ps1 -CurrentUser` registers it for your user only (HKCU; ignored by games run as admin).
-3. Optional: start `EyeCaptureTray.exe` for a tray icon (put a shortcut in `shell:startup` to have it always).
+3. Put a shortcut to `EyeCaptureTray.exe` in `shell:startup` (Win+R, `shell:startup`) so it always runs. See "How it works".
 
 Uninstall: `scripts\uninstall.ps1` (removes the registration; files and recordings stay).
 
+## How it works: start the tray app first
+
+**Start `EyeCaptureTray.exe` before launching the game. Without it the layer does nothing** (it is dormant: every
+OpenXR call is passed straight through, no hotkey, no recorder, no encoder, no shared memory). While the tray app runs it
+holds a small marker object (`Local\OpenXR-EyeCapture-TrayAlive`); the layer looks for it when the game creates its VR
+session and arms itself only if it is there. The decision is made once per session, so starting the tray after the game
+is already in VR does not arm it: restart the game (or its VR session). Closing the tray while a game is already armed
+does not stop the layer; the hotkey keeps working until the game ends.
+Set `require_tray = 0` in `config.ini` to always arm without the tray (old behaviour, hotkey only).
+
 ## Record
 
-1. Start the game in VR as usual (ETS2 / ATS: launch option `-openxr`).
+1. Start `EyeCaptureTray.exe`, then the game in VR as usual (ETS2 / ATS: launch option `-openxr`).
 2. Press **Ctrl+Shift+F10** → one beep (880 Hz) in the headset: recording.
 3. Press **Ctrl+Shift+F10** again → two beeps: stopped, the MP4 is finalized.
    One long low beep = it could not start (see the log).
@@ -43,10 +53,10 @@ Uninstall: `scripts\uninstall.ps1` (removes the registration; files and recordin
 Recording also stops and the file is finalized when the game closes its VR session (quitting the game normally).
 If the game crashes or is killed while recording, the MP4 is lost (it is only finalized at the end).
 
-**Tray icon** (optional): grey = no VR game, green = ready, red = recording, amber = starting / finalizing / failed.
+**Tray icon**: grey = no VR game, green = ready, red = recording, amber = starting / finalizing / failed.
 Right-click: Start / Stop recording, Open captures folder, Open log, Edit config, Exit. The tooltip shows game,
 resolution, fps, dropped frames and elapsed time. `EyeCaptureTray.exe --start | --stop | --toggle | --status` does the
-same from a script or a Stream Deck button.
+same from a script or a Stream Deck button (`--start` / `--toggle` print an error if the tray app is not running).
 
 ## Upload to YouTube
 
@@ -80,6 +90,7 @@ starts its OpenXR instance.
 | `gamma` | `auto` | `auto` from the swapchain format; `srgb` / `linear` only if colours look washed out or too dark. |
 | `audio_enabled` | `1` | Record the sound (what plays on the playback device). |
 | `audio_device` | *(empty)* = default playback device | Part of the device name, e.g. `Virtual Desktop Audio`. |
+| `require_tray` | `1` | `1` = the layer is only active while `EyeCaptureTray.exe` is running (checked when the game creates its VR session). `0` = always active. |
 | `log_level` | `info` | `error`, `warn`, `info`, `debug`. |
 
 ## Log and troubleshooting
@@ -89,7 +100,8 @@ the game exe, runtime, graphics API (`capture AVAILABLE` / `DISABLED`), every sw
 the frame layout it detected (`TWO_SWAPCHAINS`, `TEXTURE_ARRAY`, `ONE_SWAPCHAIN_TWO_RECTS`), the encoder it picked
 (e.g. `NVIDIA HEVC Encoder MFT [hardware]`) and a summary per recording (frames written / dropped, duration, file).
 
-- **Nothing happens on the hotkey**: check the log has a `session ... created: graphics API D3D11 -> capture AVAILABLE`
+- **Nothing happens on the hotkey**: first make sure `EyeCaptureTray.exe` was running before the game started; if not the
+  log says `EyeCaptureTray not running ... layer dormant for this session`. Then check the log has a `session ... created: graphics API D3D11 -> capture AVAILABLE`
   line for the game. No `loaded into <game>.exe` line at all = the layer is not registered (run `install.ps1`) or the
   game does not use OpenXR.
 - **Dropped frames** in the summary: lower `max_fps` or `max_width`, or `bitrate_mbps`.

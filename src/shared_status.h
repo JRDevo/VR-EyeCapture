@@ -3,7 +3,8 @@
 // One named shared-memory block (Local\OpenXR-EyeCapture-Status) and one named auto-reset event
 // (Local\OpenXR-EyeCapture-Command). The layer process that owns a capture-capable OpenXR session ("owner") publishes
 // its status (seqlock-protected) about 4x per second; the tray writes a command + target pid, bumps cmdSeq and sets the
-// event. The layer works the same with no tray running; the tray shows "no game" when the owner is gone.
+// event. The layer is dormant (creates neither) unless the tray holds EYECAP_TRAY_ALIVE_NAME (or require_tray=0);
+// the tray shows "no game" when the owner is gone.
 #pragma once
 #include <windows.h>
 #include <cstdint>
@@ -11,6 +12,9 @@
 
 #define EYECAP_SHM_NAME   L"Local\\OpenXR-EyeCapture-Status"
 #define EYECAP_EVENT_NAME L"Local\\OpenXR-EyeCapture-Command"
+// Held open by the GUI tray app for as long as it runs (CLI modes do not hold it). The layer only arms itself for a
+// session when this exists (config require_tray, default 1); otherwise it stays dormant = pure pass-through.
+#define EYECAP_TRAY_ALIVE_NAME L"Local\\OpenXR-EyeCapture-TrayAlive"
 
 enum : uint32_t { EYECAP_MAGIC = 0x50414345u /* 'ECAP' */, EYECAP_VERSION = 1 };
 
@@ -85,6 +89,13 @@ inline void EyeCapCopy(wchar_t* dst, size_t cap, const wchar_t* src) {
     size_t i = 0;
     for (; src && src[i] && i + 1 < cap; ++i) dst[i] = src[i];
     dst[i] = 0;
+}
+
+// Layer side: is the GUI tray app running? (Access denied = the object exists but belongs to a more privileged tray.)
+inline bool EyeCapTrayRunning() {
+    HANDLE h = OpenMutexW(SYNCHRONIZE, FALSE, EYECAP_TRAY_ALIVE_NAME);
+    if (h) { CloseHandle(h); return true; }
+    return GetLastError() == ERROR_ACCESS_DENIED;
 }
 
 inline bool EyeCapProcessAlive(DWORD pid) {

@@ -29,6 +29,7 @@ struct Config {
     bool         audioEnabled = true;
     std::wstring audioDevice;            // substring of the render endpoint name; empty = default render device
     GammaMode    gamma = GammaMode::Auto;
+    bool         requireTray = true;     // require_tray: layer stays dormant unless EyeCaptureTray.exe is running
     LogLevel     logLevel = LogLevel::Info;
     std::wstring loadedFrom;             // path of the ini that was read ("" = defaults only)
 };

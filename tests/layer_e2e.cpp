@@ -4,8 +4,9 @@
 // XR_EYE_CAPTURE_AUTORECORD (starts at the first frame, stops after N s) into XR_EYE_CAPTURE_OUTPUT_DIR.
 //
 //   layer_e2e [--api d3d11|d3d12] [--layout two|array|wide|msaa] [--eye 1920x1080] [--seconds 6] [--record 4]
-//             [--out-dir dir]
-// Prints the path of the produced MP4 ("E2E_OUTPUT=<path>"). Exit code 0 = a new MP4 appeared.
+//             [--out-dir dir] [--expect-dormant]
+// Prints the path of the produced MP4 ("E2E_OUTPUT=<path>"). Exit code 0 = a new MP4 appeared
+// (--expect-dormant: the layer must NOT record, e.g. no tray running; exit 0 = loop completed and no MP4 appeared).
 #include <windows.h>
 #include <d3d11_1.h>
 #include <d3d12.h>
@@ -44,6 +45,7 @@ int main(int argc, char** argv) {
     std::string api = "d3d11", layout = "two";
     unsigned eyeW = 1920, eyeH = 1080;
     double seconds = 6, record = 4;
+    bool expectDormant = false;
     std::wstring outDir = ExeDir() + L"\\e2e_out";
     for (int i = 1; i < argc; ++i) {
         std::string k = argv[i];
@@ -54,6 +56,7 @@ int main(int argc, char** argv) {
         else if (k == "--seconds") seconds = atof(next().c_str());
         else if (k == "--record") record = atof(next().c_str());
         else if (k == "--out-dir") outDir = Widen(next());
+        else if (k == "--expect-dormant") expectDormant = true;
         else { printf("unknown argument %s\n", k.c_str()); return 2; }
     }
     const bool d3d12 = api == "d3d12";
@@ -296,6 +299,11 @@ int main(int argc, char** argv) {
         FindClose(h);
     }
     printf("elapsed %.1f s\n", (GetTickCount64() - startTime) / 1000.0);
+    if (expectDormant) {
+        if (!best.empty()) { printf("E2E FAIL: dormant layer produced %ls\n", best.c_str()); return 1; }
+        printf("E2E_DORMANT_OK frames=%u (loop completed, no recording)\n", frames);
+        return 0;
+    }
     if (best.empty()) { printf("E2E FAIL: no new MP4 in %ls\n", outDir.c_str()); return 1; }
     printf("E2E_OUTPUT=%ls\n", best.c_str());
     return 0;

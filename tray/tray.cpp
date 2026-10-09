@@ -1,9 +1,10 @@
-// EyeCaptureTray -- optional tray control for the OpenXR-EyeCapture layer (Win32, no frameworks).
+// EyeCaptureTray -- tray control for the OpenXR-EyeCapture layer (Win32, no frameworks). The layer is dormant (pure
+// pass-through) unless this app is running: it holds the named mutex Local\OpenXR-EyeCapture-TrayAlive while it runs.
 //
 // Tray icon: grey = no game, green = game running (ready), red = recording, amber = starting / finalizing / failed.
 // Right-click (or left-click) menu: Start / Stop recording, Open captures folder, Open log, Edit config, Exit.
-// Tooltip: game, API, resolution, fps, frames dropped, elapsed. Talks to the layer through src/shared_status.h; the
-// layer never depends on this app (the hotkey keeps working without it).
+// Tooltip: game, API, resolution, fps, frames dropped, elapsed. Talks to the layer through src/shared_status.h.
+// Start it BEFORE the game: the layer decides at xrCreateSession whether to arm (config require_tray=0 = always arm).
 #include <windows.h>
 #include <shellapi.h>
 #include <cmath>
@@ -86,7 +87,7 @@ void Refresh() {
 
     wchar_t tip[128];
     if (!g_live) {
-        swprintf_s(tip, L"OpenXR-EyeCapture: no OpenXR game running");
+        swprintf_s(tip, L"OpenXR-EyeCapture: no OpenXR game running\n(games started after this app are recorded)");
     } else if (state == ECS_RECORDING) {
         const ULONGLONG el = g_st.recStartTick ? (GetTickCount64() - g_st.recStartTick) / 1000 : 0;
         swprintf_s(tip, L"REC %llu:%02llu  %s (%s)\n%ux%u @%u fps, dropped %llu", el / 60, el % 60, g_st.game, g_st.api,
@@ -197,6 +198,10 @@ int RunCli(const std::wstring& arg) {
         DWORD w = 0;
         WriteFile(out, u.data(), (DWORD)u.size(), &w, nullptr);
     };
+    if ((arg == L"--start" || arg == L"--toggle") && !EyeCapTrayRunning()) {
+        print(L"error: EyeCaptureTray is not running — start it before the game so the layer is active");
+        return 4;
+    }
     HANDLE map = nullptr;
     EyeCapShared* shm = EyeCapOpenShared(&map);
     if (!shm) { print(L"error: shared memory unavailable"); return 3; }
@@ -233,6 +238,13 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     }
     HANDLE single = CreateMutexW(nullptr, TRUE, L"Local\\OpenXR-EyeCapture-Tray");
     if (GetLastError() == ERROR_ALREADY_EXISTS) return 0;
+    // "tray is alive" marker the layer looks for (GUI mode only; the CLI modes never create it). Null DACL so a game
+    // running at a different integrity level can still open it.
+    SECURITY_DESCRIPTOR sd;
+    SECURITY_ATTRIBUTES sa{sizeof(sa), &sd, FALSE};
+    InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION);
+    SetSecurityDescriptorDacl(&sd, TRUE, nullptr, FALSE);
+    HANDLE alive = CreateMutexW(&sa, FALSE, EYECAP_TRAY_ALIVE_NAME);
     g_inst = inst;
     g_exeDir = ExeDir();
     g_shm = EyeCapOpenShared(&g_map);
@@ -267,6 +279,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     for (HICON i : g_icons) if (i) DestroyIcon(i);
     if (g_shm) UnmapViewOfFile(g_shm);
     if (g_map) CloseHandle(g_map);
+    if (alive) CloseHandle(alive);
     if (single) CloseHandle(single);
     return 0;
 }

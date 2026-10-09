@@ -34,6 +34,7 @@
 #include "frame_source.h"
 #include "log.h"
 #include "recorder.h"
+#include "shared_status.h"
 
 #define LAYER_NAME "XR_APILAYER_JRDEVO_eye_capture"
 
@@ -76,6 +77,7 @@ struct SessionData {
     GfxApi api = GfxApi::None;
     std::unique_ptr<IFrameSource> src;
     std::unique_ptr<Recorder> rec;
+    bool armed = false;                 // tray running (or require_tray=0) when the session was created; else dormant
     bool faulted = false;
     uint64_t frames = 0;
     // submitted-frame period estimate (displayTime deltas)
@@ -107,6 +109,9 @@ SessionData* g_active = nullptr;              // newest capture-capable session 
 std::atomic<bool> g_startRequested{false};
 std::atomic<uint64_t> g_faults{0};
 PFN_xrGetInstanceProcAddr g_anyNextGipa = nullptr;
+std::mutex& g_ctlLock = *new std::mutex;      // serialises ControlStart / ControlStop (lock order: g_ctlLock -> g_lock)
+void EnsureControl();                         // start the control thread (first armed session)
+void StopControlIfIdle();                     // stop it when no armed session is left
 
 // process-wide setup
 std::once_flag g_initOnce;
@@ -169,6 +174,13 @@ void InitProcess() {
          elog::Narrow(g_cfg.audioDevice).c_str(),
          g_cfg.gamma == GammaMode::Auto ? "auto" : g_cfg.gamma == GammaMode::Srgb ? "srgb" : "linear");
     if (g_autoRecordSec > 0) LOGI("XR_EYE_CAPTURE_AUTORECORD=%.1f s: recording starts at the first frame", g_autoRecordSec);
+    const std::wstring reqTray = EnvW(L"XR_EYE_CAPTURE_REQUIRE_TRAY");
+    if (!reqTray.empty()) {
+        g_cfg.requireTray = _wtoi(reqTray.c_str()) != 0;
+        LOGI("XR_EYE_CAPTURE_REQUIRE_TRAY=%s overrides config.ini", g_cfg.requireTray ? "1" : "0");
+    }
+    LOGI("require_tray %s: %s", g_cfg.requireTray ? "1" : "0",
+         g_cfg.requireTray ? "sessions are armed only while EyeCaptureTray.exe is running" : "sessions are always armed");
 }
 
 void EnsureInit() { std::call_once(g_initOnce, InitProcess); }
@@ -425,7 +437,7 @@ XrResult XRAPI_CALL Hook_AcquireSwapchainImage(XrSwapchain swapchain, const XrSw
     const XrResult r = next(swapchain, ai, index);
     if (XR_SUCCEEDED(r) && index) {
         std::lock_guard<std::mutex> lk(g_lock);
-        if (SwapchainData* scd = FindSwapchain(swapchain)) {
+        if (SwapchainData* scd = FindSwapchain(swapchain); scd && scd->session->armed) {
             scd->acquired.push_back(*index);
             if (scd->acquired.size() > 16) scd->acquired.pop_front();
         }
@@ -445,7 +457,7 @@ XrResult XRAPI_CALL Hook_ReleaseSwapchainImage(XrSwapchain swapchain, const XrSw
     const XrResult r = next(swapchain, ri);
     if (XR_SUCCEEDED(r)) {
         std::lock_guard<std::mutex> lk(g_lock);
-        if (SwapchainData* scd = FindSwapchain(swapchain)) {
+        if (SwapchainData* scd = FindSwapchain(swapchain); scd && scd->session->armed) {
             if (!scd->acquired.empty()) {
                 scd->lastReleased = (int)scd->acquired.front();
                 scd->acquired.pop_front();
@@ -473,6 +485,7 @@ XrResult XRAPI_CALL Hook_CreateSwapchain(XrSession session, const XrSwapchainCre
         auto scd = std::make_unique<SwapchainData>();
         scd->handle = *swapchain;
         scd->session = sd;
+        if (!sd->armed) { g_swapchains[*swapchain] = std::move(scd); return r; }   // dormant: keep only the session link (dispatch)
         scd->info.format = ci->format;
         scd->info.width = ci->width;
         scd->info.height = ci->height;
@@ -523,7 +536,7 @@ XrResult XRAPI_CALL Hook_EnumerateSwapchainImages(XrSwapchain swapchain, uint32_
     if (XR_FAILED(r) || !images || capacity == 0 || !count) return r;
     std::lock_guard<std::mutex> lk(g_lock);
     SwapchainData* scd = FindSwapchain(swapchain);
-    if (!scd) return r;
+    if (!scd || !scd->session->armed) return r;
     const uint32_t n = *count < capacity ? *count : capacity;
     scd->images.assign(n, nullptr);
     const XrStructureType t = images[0].type;
@@ -567,10 +580,14 @@ XrResult XRAPI_CALL Hook_CreateSession(XrInstance instance, const XrSessionCreat
         return r;
     }
     try {
+        bool armedSession = false;
         auto sd = std::make_unique<SessionData>();
         sd->handle = *session;
         sd->inst = id;
-        for (auto* p = reinterpret_cast<const XrBaseInStructure*>(ci->next); p; p = p->next) {
+        sd->armed = !g_cfg.requireTray || EyeCapTrayRunning();
+        if (!sd->armed)
+            LOGI("EyeCaptureTray not running — layer dormant for this session (set require_tray=0 in config.ini to always arm)");
+        for (auto* p = reinterpret_cast<const XrBaseInStructure*>(ci->next); sd->armed && p; p = p->next) {
             if (p->type == XR_TYPE_GRAPHICS_BINDING_D3D11_KHR) {
                 sd->api = GfxApi::D3D11;
                 sd->src = CreateD3D11FrameSource(reinterpret_cast<const XrGraphicsBindingD3D11KHR*>(p)->device);
@@ -593,14 +610,20 @@ XrResult XRAPI_CALL Hook_CreateSession(XrInstance instance, const XrSessionCreat
                 break;
             }
         }
-        if (sd->api == GfxApi::None) LOGW("session has no known graphics binding (headless?) -- capture disabled");
-        if (sd->src) sd->rec = std::make_unique<Recorder>();
-        LOGI("session %p created: graphics API %s -> capture %s", (void*)*session, GfxApiName(sd->api),
-             sd->src ? "AVAILABLE" : "DISABLED");
-        std::lock_guard<std::mutex> lk(g_lock);
-        SessionData* raw = sd.get();
-        g_sessions[*session] = std::move(sd);
-        if (raw->src) g_active = raw;
+        if (sd->armed) {
+            if (sd->api == GfxApi::None) LOGW("session has no known graphics binding (headless?) -- capture disabled");
+            if (sd->src) sd->rec = std::make_unique<Recorder>();
+            LOGI("session %p created: graphics API %s -> capture %s", (void*)*session, GfxApiName(sd->api),
+                 sd->src ? "AVAILABLE" : "DISABLED");
+        }
+        armedSession = sd->armed;
+        {
+            std::lock_guard<std::mutex> lk(g_lock);
+            SessionData* raw = sd.get();
+            g_sessions[*session] = std::move(sd);
+            if (raw->src) g_active = raw;
+        }
+        if (armedSession) EnsureControl();
     } catch (...) {
         LOGE("xrCreateSession bookkeeping failed (capture disabled for this session)");
     }
@@ -637,8 +660,11 @@ XrResult XRAPI_CALL Hook_DestroySession(XrSession session) {
                 if (!sd->rec->WaitIdle(30000)) LOGE("finalize did not finish within 30 s");
             }
         }
-        LOGI("session %p destroyed after %llu frames", (void*)session, (unsigned long long)sd->frames);
+        LOGI("session %p destroyed after %llu frames%s", (void*)session, (unsigned long long)sd->frames,
+             sd->armed ? "" : " (dormant)");
+        const bool wasArmed = sd->armed;
         sd.reset();
+        if (wasArmed) StopControlIfIdle();
     }
     return next ? next(session) : XR_ERROR_HANDLE_INVALID;
 }
@@ -670,7 +696,7 @@ XrResult XRAPI_CALL Hook_DestroyInstance(XrInstance instance) {
         if (sd->rec) { sd->rec->Stop(); sd->rec->WaitIdle(30000); }
     }
     orphans.clear();
-    if (last) ControlStop();
+    if (last) StopControlIfIdle();
     PFN_xrDestroyInstance next = id ? id->DestroyInstance : nullptr;
     LOGI("instance destroyed");
     return next ? next(instance) : XR_ERROR_HANDLE_INVALID;
@@ -734,6 +760,21 @@ XrResult XRAPI_CALL Layer_GetInstanceProcAddr(XrInstance instance, const char* n
     return r;
 }
 
+void EnsureControl() {
+    std::lock_guard<std::mutex> lk(g_ctlLock);
+    ControlStart(g_cfg, g_logPath, g_cfg.loadedFrom.empty() ? ConfigPath(g_dllDir) : g_cfg.loadedFrom,
+                 ControlHooks{Snapshot, RequestStart, RequestStop});   // no-op if already running
+}
+
+void StopControlIfIdle() {
+    std::lock_guard<std::mutex> ctl(g_ctlLock);
+    {
+        std::lock_guard<std::mutex> lk(g_lock);
+        for (auto& kv : g_sessions) if (kv.second->armed) return;
+    }
+    ControlStop();
+}
+
 XrResult XRAPI_CALL Layer_CreateApiLayerInstance(const XrInstanceCreateInfo* info, const XrApiLayerCreateInfo* li, XrInstance* instance) {
     EnsureInit();
     if (!li || li->structType != XR_LOADER_INTERFACE_STRUCT_API_LAYER_CREATE_INFO || !li->nextInfo ||
@@ -785,8 +826,6 @@ XrResult XRAPI_CALL Layer_CreateApiLayerInstance(const XrInstanceCreateInfo* inf
             g_anyNextGipa = id->nextGipa;
             g_instances[*instance] = std::move(id);
         }
-        ControlStart(g_cfg, g_logPath, g_cfg.loadedFrom.empty() ? ConfigPath(g_dllDir) : g_cfg.loadedFrom,
-                     ControlHooks{Snapshot, RequestStart, RequestStop});
     } catch (...) {
         LOGE("instance bookkeeping failed -- layer passes everything through");
     }

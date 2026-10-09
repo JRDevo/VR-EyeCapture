@@ -34,7 +34,7 @@ zip. Re-run it after every build you want the games to pick up (a running game k
 | `src/audio_capture.h/.cpp` | WASAPI loopback → continuous 48 kHz stereo int16 on the QPC clock |
 | `src/st3d.h/.cpp` | Post-finalize MP4 patch: `st3d` box into the video sample entry |
 | `src/control.h/.cpp` | Control thread: hotkey, tray IPC, status publishing, beeps |
-| `src/shared_status.h` | Layer ↔ tray shared-memory layout (`Local\OpenXR-EyeCapture-Status`, event `...-Command`) |
+| `src/shared_status.h` | Layer ↔ tray IPC names + layout (shared memory `Local\OpenXR-EyeCapture-Status`, event `...-Command`, tray-alive mutex `...-TrayAlive`) |
 | `src/config.h/.cpp`, `src/log.h/.cpp` | `config.ini`, log files |
 | `tray/tray.cpp` | `EyeCaptureTray.exe` |
 | `tests/*` | See "Tests" |
@@ -92,6 +92,18 @@ the video sample entry (`hvc1` / `avc1`), grows every ancestor's size and rewrit
 `moov`-before-`mdat` files are handled too (shrink a following `free` box, else a rewrite with every `stco`/`co64` +13)
 but Media Foundation never produced one in the tests.
 
+### Dormant mode (tray required)
+
+`EyeCaptureTray.exe` (GUI mode only, not the `--start/--stop/--toggle/--status` CLI) holds the named mutex
+`Local\OpenXR-EyeCapture-TrayAlive` (null DACL) for its whole life. At `xrCreateSession` the layer checks it
+(`EyeCapTrayRunning()`: `OpenMutex(SYNCHRONIZE)`, access-denied counts as present). Missing and `require_tray=1`
+(default; env override `XR_EYE_CAPTURE_REQUIRE_TRAY=0|1` beats `config.ini`) -> one INFO line "layer dormant", the session
+is stored with `armed=false` and no frame source / recorder: `xrEndFrame` does nothing, swapchain hooks keep only the
+session link (so dispatch stays correct) and skip all tracking / logging. The control thread (hotkey, status block,
+command event) starts at the first armed session (`EnsureControl`) and stops when the last armed session is destroyed
+(`StopControlIfIdle`; also on the last `xrDestroyInstance`). The check happens once per session: a tray started later does
+not arm a running game; a tray closed later does not disarm it.
+
 ### Fault handling
 
 All hooks forward the game's call and return its result unchanged. Bookkeeping failures are logged and ignored. The
@@ -113,10 +125,12 @@ the DLL (`GetModuleHandleEx` + `FreeLibraryAndExitThread`), so an early unload c
 | `tests\verify_mp4.ps1` | ffprobe: codec, size, fps, duration, `Stereo 3D / side by side`, BT.709 tags, raw `st3d` bytes, AAC present / not silent; decoded pixels: grey steps within 6 code values in both eyes (gamma), left half = left eye. |
 | `layer_loadtest.exe` | Real loader + active runtime (VDXR here): our layer is enumerated, negotiates, an instance is created and destroyed through it. |
 | `tests\run_e2e.ps1` | Real loader → installed layer → `mock_runtime.dll`, a normal app frame loop for every layout and both D3D APIs, recording through `XR_EYE_CAPTURE_AUTORECORD`; each MP4 verified. |
-| tray IPC | `layer_e2e --record 0` + `EyeCaptureTray.exe --start / --status / --stop`. |
+| dormant case (last case of `run_e2e.ps1`) | Without `XR_EYE_CAPTURE_REQUIRE_TRAY=0` and without the tray: `layer_e2e --expect-dormant` loop completes, no MP4, log has the "layer dormant" line and no `control:` / recorder lines. (Fails if a tray is running.) |
+| tray IPC | Start `EyeCaptureTray.exe` (GUI), then `layer_e2e --record 0` (it must be started with the tray running, or with `XR_EYE_CAPTURE_REQUIRE_TRAY=0`) + `EyeCaptureTray.exe --start / --status / --stop`. |
 
 Test-only environment variables read by the layer: `XR_EYE_CAPTURE_AUTORECORD=<seconds>` (start at the first frame,
-stop after N s) and `XR_EYE_CAPTURE_OUTPUT_DIR=<dir>`.
+stop after N s) and `XR_EYE_CAPTURE_OUTPUT_DIR=<dir>`, `XR_EYE_CAPTURE_REQUIRE_TRAY=0|1` (overrides `require_tray`; `run_e2e.ps1` sets 0 for the
+recording cases).
 
 ## Not verified without a headset
 
