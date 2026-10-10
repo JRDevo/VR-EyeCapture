@@ -25,11 +25,12 @@ struct Field {
     Kind           kind;
     int            id;
     const wchar_t* options;   // combo: '|'-separated config values
+    const wchar_t* labels = nullptr;   // combo: '|'-separated display texts, same order as options (nullptr = show the values)
 };
 const Field kFields[] = {
     {L"hotkey",            L"capture",         Kind::Edit,  ID_HOTKEY,     nullptr},
     {L"output_dir",        L"capture",         Kind::Edit,  ID_OUTDIR,     nullptr},
-    {L"codec",             L"capture",         Kind::Combo, ID_CODEC,      L"hevc|h264"},
+    {L"codec",             L"capture",         Kind::Combo, ID_CODEC,      L"hevc|h264", L"hevc (H.265)|h264"},
     {L"bitrate_mbps",      L"capture",         Kind::Edit,  ID_BITRATE,    nullptr},
     {L"max_fps",           L"capture",         Kind::Edit,  ID_MAXFPS,     nullptr},
     {L"require_tray",      L"capture",         Kind::Check, ID_REQTRAY,    nullptr},
@@ -38,10 +39,13 @@ const Field kFields[] = {
     {L"head_smoothing",    L"head_smoothing",  Kind::Track, ID_SMOOTH,     nullptr},
     {L"roll_lock",         L"head_smoothing",  Kind::Check, ID_ROLL,       nullptr},
     {L"output_fov_scale",  L"head_smoothing",  Kind::Edit,  ID_FOVSCALE,   nullptr},
-    {L"projection",        L"dome",            Kind::Combo, ID_PROJECTION, L"flat|vr180|vr360"},
-    {L"fill",              L"dome",            Kind::Combo, ID_FILL,       L"black|last_seen"},
+    {L"projection",        L"dome",            Kind::Combo, ID_PROJECTION, L"flat|vr180|vr360", L"flat (side-by-side 3D)|vr180 (experimental)|vr360 (experimental)"},
+    {L"fill",              L"dome",            Kind::Combo, ID_FILL,       L"black|last_seen", L"black (live view only)|last_seen (keep older view)"},
     {L"fill_fade_s",       L"dome",            Kind::Edit,  ID_FILLFADE,   nullptr},
     {L"vr_indicator",      L"indicator",       Kind::Check, ID_INDICATOR,  nullptr},
+    {L"indicator_x",       L"indicator",       Kind::Edit,  ID_INDX,       nullptr},
+    {L"indicator_y",       L"indicator",       Kind::Edit,  ID_INDY,       nullptr},
+    {L"indicator_z",       L"indicator",       Kind::Edit,  ID_INDZ,       nullptr},
     {L"indicator_size",    L"indicator",       Kind::Edit,  ID_INDSIZE,    nullptr},
     {L"indicator_opacity", L"indicator",       Kind::Edit,  ID_INDOPACITY, nullptr},
     {L"audio_enabled",     L"audio",           Kind::Check, ID_AUDIO,      nullptr},
@@ -49,7 +53,7 @@ const Field kFields[] = {
     {L"post_mkv",          L"post_processing", Kind::Check, ID_POSTMKV,    nullptr},
     {L"keep_mp4",          L"post_processing", Kind::Check, ID_KEEPMP4,    nullptr},
     {L"post_flat",         L"post_processing", Kind::Check, ID_POSTFLAT,   nullptr},
-    {L"log_level",         L"debug",           Kind::Combo, ID_LOGLEVEL,   L"error|warn|info|debug"},
+    {L"log_level",         L"debug",           Kind::Combo, ID_LOGLEVEL,   L"none|error|warn|info|debug", L"none (no logging)|error|warn|info|debug"},
 };
 
 std::wstring Trim(const std::wstring& s) {
@@ -64,6 +68,10 @@ std::wstring Lower(std::wstring s) {
 }
 const Field* FindField(const std::wstring& key) {
     for (const Field& f : kFields) if (key == f.key) return &f;
+    return nullptr;
+}
+const Field* FindFieldById(int id) {
+    for (const Field& f : kFields) if (f.id == id) return &f;
     return nullptr;
 }
 
@@ -85,7 +93,8 @@ std::wstring Norm(const std::wstring& key, const std::wstring& raw) {
         return l;
     }
     if (f->kind == Kind::Track || key == L"bitrate_mbps" || key == L"max_fps" || key == L"output_fov_scale" ||
-        key == L"fill_fade_s" || key == L"indicator_size" || key == L"indicator_opacity") {
+        key == L"fill_fade_s" || key == L"indicator_x" || key == L"indicator_y" || key == L"indicator_z" ||
+        key == L"indicator_size" || key == L"indicator_opacity") {
         wchar_t* end = nullptr;
         const double d = wcstod(v.c_str(), &end);
         if (!v.empty() && end && *end == L'\0') return FloatText(d);
@@ -99,7 +108,7 @@ std::wstring Norm(const std::wstring& key, const std::wstring& raw) {
     }
     if (key == L"log_level") {
         const std::wstring l = Lower(v);
-        return l == L"warning" ? L"warn" : l;
+        return l == L"warning" ? L"warn" : (l == L"off" ? L"none" : l);
     }
     if (key == L"projection" || key == L"fill") return Lower(v);
     if (key == L"hotkey") {
@@ -238,6 +247,9 @@ KeyValues FromConfig(const Config& c) {
     kv.emplace_back(L"fill", c.dome.fill == DomeFill::LastSeen ? L"last_seen" : L"black");
     kv.emplace_back(L"fill_fade_s", FloatText(c.dome.fadeS));
     kv.emplace_back(L"vr_indicator", B(c.indicator.enabled));
+    kv.emplace_back(L"indicator_x", FloatText(c.indicator.x));
+    kv.emplace_back(L"indicator_y", FloatText(c.indicator.y));
+    kv.emplace_back(L"indicator_z", FloatText(c.indicator.z));
     kv.emplace_back(L"indicator_size", FloatText(c.indicator.size));
     kv.emplace_back(L"indicator_opacity", FloatText(c.indicator.opacity));
     kv.emplace_back(L"audio_enabled", B(c.audioEnabled));
@@ -245,8 +257,8 @@ KeyValues FromConfig(const Config& c) {
     kv.emplace_back(L"post_mkv", B(c.postMkv));
     kv.emplace_back(L"keep_mp4", B(c.keepMp4));
     kv.emplace_back(L"post_flat", B(c.postFlat));
-    static const wchar_t* lv[] = {L"error", L"warn", L"info", L"debug"};
-    kv.emplace_back(L"log_level", lv[(int)c.logLevel >= 0 && (int)c.logLevel < 4 ? (int)c.logLevel : 2]);
+    static const wchar_t* lv[] = {L"none", L"error", L"warn", L"info", L"debug"};   // index = (int)LogLevel + 1
+    kv.emplace_back(L"log_level", lv[(int)c.logLevel >= -1 && (int)c.logLevel < 4 ? (int)c.logLevel + 1 : 3]);
     return kv;
 }
 
@@ -398,13 +410,118 @@ bool HotkeyText(unsigned vk, bool ctrl, bool shift, bool alt, std::wstring& out)
 namespace {
 
 HWND                g_dlg = nullptr;
+HWND                g_tip = nullptr;            // the tooltip window (owned by the dialog)
 HFONT               g_font = nullptr;
+HWND                g_hover = nullptr;          // the control the help panel last followed (mouse or keyboard focus)
+const wchar_t*      g_shown = nullptr;          // the text now in the help panel (pointer compare: no flicker)
 std::wstring        g_path;
 bool                g_done = false;
 bool                g_capturing = false;
 int                 g_smoothPos = -1;       // trackbar position / text as loaded: an untouched slider keeps the exact file value
 std::wstring        g_smoothText;
 std::function<void(const std::vector<std::wstring>&)> g_onSaved;
+
+
+// ---- help texts: hover tooltip + the "What does this do?" panel. Plain words, short sentences.
+const wchar_t* const kOverview =
+    L"Point at a setting to read what it does.\r\n"
+    L"How it works: eye_capture.dll is an OpenXR layer. While this tray app runs and you press the hotkey, the layer copies the "
+    L"two eye images the game sends to the headset, encodes them on the GPU and writes an MP4 (and then an MKV for YouTube). "
+    L"Nothing is injected into the game. Saved changes apply to the next recording.";
+
+struct Help { int id; const wchar_t* text; };
+const Help kHelp[] = {
+    {ID_HOTKEY, L"The key that starts and stops a recording while the game runs. Press it once to start, press it again to stop. "
+                L"Pick a key the game does not use (ScrollLock works well). Read when the game starts: restart the game after you change it."},
+    {ID_HOTKEY_PICK, L"Click this, then press the key or key combination you want. Escape cancels."},
+    {ID_CODEC, L"Video compression. hevc (H.265) gives the best picture per megabyte and is what YouTube wants for big 3D video. "
+               L"h264 is older and plays in more programs, but files get bigger or softer."},
+    {ID_BITRATE, L"Megabits per second of video. Higher = sharper picture and bigger files. 0 = the recorder's default: 120 for hevc, 80 for h264."},
+    {ID_MAXFPS, L"Caps the frames per second in the recording. 0 = record every frame the headset shows (72 or 90). "
+                L"60 or 30 makes smaller files and less GPU work. YouTube plays 60."},
+    {ID_OUTDIR, L"Where recordings are saved. Empty = the 'captures' folder next to eye_capture.dll."},
+    {ID_BROWSE, L"Pick the output folder."},
+    {ID_AUDIO, L"Records what you hear (the Windows playback device) into the video."},
+    {ID_AUDIODEV, L"Part of the playback device name to record, for example 'Virtual Desktop Audio'. Empty = the Windows default playback device."},
+    {ID_PROJECTION, L"flat = normal side-by-side 3D video. The viewer sees exactly what you saw, in 3D. Recommended; plays everywhere.\r\n"
+                    L"vr180 / vr360 are EXPERIMENTAL. The video becomes a dome you can look around in with a VR player. "
+                    L"But the game only draws what your headset looks at (about 100 degrees). The dome shows live video there, "
+                    L"older video where you looked before, and black where you never looked. It is not a full live 360 world. "
+                    L"Needs a VR180 / VR360 player (YouTube VR, DeoVR, Virtual Desktop Videos). "
+                    L"Symmetric field of view and head smoothing are not used in dome mode."},
+    {ID_FILL, L"Dome mode (vr180 / vr360) only. last_seen = what you looked at earlier stays on the dome until it fades. "
+              L"black = only the live view; everything else is black."},
+    {ID_FILLFADE, L"Dome mode only. How many seconds an older area stays before it fades to black (the fade itself takes 2 seconds). 0 = never fade."},
+    {ID_SYMFOV, L"Flat mode only. The headset draws each eye with a lopsided field of view (wider on the outside). "
+                L"This re-projects both eyes to one symmetric view, so a 3D player can fuse them without eye strain. "
+                L"Costs one GPU pass per frame. Turn it off only to record the raw eye images."},
+    {ID_SWAP, L"Puts the right eye on the left half and the left eye on the right half. Use it if the 3D looks inside-out."},
+    {ID_ROLL, L"Flat mode, with head smoothing above 0. Keeps the horizon level in the video when you tilt your head."},
+    {ID_SMOOTH, L"Flat mode only. 0 = off: the video follows your head exactly. Higher = small head shakes are removed; "
+                L"each frame is re-projected against a smoothed head direction. Big turns still follow your head. "
+                L"Costs one GPU pass per frame. Black edges are prevented automatically (edge_guard in config.ini, on by default)."},
+    {ID_FOVSCALE, L"Flat mode, with head smoothing on. The video shows this fraction of the game's field of view (0.5 .. 1). "
+                  L"The trimmed border is the room the smoothing correction needs at the edges. 1 = no room, "
+                  L"0.9 = about 3 degrees on every side (default). Smaller = more room, less view."},
+    {ID_INDICATOR, L"Shows a small red dot in the headset while recording, so you know it is on. It is not in the video. "
+                   L"Direct3D 11 games only (ETS2 / ATS). Read when the game starts."},
+    {ID_INDX, L"Where the dot sits, left/right of straight ahead, in metres. 0 = centre, + = right, - = left. Default 0.22."},
+    {ID_INDY, L"Where the dot sits, up/down, in metres. 0 = eye level, + = up, - = down. Default -0.16 (a little below centre)."},
+    {ID_INDZ, L"How far in front of you the dot is, in metres. Always negative (-0.8 = 80 cm ahead). Further away = the same size looks smaller. Default -0.8."},
+    {ID_INDSIZE, L"Edge length of the dot in metres at its distance Z. At -0.8 m: 0.02 = about 1.4 degrees, 0.005 = a small dot, "
+                 L"0.002 = a few pixels. Below about 0.001 it is smaller than one headset pixel and disappears. Smallest allowed 0.0005."},
+    {ID_INDOPACITY, L"How solid the red dot is. 1 = fully visible, 0.3 = faint."},
+    {ID_POSTMKV, L"After a recording the tray copies the video into an .mkv with the 3D tags YouTube reads "
+                 L"(the MP4 tags are ignored by YouTube). No re-encoding; takes seconds. Upload the .mkv."},
+    {ID_KEEPMP4, L"Keep the original .mp4 next to the .mkv. Off = the .mp4 is deleted once the .mkv is made."},
+    {ID_POSTFLAT, L"Also makes a normal 2D video from the left eye (_FLAT.mp4) for viewers without 3D. "
+                  L"This re-encodes with ffmpeg and takes a while."},
+    {ID_REQTRAY, L"The layer stays asleep unless this tray app runs. Keep it on, so a game never records by surprise. Read when the game starts."},
+    {ID_LOGLEVEL, L"How much logs\\eye_capture.log and logs\\tray.log write. none = nothing at all. info is normal. debug is for bug reports."},
+    {ID_OPENINI, L"Opens config.ini in a text editor. The file has every setting, with comments."},
+    {ID_DEFAULTS, L"Puts every field back to the built-in default. Nothing is saved until you click Save."},
+    {ID_SAVE, L"Writes the changed values into config.ini. The next recording uses them."},
+    {ID_CANCEL, L"Closes the window without saving."},
+};
+
+const wchar_t* HelpText(int id) {
+    for (const Help& h : kHelp) if (h.id == id) return h.text;
+    return nullptr;
+}
+
+// Help text for the control under the mouse / with the focus; nullptr = none (the overview is shown).
+// Labels have id -1 and carry the id of the control they describe in GWLP_USERDATA.
+const wchar_t* HelpForWindow(HWND h) {
+    if (!h || h == g_dlg) return nullptr;
+    int id = GetDlgCtrlID(h);
+    if (id == -1) id = (int)GetWindowLongPtrW(h, GWLP_USERDATA);
+    return id > 0 ? HelpText(id) : nullptr;
+}
+
+void ShowHelp(const wchar_t* text) {
+    if (!text) text = kOverview;
+    if (text == g_shown || !g_dlg) return;
+    g_shown = text;
+    SetWindowTextW(GetDlgItem(g_dlg, ID_HELPTEXT), text);
+}
+
+void Hover(HWND h) {
+    if (h == g_hover) return;
+    g_hover = h;
+    if (h && h == GetDlgItem(g_dlg, ID_HELPTEXT)) return;   // let the user read / scroll the panel
+    ShowHelp(HelpForWindow(h));
+}
+
+void AddTip(HWND ctl, const wchar_t* text) {
+    if (!g_tip || !ctl || !text) return;
+    TOOLINFOW ti{};
+    ti.cbSize = sizeof(ti);
+    ti.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
+    ti.hwnd = g_dlg;
+    ti.uId = (UINT_PTR)ctl;
+    ti.lpszText = const_cast<LPWSTR>(text);
+    SendMessageW(g_tip, TTM_ADDTOOLW, 0, (LPARAM)&ti);
+}
 
 HWND Ctl(int id) { return GetDlgItem(g_dlg, id); }
 
@@ -530,6 +647,13 @@ void DoBrowse() {
 }
 
 void CommandHandler(int id, int code) {
+    // keyboard focus (tab / click) shows the help of that control; buttons only send BN_SETFOCUS with BS_NOTIFY
+    if (code == EN_SETFOCUS || code == CBN_SETFOCUS || code == BN_SETFOCUS) {
+        if (id != ID_HELPTEXT) { ShowHelp(HelpText(id)); g_hover = Ctl(id); }
+        return;
+    }
+    if (id == ID_PROJECTION && code == CBN_SELCHANGE) { ShowHelp(HelpText(ID_PROJECTION)); return; }
+    if ((id == ID_SAVE || id == ID_CANCEL || id == ID_OPENINI || id == ID_DEFAULTS || id == ID_BROWSE) && code != BN_CLICKED) return;
     switch (id) {
     case ID_SAVE: DoSave(); break;
     case ID_CANCEL: DestroyWindow(g_dlg); break;
@@ -568,6 +692,8 @@ bool CaptureKey(const MSG& m) {
     return true;
 }
 
+const UINT_PTR kHoverTimer = 1;
+
 LRESULT CALLBACK DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_COMMAND:
@@ -583,12 +709,38 @@ LRESULT CALLBACK DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_ACTIVATE:
         if (LOWORD(wp) == WA_INACTIVE && g_capturing) ArmCapture(false);
         return 0;
+    case WM_SETCURSOR:
+        // standard controls forward this to the parent: wp = the child under the mouse (or the dialog itself)
+        Hover((HWND)wp);
+        return DefWindowProcW(h, msg, wp, lp);
+    case WM_TIMER:
+        // some controls (edit, trackbar) may keep WM_SETCURSOR to themselves: also look at what is under the mouse
+        if (wp == kHoverTimer) {
+            POINT pt;
+            if (GetCursorPos(&pt)) {
+                HWND w = WindowFromPoint(pt);
+                if (w == h || (w && IsChild(h, w))) Hover(w);
+            }
+            return 0;
+        }
+        return DefWindowProcW(h, msg, wp, lp);
+    case WM_CTLCOLORSTATIC:
+        if ((HWND)lp == Ctl(ID_HELPTEXT)) {   // the read-only help edit: same background as the dialog
+            SetBkColor((HDC)wp, GetSysColor(COLOR_BTNFACE));
+            SetTextColor((HDC)wp, GetSysColor(COLOR_WINDOWTEXT));
+            return (LRESULT)GetSysColorBrush(COLOR_BTNFACE);
+        }
+        return DefWindowProcW(h, msg, wp, lp);
     case WM_CLOSE:
         DestroyWindow(h);
         return 0;
     case WM_DESTROY:
+        KillTimer(h, kHoverTimer);
         g_done = true;
         g_dlg = nullptr;
+        g_tip = nullptr;
+        g_hover = nullptr;
+        g_shown = nullptr;
         PostMessageW(nullptr, WM_NULL, 0, 0);
         return 0;
     default:
@@ -604,16 +756,32 @@ struct Builder {
         if (g_font) SendMessageW(c, WM_SETFONT, (WPARAM)g_font, TRUE);
         return c;
     }
-    void Label(int x, int y, int w, const wchar_t* t) { Make(L"STATIC", t, SS_LEFT, x, y + 3, w, 18, -1); }
-    void Edit(int id, int x, int y, int w) { Make(L"EDIT", L"", WS_TABSTOP | ES_AUTOHSCROLL, x, y, w, 22, id, WS_EX_CLIENTEDGE); }
-    void Check(int id, int x, int y, int w, const wchar_t* t) { Make(L"BUTTON", t, WS_TABSTOP | BS_AUTOCHECKBOX, x, y + 1, w, 20, id); }
+    // helpId != 0: hovering the label shows the help of that control (the label keeps the id in GWLP_USERDATA)
+    void Label(int x, int y, int w, const wchar_t* t, int helpId = 0) {
+        HWND c = Make(L"STATIC", t, SS_LEFT | (helpId ? SS_NOTIFY : 0), x, y + 3, w, 18, -1);
+        if (helpId) {
+            SetWindowLongPtrW(c, GWLP_USERDATA, helpId);
+            AddTip(c, HelpText(helpId));
+        }
+    }
+    void Edit(int id, int x, int y, int w) {
+        AddTip(Make(L"EDIT", L"", WS_TABSTOP | ES_AUTOHSCROLL, x, y, w, 22, id, WS_EX_CLIENTEDGE), HelpText(id));
+    }
+    void Check(int id, int x, int y, int w, const wchar_t* t) {
+        AddTip(Make(L"BUTTON", t, WS_TABSTOP | BS_AUTOCHECKBOX | BS_NOTIFY, x, y + 1, w, 20, id), HelpText(id));
+    }
     void Button(int id, int x, int y, int w, const wchar_t* t, bool def = false) {
-        Make(L"BUTTON", t, WS_TABSTOP | (def ? BS_DEFPUSHBUTTON : BS_PUSHBUTTON), x, y, w, 24, id);
+        AddTip(Make(L"BUTTON", t, WS_TABSTOP | BS_NOTIFY | (def ? BS_DEFPUSHBUTTON : BS_PUSHBUTTON), x, y, w, 24, id), HelpText(id));
     }
     void Group(int x, int y, int w, int hgt, const wchar_t* t) { Make(L"BUTTON", t, BS_GROUPBOX, x, y, w, hgt, -1); }
-    void Combo(int id, int x, int y, int w, const wchar_t* opts) {
+    // The items come from the Field (display labels when it has them): the values written to config.ini are mapped by INDEX.
+    void Combo(int id, int x, int y, int w) {
+        const Field* f = FindFieldById(id);
         HWND c = Make(L"COMBOBOX", L"", WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, x, y, w, 120, id);
-        const std::wstring o = opts;
+        AddTip(c, HelpText(id));
+        if (!f) return;
+        SendMessageW(c, CB_SETDROPPEDWIDTH, (WPARAM)(w > 190 ? w : 190), 0);
+        const std::wstring o = f->labels ? f->labels : f->options;
         size_t pos = 0;
         while (pos <= o.size()) {
             size_t bar = o.find(L'|', pos);
@@ -624,8 +792,16 @@ struct Builder {
     }
 };
 
-void BuildControls(HWND dlg) {
+// Creates all controls; returns the client height the window needs.
+int BuildControls(HWND dlg) {
     Builder b{dlg};
+    g_tip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_NOPREFIX | TTS_ALWAYSTIP, CW_USEDEFAULT, CW_USEDEFAULT,
+                            CW_USEDEFAULT, CW_USEDEFAULT, dlg, nullptr, GetModuleHandleW(nullptr), nullptr);
+    if (g_tip) {
+        SetWindowPos(g_tip, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        SendMessageW(g_tip, TTM_SETMAXTIPWIDTH, 0, 380);
+        SendMessageW(g_tip, TTM_SETDELAYTIME, TTDT_AUTOPOP, MAKELONG(30000, 0));
+    }
     const int gx = 10, gw = 570, ix = 22, row = 28;
     int y = 8;
     b.Make(L"STATIC", (L"Editing: " + g_path).c_str(), SS_LEFT | SS_PATHELLIPSIS, gx, y, gw, 18, -1);
@@ -634,61 +810,69 @@ void BuildControls(HWND dlg) {
     // ---- Recording
     b.Group(gx, y, gw, 22 + 4 * row + 6, L"Recording");
     int r = y + 20;
-    b.Label(ix, r, 60, L"Hotkey");
+    b.Label(ix, r, 60, L"Hotkey", ID_HOTKEY);
     b.Edit(ID_HOTKEY, ix + 65, r, 190);
     b.Button(ID_HOTKEY_PICK, ix + 265, r - 1, 190, L"Press a key...");
     r += row;
-    b.Label(ix, r, 50, L"Codec");
-    b.Combo(ID_CODEC, ix + 55, r, 70, L"hevc|h264");
-    b.Label(ix + 140, r, 170, L"Bitrate Mb/s (0 = default)");
-    b.Edit(ID_BITRATE, ix + 315, r, 50);
-    b.Label(ix + 385, r, 85, L"Max fps (0 = all)");
+    b.Label(ix, r, 50, L"Codec", ID_CODEC);
+    b.Combo(ID_CODEC, ix + 55, r, 100);
+    b.Label(ix + 165, r, 150, L"Bitrate Mb/s (0 = default)", ID_BITRATE);
+    b.Edit(ID_BITRATE, ix + 318, r, 50);
+    b.Label(ix + 385, r, 90, L"Max fps (0 = all)", ID_MAXFPS);
     b.Edit(ID_MAXFPS, ix + 480, r, 50);
     r += row;
-    b.Label(ix, r, 85, L"Output folder");
+    b.Label(ix, r, 85, L"Output folder", ID_OUTDIR);
     b.Edit(ID_OUTDIR, ix + 90, r, 350);
     b.Button(ID_BROWSE, ix + 450, r - 1, 90, L"Browse...");
     r += row;
     b.Check(ID_AUDIO, ix, r, 120, L"Record audio");
-    b.Label(ix + 135, r, 110, L"Device name has");
+    b.Label(ix + 135, r, 110, L"Device name has", ID_AUDIODEV);
     b.Edit(ID_AUDIODEV, ix + 250, r, 280);
     y += 22 + 4 * row + 6 + 6;
 
     // ---- 3D
     b.Group(gx, y, gw, 22 + 4 * row + 6, L"3D");
     r = y + 20;
-    b.Label(ix, r, 65, L"Projection");
-    b.Combo(ID_PROJECTION, ix + 70, r, 80, L"flat|vr180|vr360");
-    b.Label(ix + 170, r, 25, L"Fill");
-    b.Combo(ID_FILL, ix + 198, r, 90, L"black|last_seen");
-    b.Label(ix + 310, r, 110, L"Fill fade (seconds)");
-    b.Edit(ID_FILLFADE, ix + 425, r, 55);
+    b.Label(ix, r, 65, L"Projection", ID_PROJECTION);
+    b.Combo(ID_PROJECTION, ix + 68, r, 135);
+    b.Label(ix + 215, r, 25, L"Fill", ID_FILL);
+    b.Combo(ID_FILL, ix + 242, r, 165);
+    b.Label(ix + 420, r, 50, L"Fade (s)", ID_FILLFADE);
+    b.Edit(ID_FILLFADE, ix + 472, r, 55);
     r += row;
     b.Check(ID_SYMFOV, ix, r, 170, L"Symmetric field of view");
     b.Check(ID_SWAP, ix + 190, r, 100, L"Swap eyes");
     b.Check(ID_ROLL, ix + 310, r, 120, L"Roll lock");
     r += row;
-    b.Label(ix, r, 110, L"Head smoothing");
+    b.Label(ix, r, 110, L"Head smoothing", ID_SMOOTH);
     HWND tb = b.Make(L"msctls_trackbar32", L"", WS_TABSTOP | TBS_HORZ | TBS_AUTOTICKS, ix + 115, r - 3, 300, 28, ID_SMOOTH);
+    AddTip(tb, HelpText(ID_SMOOTH));
     SendMessageW(tb, TBM_SETRANGE, TRUE, MAKELONG(0, 20));
     SendMessageW(tb, TBM_SETTICFREQ, 2, 0);
     SendMessageW(tb, TBM_SETPAGESIZE, 0, 2);
     SendMessageW(tb, TBM_SETLINESIZE, 0, 1);
     b.Make(L"STATIC", L"0.00", SS_LEFT, ix + 425, r + 3, 50, 18, ID_SMOOTHVAL);
     r += row;
-    b.Label(ix, r, 190, L"Output FOV scale (0.5 .. 1)");
+    b.Label(ix, r, 190, L"Output FOV scale (0.5 .. 1)", ID_FOVSCALE);
     b.Edit(ID_FOVSCALE, ix + 195, r, 55);
     y += 22 + 4 * row + 6 + 6;
 
     // ---- indicator
-    b.Group(gx, y, gw, 22 + row + 6, L"In-headset indicator");
+    b.Group(gx, y, gw, 22 + 2 * row + 6, L"In-headset indicator");
     r = y + 20;
     b.Check(ID_INDICATOR, ix, r, 150, L"Show the red dot");
-    b.Label(ix + 190, r, 85, L"Size (metres)");
+    b.Label(ix + 190, r, 85, L"Size (metres)", ID_INDSIZE);
     b.Edit(ID_INDSIZE, ix + 280, r, 55);
-    b.Label(ix + 360, r, 100, L"Opacity (0 .. 1)");
+    b.Label(ix + 360, r, 100, L"Opacity (0 .. 1)", ID_INDOPACITY);
     b.Edit(ID_INDOPACITY, ix + 465, r, 55);
-    y += 22 + row + 6 + 6;
+    r += row;
+    b.Label(ix, r, 95, L"Position X (m)", ID_INDX);
+    b.Edit(ID_INDX, ix + 100, r, 55);
+    b.Label(ix + 190, r, 35, L"Y (m)", ID_INDY);
+    b.Edit(ID_INDY, ix + 230, r, 55);
+    b.Label(ix + 360, r, 35, L"Z (m)", ID_INDZ);
+    b.Edit(ID_INDZ, ix + 400, r, 55);
+    y += 22 + 2 * row + 6 + 6;
 
     // ---- after recording
     b.Group(gx, y, gw, 22 + row + 6, L"After recording");
@@ -702,9 +886,16 @@ void BuildControls(HWND dlg) {
     b.Group(gx, y, gw, 22 + row + 6, L"Advanced");
     r = y + 20;
     b.Check(ID_REQTRAY, ix, r, 330, L"Only record while this tray app is running");
-    b.Label(ix + 370, r, 65, L"Log level");
-    b.Combo(ID_LOGLEVEL, ix + 440, r, 80, L"error|warn|info|debug");
+    b.Label(ix + 370, r, 65, L"Log level", ID_LOGLEVEL);
+    b.Combo(ID_LOGLEVEL, ix + 440, r, 80);
     y += 22 + row + 6 + 6;
+
+    // ---- description panel (follows the mouse / keyboard focus, see Hover / ShowHelp)
+    const int helpH = 112;
+    b.Group(gx, y, gw, 20 + helpH + 8, L"What does this do?");
+    b.Make(L"EDIT", kOverview, ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL, ix, y + 18, gw - 24, helpH, ID_HELPTEXT);
+    g_shown = kOverview;
+    y += 20 + helpH + 8 + 6;
 
     b.Make(L"STATIC", L"Saving applies to the NEXT recording. The hotkey, 'only record while the tray runs' and the indicator are read when the game starts: restart the game for those.",
            SS_LEFT, gx, y, gw, 32, -1);
@@ -713,6 +904,7 @@ void BuildControls(HWND dlg) {
     b.Button(ID_DEFAULTS, gx + 118, y, 120, L"Restore defaults");
     b.Button(ID_SAVE, gx + gw - 170, y, 80, L"Save", true);
     b.Button(ID_CANCEL, gx + gw - 82, y, 80, L"Cancel");
+    return y + 24 + 10;
 }
 
 } // namespace
@@ -747,7 +939,7 @@ void ShowDialog(const std::wstring& configPath, std::function<void(const std::ve
         RegisterClassW(&wc);
         registered = true;
     }
-    RECT rc{0, 0, 590, 640};
+    RECT rc{0, 0, 590, 700};   // provisional: resized below to the height BuildControls computed
     const DWORD style = WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
     AdjustWindowRectEx(&rc, style, FALSE, WS_EX_APPWINDOW);
     const int w = rc.right - rc.left, hgt = rc.bottom - rc.top;
@@ -755,7 +947,13 @@ void ShowDialog(const std::wstring& configPath, std::function<void(const std::ve
     g_dlg = CreateWindowExW(WS_EX_APPWINDOW, L"EyeCaptureSettings", kWindowTitle, style, sx < 0 ? 0 : sx, sy < 0 ? 0 : sy,
                             w, hgt, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
     if (g_dlg) {
-        BuildControls(g_dlg);
+        const int clientH = BuildControls(g_dlg);
+        RECT fit{0, 0, 590, clientH};
+        AdjustWindowRectEx(&fit, style, FALSE, WS_EX_APPWINDOW);
+        const int fw = fit.right - fit.left, fh = fit.bottom - fit.top;
+        const int fx = (GetSystemMetrics(SM_CXSCREEN) - fw) / 2, fy = (GetSystemMetrics(SM_CYSCREEN) - fh) / 2;
+        SetWindowPos(g_dlg, nullptr, fx < 0 ? 0 : fx, fy < 0 ? 0 : fy, fw, fh, SWP_NOZORDER | SWP_NOACTIVATE);
+        SetTimer(g_dlg, kHoverTimer, 100, nullptr);
         LoadFromFile();
         ShowWindow(g_dlg, SW_SHOW);
         SetForegroundWindow(g_dlg);

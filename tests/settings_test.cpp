@@ -131,6 +131,35 @@ int TestSave(const std::wstring& path) {
               "bitrate_mbps went to the end of [capture]; [indicator] was created at the end; CRLF kept");
         DeleteFileW(p2.c_str());
     }
+    // 5. indicator position, the 0.0005 size minimum and log_level = none
+    {
+        const std::wstring p3 = path + L".indicator-test.ini";
+        { std::ofstream f(p3, std::ios::binary); f << "[indicator]\r\nvr_indicator = 1\r\n[debug]\r\nlog_level = info\r\n"; }
+        Config n;
+        ParseHotkey(L"Ctrl+Shift+F10", n.hotkey);
+        n.indicator.x = -0.3f; n.indicator.y = 0.05f; n.indicator.z = -1.5f;
+        n.indicator.size = 0.0005f;
+        n.logLevel = LogLevel::None;
+        settings::SaveResult r;
+        const bool ok = settings::SaveSettingsToFile(p3, n, r);
+        Config back;
+        std::vector<std::wstring> pr;
+        ParseConfigFile(p3, back, pr);
+        printf("  indicator/log file:\n%s\n", ReadAll(p3).c_str());
+        Check(ok && pr.empty() && back.indicator.x == -0.3f && back.indicator.y == 0.05f && back.indicator.z == -1.5f &&
+                  back.indicator.size == 0.0005f && back.logLevel == LogLevel::None,
+              "indicator_x/y/z, indicator_size 0.0005 and log_level = none are saved and read back");
+        Config tiny = n;
+        tiny.indicator.size = 0.0004f;
+        settings::SaveResult r2;
+        const bool ok2 = settings::SaveSettingsToFile(p3, tiny, r2);
+        Check(!ok2 && !r2.problems.empty(), "indicator_size 0.0004 (below the minimum) is refused");
+        Config off;
+        { std::ofstream f(p3, std::ios::binary); f << "[debug]\r\nlog_level = off\r\n"; }
+        ParseConfigFile(p3, off, pr);
+        Check(off.logLevel == LogLevel::None, "log_level = off reads as none");
+        DeleteFileW(p3.c_str());
+    }
     return g_fail;
 }
 

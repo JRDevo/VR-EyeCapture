@@ -23,7 +23,7 @@ Project memory lives in the Claude workspace for this folder (`~/.claude/project
   twice and crashes.
 
 ## Git
-- Local `master`, no remote, never push. Commit with `-c user.name=JRDevo -c user.email=42043842+JRDevo@users.noreply.github.com`.
+- Branch `master`, remote `origin` = GitHub `JRDevo/OpenXR-EyeCapture` (public). Commit with `-c user.name=JRDevo -c user.email=42043842+JRDevo@users.noreply.github.com`. Push only when the user asks.
 
 ## User setup facts
 - Quest 3 via Virtual Desktop, runtime VDXR; ATS/ETS2 OpenXR beta (D3D11). Hotkey `ScrollLock` (Alt combos open the

@@ -260,7 +260,7 @@ KeyResult ApplyKey(Config& c, const std::wstring& key, std::wstring val) {
     } else if (key == L"indicator_z") {
         if (ParseFloat(val, fl) && fl >= -10.0f && fl <= -0.05f) c.indicator.z = fl; else ok = false;
     } else if (key == L"indicator_size") {
-        if (ParseFloat(val, fl) && fl >= 0.002f && fl <= 0.5f) c.indicator.size = fl; else ok = false;
+        if (ParseFloat(val, fl) && fl >= 0.0005f && fl <= 0.5f) c.indicator.size = fl; else ok = false;
     } else if (key == L"indicator_opacity") {
         if (ParseFloat(val, fl) && fl >= 0.0f && fl <= 1.0f) c.indicator.opacity = fl; else ok = false;
     } else if (key == L"symmetric_fov") {
@@ -288,7 +288,8 @@ KeyResult ApplyKey(Config& c, const std::wstring& key, std::wstring val) {
         if (ParseFloat(val, fl) && fl >= 0.0f && fl <= 20.0f) c.dome.featherDeg = fl; else ok = false;
     } else if (key == L"log_level") {
         const std::wstring l = Lower(val);
-        if (l == L"error") c.logLevel = LogLevel::Error;
+        if (l == L"none" || l == L"off") c.logLevel = LogLevel::None;
+        else if (l == L"error") c.logLevel = LogLevel::Error;
         else if (l == L"warn" || l == L"warning") c.logLevel = LogLevel::Warn;
         else if (l == L"info") c.logLevel = LogLevel::Info;
         else if (l == L"debug") c.logLevel = LogLevel::Debug;

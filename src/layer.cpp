@@ -406,8 +406,8 @@ void ReloadConfigForRecording() {
     note("fill", c.dome.fill == DomeFill::LastSeen ? "last_seen" : "black", n.dome.fill == DomeFill::LastSeen ? "last_seen" : "black");
     note("fill_fade_s", F(c.dome.fadeS), F(n.dome.fadeS));
     note("window_feather_deg", F(c.dome.featherDeg), F(n.dome.featherDeg));
-    static const char* kLevel[] = {"error", "warn", "info", "debug"};
-    auto lv = [&](LogLevel l) { return std::string(kLevel[(int)l >= 0 && (int)l < 4 ? (int)l : 2]); };
+    static const char* kLevel[] = {"none", "error", "warn", "info", "debug"};   // index = (int)LogLevel + 1
+    auto lv = [&](LogLevel l) { return std::string(kLevel[(int)l >= -1 && (int)l < 4 ? (int)l + 1 : 3]); };
     note("log_level", lv(c.logLevel), lv(n.logLevel));
 
     const bool outChanged = c.outputDir != n.outputDir;

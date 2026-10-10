@@ -293,6 +293,13 @@ std::wstring SettingsPath() {
 
 // Settings -> Save: log the changed keys, show "settings saved" in the tooltip for 5 s.
 void OnSettingsSaved(const std::vector<std::wstring>& changed) {
+    {
+        // apply log_level now (e.g. "none" silences tray.log without a restart); the saved file passed validation
+        Config c;
+        std::vector<std::wstring> problems;
+        ParseConfigFile(SettingsPath(), c, problems);
+        elog::SetLevel(c.logLevel);
+    }
     std::wstring list;
     for (const auto& c : changed) list += (list.empty() ? L"" : L", ") + c;
     LOGI("tray: settings saved to %s: %s", elog::Narrow(SettingsPath()).c_str(),
@@ -527,6 +534,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
         // resolve ffmpeg once at start so the log says what a job would use (jobs resolve again when they run)
         Config cfg;
         LoadConfig(g_exeDir, cfg);
+        elog::SetLevel(cfg.logLevel);   // log_level = none silences tray.log from here on
         std::wstring how;
         const std::wstring ff = pp::ResolveFfmpeg(cfg, g_exeDir, how);
         if (ff.empty()) LOGW("tray: ffmpeg not found at start (%s)", elog::Narrow(how).c_str());

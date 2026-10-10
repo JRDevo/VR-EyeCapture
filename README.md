@@ -106,7 +106,9 @@ whose value changed, in place: comments, blank lines, section headers and keys t
 is written. After a save the tray tooltip says "settings saved" for 5 s and `logs\tray.log` lists the changed keys. The
 change applies to the next recording, no game restart needed; the exceptions are the **hotkey**, **require_tray** and the
 **indicator** settings, which need a game restart. "Open config.ini" opens the file, "Restore defaults" fills the window with
-the built-in defaults (nothing is written until Save).
+the built-in defaults (nothing is written until Save). Every control has a plain-English description: hover it for a tooltip,
+or read the "What does this do?" panel at the bottom of the window (it also follows the keyboard focus). The vr180 / vr360
+projections are labelled "experimental" in the window.
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -122,7 +124,7 @@ the built-in defaults (nothing is written until Save).
 | `audio_device` | *(empty)* = default playback device | Part of the device name, e.g. `Virtual Desktop Audio`. |
 | `vr_indicator` | `1` | Small recording dot in the headset (never in the video). See "In-headset indicator". |
 | `indicator_x` / `_y` / `_z` | `0.22` / `-0.16` / `-0.8` | Dot position in metres relative to your head (right / up / forward is negative z). |
-| `indicator_size` | `0.02` | Dot size in metres. |
+| `indicator_size` | `0.02` | Dot size in metres, `0.0005` .. `0.5` (below about `0.001` it is smaller than one headset pixel). |
 | `indicator_opacity` | `1.0` | Maximum opacity of the dot (0..1). |
 | `symmetric_fov` | `1` | Re-project both eyes to one common symmetric view (standard 3D SBS). See "Why the eyes are re-projected to a symmetric view". `0` = raw eye images. |
 | `head_smoothing` | `0` | Head-motion smoothing strength, `0` = off. See "Head-motion smoothing". |
@@ -136,7 +138,7 @@ the built-in defaults (nothing is written until Save).
 | `post_flat` | `0` | Tray app: also write `<name>_FLAT.mp4`, a normal 2D video (left eye, 16:9 centre crop, 3840 wide). |
 | `ffmpeg_path` | *(empty)* = auto | Tray app: full path of `ffmpeg.exe`. Empty = `PATH`, then WinGet packages, then an `ffmpeg` folder next to the tray app. |
 | `require_tray` | `1` | `1` = the layer is only active while `EyeCaptureTray.exe` is running (checked when the game creates its VR session). `0` = always active. |
-| `log_level` | `info` | `error`, `warn`, `info`, `debug`. |
+| `log_level` | `info` | `none` (no logging at all), `error`, `warn`, `info`, `debug`. |
 
 ## In-headset indicator
 
@@ -145,7 +147,8 @@ recording starts (and while it is being finished), **red, pulsing** while record
 was saved, a **red X** for 2 s if it failed. Otherwise nothing is shown and nothing is done. The dot is a separate
 OpenXR layer that the layer adds after it has copied the game's eye images, so it never appears in the video.
 Settings in `config.ini` `[indicator]`: `vr_indicator = 0` turns it off; `indicator_x/y/z` move it (metres, relative
-to your head), `indicator_size` and `indicator_opacity` change size and maximum opacity. Direct3D 11 games (ETS2 / ATS)
+to your head), `indicator_size` and `indicator_opacity` change size and maximum opacity. The Settings window has fields
+for all of them (Position X / Y / Z, Size, Opacity). Direct3D 11 games (ETS2 / ATS)
 only for now; on Direct3D 12 the log says `indicator: not available on D3D12 yet` and recording works as before.
 If the runtime ever rejects the extra layer, the indicator switches itself off for the session and the game's frame is
 submitted unchanged (logged).
@@ -194,7 +197,9 @@ eye for a -50 / +40 view) and costs one GPU pass per frame. `symmetric_fov = 0` 
 The log shows the numbers at the start of each recording, e.g.
 `symmetric fov: source L[-50.0,+40.0]x[-45.0,+45.0] R[-40.0,+50.0]x[-45.0,+45.0] -> output ±40.0° x ±45.0° per eye, 5058x6496 per eye`.
 
-## VR180 / VR360 dome mode
+## VR180 / VR360 dome mode (experimental)
+
+**Experimental:** the dome only shows live video where your headset looked (about 100 degrees); the rest is older video or black.
 
 `[dome] projection = vr180` (or `vr360`) records a **VR180 (or 360) 3D video** instead of a flat side-by-side one: in
 YouTube VR the viewer is placed *inside* the scene and can look around, instead of watching a rectangle that follows

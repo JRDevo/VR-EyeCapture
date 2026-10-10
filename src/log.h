@@ -6,7 +6,8 @@
 #pragma once
 #include <string>
 
-enum class LogLevel { Error = 0, Warn = 1, Info = 2, Debug = 3 };
+// None = write nothing at all (every real level is >= 0, so Enabled() is false for all of them).
+enum class LogLevel { None = -1, Error = 0, Warn = 1, Info = 2, Debug = 3 };
 
 namespace elog {
 // Opens the primary log (creates the folder). echoStdout = also print to stdout (tests).

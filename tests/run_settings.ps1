@@ -25,7 +25,9 @@ function Step($name, $ok) { Write-Host ("{0}: {1}" -f $name, $(if ($ok) { 'PASS'
 $s = Join-Path $root 'build\settings_scratch'
 if (Test-Path $s) { Remove-Item -Recurse -Force $s }
 New-Item -ItemType Directory $s | Out-Null
-Copy-Item (Join-Path $root 'config.ini') (Join-Path $s 'config.ini'); Copy-Item (Join-Path $root 'config.ini') (Join-Path $s 'before.ini')
+# the live config.ini may have any projection: the scratch copies always start at vr180 so the expected diff is fixed
+$scratchIni = (Get-Content (Join-Path $root 'config.ini') -Raw) -replace '(?m)^projection = \S+', 'projection = vr180'
+$scratchIni | Set-Content (Join-Path $s 'config.ini') -NoNewline -Encoding utf8; $scratchIni | Set-Content (Join-Path $s 'before.ini') -NoNewline -Encoding utf8
 & $test save (Join-Path $s 'config.ini'); Step 'save' ($LASTEXITCODE -eq 0)
 $b = Get-Content (Join-Path $s 'before.ini'); $a = Get-Content (Join-Path $s 'config.ini')
 $d = @(Compare-Object $b $a)
@@ -40,7 +42,7 @@ if (Test-Path $t) { Remove-Item -Recurse -Force $t }
 New-Item -ItemType Directory (Join-Path $t 'appdata\OpenXR-EyeCapture') | Out-Null
 Copy-Item (Join-Path $bin 'EyeCaptureTray.exe') $t
 $ini = Join-Path $t 'appdata\OpenXR-EyeCapture\config.ini'
-(Get-Content (Join-Path $root 'config.ini') -Raw) -replace '(?m)^head_smoothing = [\d.]+', 'head_smoothing = 0.57' | Set-Content $ini -NoNewline -Encoding utf8
+(Get-Content (Join-Path $root 'config.ini') -Raw) -replace '(?m)^head_smoothing = [\d.]+', 'head_smoothing = 0.57' -replace '(?m)^projection = \S+', 'projection = vr180' | Set-Content $ini -NoNewline -Encoding utf8
 Copy-Item $ini (Join-Path $t 'before.ini')
 $oldAppdata = $env:APPDATA
 try {

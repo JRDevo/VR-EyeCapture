@@ -46,7 +46,9 @@ enum : int {
     ID_HOTKEY = 2001, ID_HOTKEY_PICK, ID_CODEC, ID_BITRATE, ID_MAXFPS, ID_OUTDIR, ID_BROWSE, ID_AUDIO, ID_AUDIODEV,
     ID_PROJECTION, ID_FILL, ID_FILLFADE, ID_SYMFOV, ID_SWAP, ID_ROLL, ID_SMOOTH, ID_SMOOTHVAL, ID_FOVSCALE,
     ID_INDICATOR, ID_INDSIZE, ID_INDOPACITY, ID_POSTMKV, ID_KEEPMP4, ID_POSTFLAT, ID_REQTRAY, ID_LOGLEVEL,
-    ID_SAVE, ID_CANCEL, ID_OPENINI, ID_DEFAULTS
+    ID_SAVE, ID_CANCEL, ID_OPENINI, ID_DEFAULTS,
+    ID_HELPTEXT,  // the read-only "What does this do?" panel (appended: existing ids do not move)
+    ID_INDX, ID_INDY, ID_INDZ   // indicator position (appended after ID_HELPTEXT for the same reason)
 };
 extern const wchar_t* const kWindowTitle;
 
