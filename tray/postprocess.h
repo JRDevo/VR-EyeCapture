@@ -1,10 +1,14 @@
 // postprocess -- the tray app's post-recording conversion worker.
 //
 // After the layer finishes an MP4, the tray queues it here. One worker thread runs the jobs one at a time, FIFO:
-//   1. MKV  (post_mkv, default on): ffmpeg remux (no re-encode) to <name>.mkv with Matroska stereo_mode=left_right,
-//      which is what YouTube reliably reads as 3D. Verified (exists, > 90% of the MP4 size) before anything is deleted.
-//   2. flat (post_flat, default off): <name>_FLAT.mp4, left eye, 16:9 centre crop, 3840 wide (same as scripts\make_flat.ps1).
-//   3. the MP4 is deleted only if the MKV was verified and every requested step succeeded, and keep_mp4 = 0.
+//   1. MKV  (post_mkv, default on): ffmpeg remux (no re-encode) to <name>.mkv with Matroska stereo_mode=left_right
+//      (top_bottom for VR360, from the <name>.json sidecar), which is what YouTube reliably reads as 3D. Dome recordings:
+//      ffmpeg's mov demuxer turns the MP4's sv3d box into spherical side data and the Matroska muxer writes it as the
+//      Projection element, so the MKV is a VR180 / VR360 file as well. Verified (exists, > 90% of the MP4 size) before
+//      anything is deleted.
+//   2. flat (post_flat, default off): <name>_FLAT.mp4, left eye, 16:9 centre crop, 3840 wide (same as scripts\make_flat.ps1);
+//      dome recordings: the left eye's view straight ahead rendered flat (v360), 3840x2160.
+//   3. the MP4 (and its sidecar) is deleted only if the MKV was verified and every requested step succeeded, and keep_mp4 = 0.
 // Config is re-read at the start of every job. The UI thread never blocks: it polls GetState() / PopNotice().
 #pragma once
 #include <windows.h>
@@ -30,6 +34,18 @@ struct State {
     std::wstring lastLine;   // "last: x.mkv ready" / "last: x.mp4 conversion FAILED (see tray.log)"; empty = no job yet
     bool         lastOk = true;
 };
+
+// What a recording is, from the recorder's <name>.json sidecar next to the MP4 (dome recordings only).
+// No sidecar = flat side-by-side (every recording made without dome mode).
+struct Recording {
+    enum Projection { Flat, Vr180, Vr360 } projection = Flat;
+    bool         topBottom = false;   // layout top_bottom (vr360) -> Matroska stereo_mode=top_bottom
+    bool         hasSidecar = false;
+    std::wstring sidecar;             // <name>.json (path, whether or not it exists)
+    bool Dome() const { return projection != Flat; }
+    const wchar_t* Name() const;      // "3D SBS" / "VR180" / "VR360"
+};
+Recording ReadSidecar(const std::wstring& mp4);
 
 // ffmpeg lookup: cfg.ffmpegPath if set; else ffmpeg on PATH, else a recursive search of
 // %LOCALAPPDATA%\Microsoft\WinGet\Packages, else <exeDir>\ffmpeg\ffmpeg.exe. Returns "" if none; `how` says where it came from.

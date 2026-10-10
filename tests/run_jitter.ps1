@@ -23,7 +23,8 @@
       edges   raw, rawasym, smooth: no black pixels (Y < 30) in a 3 px border of either eye, in the jitter phase AND over
               the whole recording (turn and catch-up included); smooth: the layer's summary reports 0 uncovered frames
               and the edge guard acted (> 0 frames). noguard (edge_guard = 0) is info only: black edges are expected.
-    The recording cases set XR_EYE_CAPTURE_REQUIRE_TRAY=0 and XR_EYE_CAPTURE_CONFIG (test-only overrides).
+    The recording cases set XR_EYE_CAPTURE_REQUIRE_TRAY=0 and XR_EYE_CAPTURE_CONFIG (test-only overrides; projection=flat
+    pins the flat path whatever config.ini says).
       powershell -ExecutionPolicy Bypass -File tests\run_jitter.ps1
 #>
 param([string]$FfmpegDir = '')
@@ -104,10 +105,10 @@ $D = [math]::PI / 180
 $rawTans = @([math]::Tan(-50 * $D), [math]::Tan(40 * $D), [math]::Tan(45 * $D), [math]::Tan(-45 * $D))   # left eye, raw
 $symTans = @(-[math]::Tan(40 * $D), [math]::Tan(40 * $D), [math]::Tan(45 * $D), -[math]::Tan(45 * $D))   # common symmetric
 $cases = @(
-    @{ name = 'raw';     cfg = 'head_smoothing=0';                                     k = 1.0; tans = $symTans },
-    @{ name = 'rawasym'; cfg = 'head_smoothing=0;symmetric_fov=0';                     k = 1.0; tans = $rawTans },
-    @{ name = 'smooth';  cfg = 'head_smoothing=0.6;output_fov_scale=0.9';              k = 0.9; tans = $symTans },
-    @{ name = 'noguard'; cfg = 'head_smoothing=0.6;output_fov_scale=0.9;edge_guard=0'; k = 0.9; tans = $symTans }
+    @{ name = 'raw';     cfg = 'projection=flat;head_smoothing=0';                                     k = 1.0; tans = $symTans },
+    @{ name = 'rawasym'; cfg = 'projection=flat;head_smoothing=0;symmetric_fov=0';                     k = 1.0; tans = $rawTans },
+    @{ name = 'smooth';  cfg = 'projection=flat;head_smoothing=0.6;output_fov_scale=0.9';              k = 0.9; tans = $symTans },
+    @{ name = 'noguard'; cfg = 'projection=flat;head_smoothing=0.6;output_fov_scale=0.9;edge_guard=0'; k = 0.9; tans = $symTans }
 )
 $prevTray = $env:XR_EYE_CAPTURE_REQUIRE_TRAY; $prevCfg = $env:XR_EYE_CAPTURE_CONFIG; $prevIpc = $env:XR_EYE_CAPTURE_TRAY_IPC
 $env:XR_EYE_CAPTURE_REQUIRE_TRAY = '0'

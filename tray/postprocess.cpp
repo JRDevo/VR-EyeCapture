@@ -64,7 +64,43 @@ std::wstring FindFfmpegBelow(const std::wstring& dir, int depth) {
     return found;
 }
 
+// Value of "key":"value" in a flat one-line JSON object ("" if absent). Enough for the recorder's sidecar.
+std::string JsonString(const std::string& j, const char* key) {
+    const std::string k = std::string("\"") + key + "\"";
+    size_t p = j.find(k);
+    if (p == std::string::npos) return "";
+    p = j.find(':', p + k.size());
+    if (p == std::string::npos) return "";
+    p = j.find('"', p + 1);
+    if (p == std::string::npos) return "";
+    const size_t e = j.find('"', p + 1);
+    return e == std::string::npos ? "" : j.substr(p + 1, e - p - 1);
+}
+
 } // namespace
+
+Recording ReadSidecar(const std::wstring& mp4) {
+    Recording r;
+    r.sidecar = StripExt(mp4) + L".json";
+    HANDLE h = CreateFileW(r.sidecar.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return r;   // no sidecar: flat SBS (also every recording made before dome mode)
+    char buf[1024];
+    DWORD got = 0;
+    const BOOL ok = ReadFile(h, buf, sizeof(buf) - 1, &got, nullptr);
+    CloseHandle(h);
+    if (!ok) return r;
+    const std::string j(buf, got);
+    const std::string proj = JsonString(j, "projection"), layout = JsonString(j, "layout");
+    r.hasSidecar = true;
+    if (proj == "vr180") r.projection = Recording::Vr180;
+    else if (proj == "vr360") r.projection = Recording::Vr360;
+    r.topBottom = layout == "top_bottom" || (layout.empty() && r.projection == Recording::Vr360);
+    return r;
+}
+
+const wchar_t* Recording::Name() const {
+    return projection == Vr180 ? L"VR180" : projection == Vr360 ? L"VR360" : L"3D SBS";
+}
 
 std::wstring ResolveFfmpeg(const Config& cfg, const std::wstring& exeDir, std::wstring& how) {
     if (!cfg.ffmpegPath.empty()) {
@@ -278,6 +314,10 @@ void Processor::RunJob(const std::wstring& mp4) {
     unsigned long long mp4Size = 0;
     FileSize(mp4, mp4Size);
 
+    const Recording rec = ReadSidecar(mp4);
+    LOGI("job: %s -> %s (%s, Matroska stereo_mode=%s)", rec.hasSidecar ? N(FileName(rec.sidecar)).c_str() : "no sidecar",
+         N(rec.Name()).c_str(), rec.Dome() ? "projection side data from the MP4's sv3d box is carried over" : "flat side by side",
+         rec.topBottom ? "top_bottom" : "left_right");
     const std::wstring base = StripExt(mp4);
     const std::wstring mkv = base + L".mkv";
     const std::wstring flat = base + L"_FLAT.mp4";
@@ -288,7 +328,8 @@ void Processor::RunJob(const std::wstring& mp4) {
     if (cfg.postMkv) {
         SetStep(L"MKV");
         const std::wstring cmd = Q(ff) + L" -hide_banner -loglevel error -y -i " + Q(mp4) +
-                                 L" -map 0 -c copy -metadata:s:v:0 stereo_mode=left_right " + Q(mkv);
+                                 L" -map 0 -c copy -metadata:s:v:0 stereo_mode=" + (rec.topBottom ? L"top_bottom " : L"left_right ") +
+                                 Q(mkv);
         LOGI("job: MKV cmd: %s", N(cmd).c_str());
         const ULONGLONG s0 = GetTickCount64();
         const bool ran = RunFfmpeg(cmd, out, code);
@@ -320,8 +361,14 @@ void Processor::RunJob(const std::wstring& mp4) {
         if (RunFfmpeg(Q(ff) + L" -hide_banner -encoders", out, code) && code == 0) nvenc = out.find("hevc_nvenc") != std::string::npos;
         wchar_t noNv[8];
         if (GetEnvironmentVariableW(L"EYECAP_TRAY_TEST_NO_NVENC", noNv, 8) > 0) nvenc = false;   // test-only: never touch the GPU
-        const std::wstring common = Q(ff) + L" -hide_banner -loglevel error -y -i " + Q(mp4) +
-            L" -map 0:v:0 -map 0:a? -vf \"crop=iw/2:ih:0:0,crop=iw:min(ih\\,iw*9/16),scale=3840:-2\" ";
+        // Flat SBS: left half, 16:9 centre crop. Dome: the left eye's view straight ahead as a normal 16:9 picture,
+        // 100 x 67.7 degrees (v360; vr180 = left half, half-equirect; vr360 = top half, full equirect).
+        std::wstring vf = L"crop=iw/2:ih:0:0,crop=iw:min(ih\\,iw*9/16),scale=3840:-2";
+        if (rec.projection == Recording::Vr180)
+            vf = L"crop=iw/2:ih:0:0,v360=input=hequirect:output=flat:h_fov=100:v_fov=67.7:w=3840:h=2160";
+        else if (rec.projection == Recording::Vr360)
+            vf = L"crop=iw:ih/2:0:0,v360=input=equirect:output=flat:h_fov=100:v_fov=67.7:w=3840:h=2160";
+        const std::wstring common = Q(ff) + L" -hide_banner -loglevel error -y -i " + Q(mp4) + L" -map 0:v:0 -map 0:a? -vf \"" + vf + L"\" ";
         const std::wstring tail = L" -c:a copy -movflags +faststart " + Q(flat);
         const std::wstring encNv = L"-c:v hevc_nvenc -preset p5 -rc vbr -b:v 40M -maxrate 80M -tag:v hvc1";
         const std::wstring encX = L"-c:v libx264 -preset medium -crf 18";
@@ -360,12 +407,21 @@ void Processor::RunJob(const std::wstring& mp4) {
     // Delete the MP4 only when the verified MKV replaces it and every requested step worked.
     std::wstring deleted;
     if (mkvOk && !cfg.keepMp4) {
-        if (DeleteFileW(mp4.c_str())) { LOGI("job: deleted %s (keep_mp4 = 0)", N(name).c_str()); deleted = L" (MP4 removed)"; }
-        else LOGW("job: could not delete %s (error %lu)", N(name).c_str(), GetLastError());
+        if (DeleteFileW(mp4.c_str())) {
+            LOGI("job: deleted %s (keep_mp4 = 0)", N(name).c_str());
+            deleted = L" (MP4 removed)";
+            if (rec.hasSidecar) {   // the MKV carries the projection itself; the sidecar only described the MP4
+                if (DeleteFileW(rec.sidecar.c_str())) LOGI("job: deleted %s with the MP4", N(FileName(rec.sidecar)).c_str());
+                else LOGW("job: could not delete %s (error %lu)", N(FileName(rec.sidecar)).c_str(), GetLastError());
+            }
+        } else {
+            LOGW("job: could not delete %s (error %lu)", N(name).c_str(), GetLastError());
+        }
     }
 
     const std::wstring mainOut = mkvOk ? FileName(mkv) : FileName(flat);
-    std::wstring text = mkvOk ? L"Ready for YouTube: " + FileName(mkv) : L"Flat 2D version ready: " + FileName(flat);
+    const std::wstring ready = rec.Dome() ? std::wstring(L"Ready for YouTube (") + rec.Name() + L"): " : std::wstring(L"Ready for YouTube: ");
+    std::wstring text = mkvOk ? ready + FileName(mkv) : L"Flat 2D version ready: " + FileName(flat);
     if (mkvOk && flatOk) text += L"\nFlat 2D: " + FileName(flat);
     Notice n{L"OpenXR-EyeCapture", text, false};
     LOGI("job: done %s in %.1f s%s", N(mainOut).c_str(), (GetTickCount64() - t0) / 1000.0, N(deleted).c_str());

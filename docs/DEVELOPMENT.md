@@ -30,16 +30,17 @@ zip. Re-run it after every build you want the games to pick up (a running game k
 | `src/source_d3d11.cpp` | D3D11 games: ring created on the encoder device, opened on the game device; fences created on the game device |
 | `src/source_d3d12.cpp` | D3D12 games: ring = D3D12 shared committed resources opened on the encoder device; D3D12 shared fences |
 | `src/source_vulkan.cpp` | Stub (logs "not yet supported") |
-| `src/recorder.h/.cpp` | Recording: ring bookkeeping, video processor RGBA→NV12, linear→sRGB pre-pass, head-smoothing re-projection pass, MF sink writer, AAC, finalize, st3d |
+| `src/recorder.h/.cpp` | Recording: ring bookkeeping, video processor RGBA→NV12, linear→sRGB pre-pass, head-smoothing re-projection pass or the dome pass, MF sink writer, AAC, finalize, st3d (+ sv3d and the `<name>.json` sidecar in dome mode) |
 | `src/indicator.h/.cpp` | In-headset recording indicator: state tracker, 64x64 straight-alpha picture, the quad layer's swapchain / VIEW space (D3D11) |
-| `src/head_smoothing.h/.cpp` | Head-motion smoothing, CPU side: orientation filter (follow, catch-up, roll lock, edge guard) and the per-eye re-projection parameters |
+| `src/head_smoothing.h/.cpp` | Head-motion smoothing, CPU side: orientation filter (follow, catch-up, roll lock, edge guard) and the per-eye re-projection parameters; quaternion helpers |
+| `src/dome.h/.cpp` | VR180 / VR360 dome, CPU side: `[dome]` settings, output size (density, rounding, 8192 clamp), lon / lat -> ray, dome frame D (yaw only), per-eye matrix, direction -> equirect (tests). The GPU pass (`kDomePs`) is in `recorder.cpp` |
 | `src/audio_capture.h/.cpp` | WASAPI loopback → continuous 48 kHz stereo int16 on the QPC clock |
-| `src/st3d.h/.cpp` | Post-finalize MP4 patch: `st3d` box into the video sample entry |
+| `src/st3d.h/.cpp` | Post-finalize MP4 patch: `st3d` box (+ `sv3d` for dome recordings) into the video sample entry |
 | `src/control.h/.cpp` | Control thread: hotkey, tray IPC, status publishing, beeps. `ControlPublishFinal()` hands a finalized recording's result ("saved <file>") to the status block synchronously from `xrDestroySession` / `xrDestroyInstance` (the 250 ms loop is stopped with the last armed session); a Stopping -> Idle transition is also published at once. At shutdown only `ownerPid` / `state` are cleared, `message` / `file` stay so the tray still reads "saved <file>" after the game is gone |
 | `src/shared_status.h` | Layer ↔ tray IPC names + layout (shared memory `Local\OpenXR-EyeCapture-Status`, event `...-Command`, tray-alive mutex `...-TrayAlive`) |
 | `src/config.h/.cpp`, `src/log.h/.cpp` | `config.ini`, log files |
-| `tray/tray.cpp` | `EyeCaptureTray.exe`: tray icon / menu, status polling, queues finished recordings (`message` = `saved <file>` in the status block; the first read is only a baseline so older recordings are not converted), `logs\tray.log`. Fallback scan (game went away, and every 10 s while not recording): `*_SBS.mp4` in the captures folder that are newer than the tray start, have no `.mkv`, are not open for writing, and have a stable size for 3 s are queued (`tray: fallback scan queued <file>`); both paths dedupe by full path |
-| `tray/postprocess.h/.cpp` | Post-processing worker thread (FIFO, one job at a time): ffmpeg lookup, MKV remux (`stereo_mode=left_right`), optional `_FLAT.mp4`, MP4 delete only after verification, balloon notices. Config keys `post_mkv`, `keep_mp4`, `post_flat`, `ffmpeg_path` (parsed in `src/config.cpp`, ignored by the layer). ffmpeg runs at below-normal priority with no window; exiting the tray kills it and deletes the partial output |
+| `tray/tray.cpp` | `EyeCaptureTray.exe`: tray icon / menu, status polling, queues finished recordings (`message` = `saved <file>` in the status block; the first read is only a baseline so older recordings are not converted), `logs\tray.log`. Fallback scan (game went away, and every 10 s while not recording): `*_SBS.mp4` / `*_VR180.mp4` / `*_VR360.mp4` in the captures folder that are newer than the tray start, have no `.mkv`, are not open for writing, and have a stable size for 3 s are queued (`tray: fallback scan queued <file>`); both paths dedupe by full path |
+| `tray/postprocess.h/.cpp` | Post-processing worker thread (FIFO, one job at a time): ffmpeg lookup, reads the recorder's `<name>.json` sidecar (`ReadSidecar`; none = flat SBS), MKV remux (`stereo_mode=left_right`, `top_bottom` for VR360), optional `_FLAT.mp4` (dome: `v360` flat view of the left eye), MP4 (+ sidecar) delete only after verification, balloon notices. Config keys `post_mkv`, `keep_mp4`, `post_flat`, `ffmpeg_path` (parsed in `src/config.cpp`, ignored by the layer). ffmpeg runs at below-normal priority with no window; exiting the tray kills it and deletes the partial output |
 | `tests/*` | See "Tests" |
 
 ## Data path
@@ -56,11 +57,11 @@ game thread, inside xrEndFrame (before forwarding):
        D3D12: one command list on the game's queue: barriers RT->COPY_SOURCE, CopyTextureRegion x2, barriers back
   -> queue {slot, ready value, ts}
 encoder worker thread (private D3D11 device on the game's adapter, by LUID):
-  Wait(ready) -> [linear formats: compute pass, sRGB encode] -> [head_smoothing > 0: re-projection pass]
+  Wait(ready) -> [linear formats: compute pass, sRGB encode] -> [re-projection pass (symmetric fov / smoothing) | dome pass]
   -> VideoProcessorBlt RGBA->NV12 (BT.709 limited)
   -> Signal(free) -> IMFTrackedSample(DXGI surface) -> IMFSinkWriter::WriteSample (hardware HEVC / H.264 MFT)
 audio thread: WASAPI loopback -> int16 48 kHz -> WriteSample (AAC)
-stop: drain, Finalize, st3d patch, summary line in the log
+stop: drain, Finalize, st3d patch (+ sv3d, <name>.json sidecar in dome mode), summary line in the log
 ```
 
 Nothing on the game thread waits on the CPU. A slot whose previous copy has not completed on the GPU (D3D12) is a
@@ -141,6 +142,73 @@ WxH per eye`). Tested: `run_jitter.ps1` raw vs rawasym (far marker same x in bot
 - **Translation** is ignored on purpose (needs depth). Head-locked projection spaces (VIEW) give identity poses:
   nothing to smooth.
 
+### VR180 / VR360 dome (`[dome] projection = vr180 | vr360`)
+
+Replaces the flat re-projection: with `projection` != `flat` the stage always runs, `symmetric_fov` / `head_smoothing`
+/ `head_follow_deg` / `roll_lock` / `output_fov_scale` / `edge_guard` are ignored (one INFO line), `swap_eyes` still
+swaps the eye views before anything else. `projection = flat` (default) is untouched: no dome resources, no dome pass,
+the same log lines plus `dome: projection flat` at load.
+
+- **Conventions** (OpenXR, as in `head_smoothing.h`): right-handed, -Z forward, +X right, +Y up. Equirect pixel (u, v)
+  in [0,1] of an eye (v down, pixel centres): `lon = (u - 0.5) * lonSpan` (pi for vr180, 2 pi for vr360; lon > 0 =
+  right), `lat = (0.5 - v) * pi` (lat > 0 = up), dome ray `r = (cos lat sin lon, sin lat, -cos lat cos lon)`.
+- **Dome frame D** (`ComputeDomeFrame`, worker thread): fixed at the first frame of the recording with a usable pose
+  (same validity test as the smoothing input): `H = slerp(qL, qR, 0.5)`, forward `H * (0,0,-1)` projected on y = 0 and
+  normalised, `D = Ry(atan2(-f.x, -f.z))`, i.e. yaw only (horizon level, gravity-aligned because LOCAL / STAGE are).
+  Horizontal length < 0.05 (looking straight up / down): `D = identity` (-Z). Logged (`dome frame D fixed ... yaw`).
+  A marker at infinity in world direction -Z therefore sits at `lon = +yaw(D)` (OpenXR yaw is positive to the LEFT,
+  lon is positive to the right). D is fixed for the recording (`dome_forward = start`; `reset_on_hotkey` is parsed and
+  logged as not implemented).
+- **Per eye**: `M_e = q_e^-1 * D` (row-major, `a = M_e r` is the ray in that eye's camera). `a.z >= 0` or
+  `t = a.xy / -a.z` outside the eye's fov tans = not covered, else a bilinear sample of that eye's half of the source
+  (clamped half a texel inside, like the flat pass). Eye positions are not used: each eye's dome is centred on that eye
+  (stereo baseline like a VR180 camera; a far point lands on the same equirect pixel in both eyes). Head jitter
+  disappears by construction (world-locked), so there is no filter.
+- **Coverage weight w** (`window_feather_deg` = f): 0 outside, else `saturate(asin(min_i dot(n, p_i)) / f)` with `n`
+  the normalised camera ray and `p_i` the four normalised inward fov edge planes (`(1,0,tanL)`, `(-1,0,-tanR)`,
+  `(0,-1,-tanU)`, `(0,1,tanD)`), i.e. the angular distance to the nearest window edge; f = 0: w = 1 inside.
+- **Layout / size** (`ComputeDomeSize`, at `Recorder::Start` from the views of that frame): vr180 = per-eye square,
+  SBS `2W x W`; vr360 = per-eye `W x W/2`, top-bottom `W x W` (left eye on top). `density = max over eyes of
+  eyeWidth / (tanR - tanL)`, `W = round(density * lonSpan)` to even (vr360: to a multiple of 4 so each half has an
+  even height for 4:2:0), or `dome_width`, clamped to an 8192 frame (vr180 W <= 4096, vr360 W <= 8192); no usable fov
+  at the start frame: `density = eyeWidth / 2` (logged). The pass picks the eye by its destination rectangle
+  (`pos >= eye[1].dst.xy`), which covers both layouts. Mock (1408 px per eye, -50/+40): 693.3 px/rad -> vr180 2178 per
+  eye (frame 4356x2178), vr360 4356 (4356x4356). Quest-3-like 3072 px per eye with the same fov: 1512.7 px/rad ->
+  vr180 wants 4752 -> 4096 (8192x4096), vr360 wants 9504 -> 8192 (8192x8192).
+- **Fill = last_seen** (persistent dome on the encoder device): colour A/B (the stage format) and last-write time A/B
+  (`R32_FLOAT`, seconds since the first recorded frame's displayTime) plus the pass output (`rpTex`, what the video
+  processor reads). One full-screen pass with 3 render targets (output, new colour, new time), SRVs = eye source, old
+  colour, old time: `dome' = lerp(dome, sample, w)`, `time' = w >= 0.5 ? now : time`,
+  `fade = fill_fade_s == 0 ? 1 : 1 - saturate((now - time' - fill_fade_s) / 2)` (black 2 s after `fill_fade_s`),
+  `output = dome' * fade`; then A and B swap roles. The dome is cleared at the first frame (black, time -1e9) inside
+  the device lock. Frames without a usable pose paint nothing (the dome is shown as it is, fading). Colours stay in the
+  encoded (sRGB) domain like the flat pass. VRAM: output + 2 x colour + 2 x time (logged: 181 MB at 4356x2178,
+  ~640 MB at 8192x4096). **Fill = black**: one target, `output = sample * w`, no persistent textures.
+- **Stats**: `re-projection summary (dome vr180, fill last_seen): N frames | dome: P frames painted, Q frames without
+  pose | D yaw ... | re-projection WxH: GPU ...`. Measured with the mock (RTX 5090): 0.064 ms avg GPU at 4356x2178 with
+  last_seen, 0.022 ms with fill black.
+- **MP4 boxes** (`PatchStereoSpherical`, Spherical Video V2 RFC): children of the video sample entry, `st3d` first
+  (FullBox v0 + `stereo_mode`: 2 = left-right for vr180, 1 = top-bottom for vr360), then `sv3d` (Box) { `svhd` (FullBox,
+  `"OpenXR-EyeCapture\0"`), `proj` (Box) { `prhd` (FullBox, yaw / pitch / roll int32 16.16 = 0), `equi` (FullBox,
+  uint32 0.32 bounds top, bottom, left, right = the fraction of the sphere NOT covered from each edge: vr180
+  0 / 0 / 0x40000000 / 0x40000000, vr360 all 0) } }: 111 bytes, inserted with the same grow-the-ancestors patch as the
+  flat 13-byte `st3d` (`PatchSt3d` is now a wrapper, flat output unchanged). ffprobe: `Spherical Mapping` /
+  `tiled equirectangular` with `bound_left=2179`, `bound_right=2177` (ffmpeg converts the 0.32 fractions to pixels of
+  the 2 x 4356 wide full sphere and rounds) for vr180, `equirectangular` for vr360, plus `Stereo 3D` `side by side` /
+  `top and bottom`.
+- **Sidecar** `<name>.json` (dome recordings only; no sidecar = flat SBS, so flat recordings are unchanged):
+  `{"projection":"vr180","layout":"left_right","eyes":2,"width":4356,"height":2178,"dome_width":2178}` (encoded size;
+  `dome_width` = encoded per-eye width). The tray reads it per job (status path and fallback scan both end in
+  `RunJob`) and deletes it together with the MP4 when `keep_mp4 = 0`.
+- **MKV vs MP4 route**: ffmpeg cannot set spherical metadata from its command line, but its mov demuxer turns `sv3d`
+  into spherical side data and the Matroska muxer writes that as the `Projection` element (ProjectionType 1 =
+  equirectangular, ProjectionPrivate = the equi bounds for the tiled case). Verified (`run_dome.ps1` e): after the
+  tray's own `-c copy` remux the MKV still has `Spherical Mapping` (tiled) equirectangular with the same bounds, the
+  Stereo 3D side data, the `stereo_mode` tag (`left_right` / `top_bottom`) and the raw `Projection` element
+  (0x7670, ProjectionType 1). So the tray keeps ONE route for every recording: MKV, upload the MKV. YouTube's own
+  handling of either file is not verified (no upload in the tests); the MP4 carries the same boxes as Google's
+  spatial-media injector writes and is the fallback (`keep_mp4 = 1`).
+
 ### In-headset indicator
 
 `Hook_EndFrame`, under `g_lock`, AFTER `CaptureSafe` (so the recording has already taken this frame's projection views):
@@ -169,7 +237,7 @@ enabled it, else `config.ini fps`. Timestamps are the real ones either way (vari
 
 ### st3d
 
-Media Foundation writes `moov` after `mdat`; the patch appends the 13-byte `st3d` box (stereo_mode 2 = left-right) to
+Media Foundation writes `moov` after `mdat`; the patch appends the 13-byte `st3d` box (dome: the 111-byte `st3d` + `sv3d` blob, see above) (stereo_mode 2 = left-right) to
 the video sample entry (`hvc1` / `avc1`), grows every ancestor's size and rewrites only the moov region in place.
 `moov`-before-`mdat` files are handled too (shrink a following `free` box, else a rewrite with every `stco`/`co64` +13)
 but Media Foundation never produced one in the tests.
@@ -209,11 +277,12 @@ the DLL (`GetModuleHandleEx` + `FreeLibraryAndExitThread`), so an early unload c
 | `tests\run_e2e.ps1` | Real loader → installed layer → `mock_runtime.dll`, a normal app frame loop for every layout and both D3D APIs, recording through `XR_EYE_CAPTURE_AUTORECORD`; each MP4 verified. Indicator: the mock validates every quad layer (known swapchain and space, rect inside the image, blend flag, unit quaternion) and prints the counts; D3D11 cases need a valid quad on >= the recorded frames and not on all frames, D3D12 none; an extra `vr_indicator = 0` case checks the recorded pixels where the dot would be (both eyes) equal the pattern and the indicator-on recording. |
 | dormant case (last case of `run_e2e.ps1`) | Without `XR_EYE_CAPTURE_REQUIRE_TRAY=0` and without the tray: `layer_e2e --expect-dormant` loop completes, no MP4, log has the "layer dormant" line and no `control:` / recorder lines. (Fails if a tray is running.) |
 | `indicator_test.exe` | Indicator state machine (starting / recording / stopping / saved 1.5 s / failed 2 s / hidden) and the picture (colours, sRGB vs linear, RGBA / BGRA, pulse 0.35..1.0, opacity cap, anti-aliased edge, X vs disc, hidden = transparent). |
-| `head_smoothing_test.exe` | Symmetric fov intersection, output size (density, even rounding), parallel-camera mapping without smoothing; filter math on the CPU: time-constant mapping, first frame = identity, correction direction for yaw / pitch (OpenXR conventions), gap reset, roll lock, follow + catch-up (lag bound, settle), edge guard on / off, no-pose pass-through. |
+| `head_smoothing_test.exe` | Symmetric fov intersection, output size (density, even rounding), parallel-camera mapping without smoothing; filter math on the CPU: time-constant mapping, first frame = identity, correction direction for yaw / pitch (OpenXR conventions), gap reset, roll lock, follow + catch-up (lag bound, settle), edge guard on / off, no-pose pass-through. Dome: size derivation (vr180 / vr360, rounding, 8192 clamp, explicit `dome_width`, no-fov fallback), lon / lat -> ray (lon +90 = +X, lat +90 = +Y, lon 0 = -Z), D = yaw only (pitch / roll dropped, straight-up degenerate case, slerp of the eyes), eye matrix for a yawed head, a world direction maps to the same equirect pixel for any head pose. |
+| `tests\run_dome.ps1` | Dome end to end (installed layer, real loader, mock runtime `--jitter`: +-2 degree jitter + a 30 degree LEFT turn at t = 4..5 s, fovs L -50/+40 R -40/+50 x +-45), 11.5 s recordings `vr180` (last_seen, fade 8), `vr180_black`, `vr180_fade1` (`fill_fade_s 1`), `vr360`; Y plane decoded, marker located per eye, probe region at lon +33 / lat 0 (live before the turn, outside the window after it). (a) world lock: marker std-dev over t 1.0..3.9 s < 0.3 px, at lon = D yaw, lat 0 (2 deg). (b) mean after the turn = before (0.5 px); probe region still painted (last_seen) / black (fill black) at t ~ 5.5 s. (c) fade 1 s: painted at 5.5 s, black on every frame from 8.5 s. (d) right-eye marker = left-eye marker (mean <= 0.3 px, per-frame std-dev <= 0.15 px). (e) ffprobe on the MP4 and on the tray-command MKV: spherical (tiled) equirectangular + stereo side by side / top and bottom, the Matroska Projection element, the sidecar, the `_VR180` / `_VR360` names. Measured: (a) 0.058 / 0.085 px std-dev, lon -1.990 vs D yaw -1.99, lat -0.001; (b) 0.017 / -0.008 px; (d) mean 0.003 / -0.004 px, std-dev 0.09 px (per-frame max 0.32 px: each eye's own raster noise of the aliased test marker). |
 | `tests\run_jitter.ps1` | Head smoothing end to end (installed layer, real loader, mock runtime): `layer_e2e --jitter` renders a world-locked grid + marker for the pose the mock reports (+-2 degree yaw / pitch / roll jitter at 3.3 / 4.1 / 4.7 Hz, a 30 degree yaw turn at t = 4..5 s; `tests/test_motion.h`). The mock's views have asymmetric fovs (left -50/+40, right -40/+50, +-45 degrees). Four recordings (smoothing 0 with `symmetric_fov` 1; smoothing 0 with `symmetric_fov` 0; 0.6 with `output_fov_scale` 0.9; same with `edge_guard` 0), ffmpeg-decoded, marker located per frame in both eyes. Checks: marker = analytic expectation (RMS < 0.15 degree), far marker at the same x in both halves with `symmetric_fov` 1 (<= 1 px) and not with 0, jitter-phase std-dev raw / smoothed >= 5, settles within 0.5 s after the turn (1 degree), final position 30 / 0 degrees, no black border pixels in the jitter phase. Measured: raw 2.00 degree, smoothed 0.31 degree (6.5x; 7.6x without the edge guard), settle 0.16 s (0.20 s without the guard), RMS 0.006 degree; far-marker x right - left: symmetric 0.29 px max (smoothed 0.50 px), raw asymmetric -244.5 px mean. |
-| tray post-processing | Manual (no GPU): `build\Release\status_sim.exe <private shm name> <hold s> <file.mp4>...` plays the layer's ready / recording / stopping / `saved <file>` sequence on a private status block; start a second tray on the same block with `EYECAP_TRAY_TEST_SHM=<name>` (and `APPDATA` pointing at a folder with a test `OpenXR-EyeCapture\config.ini`) from a copy of `EyeCaptureTray.exe` in a scratch folder (its `logs\tray.log` lands there). Check: `.mkv` made (ffprobe `Stereo 3D / side by side`, tag `stereo_mode=left_right`), MP4 deleted / kept per `keep_mp4`, `_FLAT.mp4` 3840x2160, `ffmpeg_path` pointing at a missing file = "ffmpeg not found" balloon and MP4 untouched, a garbage MP4 = failure balloon and MP4 untouched, two files in a row = FIFO. |
+| tray post-processing | Manual (no GPU): `build\Release\status_sim.exe <private shm name> <hold s> <file.mp4>...` plays the layer's ready / recording / stopping / `saved <file>` sequence on a private status block; start a second tray on the same block with `EYECAP_TRAY_TEST_SHM=<name>` (and `APPDATA` pointing at a folder with a test `OpenXR-EyeCapture\config.ini`) from a copy of `EyeCaptureTray.exe` in a scratch folder (its `logs\tray.log` lands there). Check: `.mkv` made (ffprobe `Stereo 3D / side by side`, tag `stereo_mode=left_right`), MP4 deleted / kept per `keep_mp4`, `_FLAT.mp4` 3840x2160, `ffmpeg_path` pointing at a missing file = "ffmpeg not found" balloon and MP4 untouched, a garbage MP4 = failure balloon and MP4 untouched, two files in a row = FIFO. Dome (done 2026-10-10 with the `run_dome.ps1` recordings + their sidecars, `post_flat = 1`, `EYECAP_TRAY_TEST_NO_NVENC=1`): a `_VR180.mp4` via `saved <file>` and a `_VR360.mp4` dropped into the folder (fallback scan) -> `job: <name>.json -> VR180 / VR360`, MKV with `stereo_mode=left_right` / `top_bottom` and the spherical side data, `_FLAT.mp4` 3840x2160 (v360 flat view), MP4 and sidecar deleted, balloon "Ready for YouTube (VR180): ...". Note: `status_sim` crashes (0xC0000409) when `saved <path>` exceeds its 160-character message, so use a short folder (e.g. `build\tt`). |
 | `control_final_test.exe` | No GPU. The control thread + `ControlPublishFinal` on a private block (`XR_EYE_CAPTURE_TEST_SHM=<name>`): session destroyed right after the recording -> ownership released during the finalize -> final status published -> `ControlStop` at once: `saved <file>` + file + counters must survive; a Stopping -> Idle transition is published within 90 ms. |
-| tray fallback scan | Part of the manual tray test above: `status_sim.exe <shm> <hold s> --vanish <file.mp4>` publishes `saved <file>` and clears ownerPid / state 50 ms later (the game quit right after the recording) -> the tray must still convert. Without any status message, drop a finished `*_SBS.mp4` (mtime newer than the tray start, no `.mkv`) into the tray's captures folder -> `tray: fallback scan queued <file>` within ~15 s and the MKV appears; a file still open for writing waits until it is closed. The same MP4 seen by both paths is converted once. `status_sim --outdir <dir>` publishes a captures folder. |
+| tray fallback scan | Part of the manual tray test above: `status_sim.exe <shm> <hold s> --vanish <file.mp4>` publishes `saved <file>` and clears ownerPid / state 50 ms later (the game quit right after the recording) -> the tray must still convert. Without any status message, drop a finished `*_SBS.mp4` / `*_VR180.mp4` / `*_VR360.mp4` (mtime newer than the tray start, no `.mkv`) into the tray's captures folder -> `tray: fallback scan queued <file>` within ~15 s and the MKV appears; a file still open for writing waits until it is closed. The same MP4 seen by both paths is converted once. `status_sim --outdir <dir>` publishes a captures folder. |
 | tray IPC | Start `EyeCaptureTray.exe` (GUI), then `layer_e2e --record 0` (it must be started with the tray running, or with `XR_EYE_CAPTURE_REQUIRE_TRAY=0`) + `EyeCaptureTray.exe --start / --status / --stop`. |
 
 Test-only environment variables read by the tray: `EYECAP_TRAY_TEST_SHM=<name>` (private status block, no single-instance check, no tray-alive marker) and `EYECAP_TRAY_TEST_NO_NVENC=1` (the flat step uses libx264 and never touches the GPU).
@@ -222,7 +291,8 @@ Test-only environment variables read by the layer: `XR_EYE_CAPTURE_AUTORECORD=<s
 stop after N s), `XR_EYE_CAPTURE_TRAY_IPC=0` (no control thread: no hotkey, nothing published to a running tray -- otherwise
 the tray's post-processing would remux and delete the test MP4s; `run_e2e.ps1` / `run_jitter.ps1` set it for their
 recording cases), `XR_EYE_CAPTURE_CONFIG=key=value;key=value` (applied on top of `config.ini`, same keys and checks,
-each logged as `config override:`; `run_jitter.ps1` uses it for the smoothing settings) and `XR_EYE_CAPTURE_TEST_SHM=<name>` (private status block + `<name>-Command` event; used by `control_final_test`), `XR_EYE_CAPTURE_OUTPUT_DIR=<dir>`, `XR_EYE_CAPTURE_REQUIRE_TRAY=0|1` (overrides `require_tray`; `run_e2e.ps1` sets 0 for the
+each logged as `config override:`; `run_jitter.ps1` uses it for the smoothing settings, `run_dome.ps1` for the dome
+settings, and `run_e2e.ps1` / `run_jitter.ps1` pin `projection=flat` so they test the flat path whatever `config.ini` says) and `XR_EYE_CAPTURE_TEST_SHM=<name>` (private status block + `<name>-Command` event; used by `control_final_test`), `XR_EYE_CAPTURE_OUTPUT_DIR=<dir>`, `XR_EYE_CAPTURE_REQUIRE_TRAY=0|1` (overrides `require_tray`; `run_e2e.ps1` sets 0 for the
 recording cases).
 
 ## Not verified without a headset
@@ -230,6 +300,9 @@ recording cases).
 - A real game on a real runtime (VDXR / SteamVR / Oculus): swapchain images owned by those runtimes (keyed-mutex
   textures would be logged with `KEYED MUTEX`), real frame pacing, the beeps inside the headset.
 - The hotkey path (`GetAsyncKeyState`) was not pressed in a test; the same start / stop code was driven through the tray IPC.
-- YouTube's handling of the uploaded file (ffprobe parses the `st3d` box; YouTube's processing was not tried).
+- YouTube's handling of the uploaded file (ffprobe parses the `st3d` box; YouTube's processing was not tried). Same for the
+  VR180 / VR360 dome files (MP4 `sv3d` and the MKV `Projection` element are verified with ffprobe only).
+- The dome with real head motion: translation (leaning) is ignored, so old painted areas can show small seams against
+  the live view; whether `fill_fade_s` 8 / `window_feather_deg` 1 look right is a viewing judgement.
 - Head smoothing with real head motion and a real runtime's view poses (the mock reports synthetic motion; the pass
   itself is runtime-independent). Whether the default strength / follow / fov scale feel right is a viewing judgement.

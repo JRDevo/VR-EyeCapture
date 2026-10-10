@@ -122,7 +122,8 @@ void QueueRecording(const std::wstring& mp4, bool force) {
 }
 
 // Fallback for a "saved <file>" message that never reached us (the game quit or crashed right after / during the
-// recording): look for finished *_SBS.mp4 files in the captures folder that this tray session has not handled.
+// recording): look for finished *_SBS.mp4 / *_VR180.mp4 / *_VR360.mp4 files in the captures folder that this tray
+// session has not handled.
 // Candidates: newer than the tray start, no sibling .mkv (or _FLAT.mp4 when only the flat step is on), not queued
 // before. PollPending() then waits until the file is not open for writing and its size has been stable for 3 s.
 void ScanCaptures() {
@@ -132,12 +133,16 @@ void ScanCaptures() {
     std::wstring dir = g_st.outputDir[0] ? std::wstring(g_st.outputDir) : cfg.outputDir;
     if (dir.empty()) dir = g_exeDir + L"\\captures";
     WIN32_FIND_DATAW fd;
-    HANDLE h = FindFirstFileW((dir + L"\\*_SBS.mp4").c_str(), &fd);
+    HANDLE h = FindFirstFileW((dir + L"\\*.mp4").c_str(), &fd);
     if (h == INVALID_HANDLE_VALUE) return;
+    auto endsWith = [](const std::wstring& n, const wchar_t* tail) {
+        const size_t k = wcslen(tail);
+        return n.size() >= k && _wcsicmp(n.c_str() + n.size() - k, tail) == 0;
+    };
     do {
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
         const std::wstring n = fd.cFileName;
-        if (n.size() < 8 || _wcsicmp(n.c_str() + n.size() - 8, L"_SBS.mp4") != 0) continue;
+        if (!endsWith(n, L"_SBS.mp4") && !endsWith(n, L"_VR180.mp4") && !endsWith(n, L"_VR360.mp4")) continue;
         if (CompareFileTime(&fd.ftLastWriteTime, &g_trayStart) <= 0) continue;
         const std::wstring path = dir + L"\\" + n;
         const std::wstring key = NormPath(path);

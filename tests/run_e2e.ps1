@@ -50,6 +50,9 @@ $env:XR_EYE_CAPTURE_REQUIRE_TRAY = '0'
 # them). The dormant case below runs without this override.
 $prevTrayIpc = $env:XR_EYE_CAPTURE_TRAY_IPC
 $env:XR_EYE_CAPTURE_TRAY_IPC = '0'
+# These cases test the flat side-by-side path whatever config.ini says ([dome] projection = vr180 records a dome).
+$prevCfg = $env:XR_EYE_CAPTURE_CONFIG
+$env:XR_EYE_CAPTURE_CONFIG = 'projection=flat'
 foreach ($api in @('d3d11', 'd3d12')) {
     foreach ($layout in @('two', 'array', 'wide', 'msaa')) {
         $out = Join-Path $root "build\e2e_out\${api}_$layout"
@@ -86,8 +89,7 @@ foreach ($api in @('d3d11', 'd3d12')) {
 $out = Join-Path $root 'build\e2e_out\d3d11_two_noindicator'
 if (Test-Path $out) { Remove-Item -Recurse -Force $out }
 Write-Host "`n=== d3d11 / two, vr_indicator = 0" -ForegroundColor Cyan
-$prevCfg = $env:XR_EYE_CAPTURE_CONFIG
-$env:XR_EYE_CAPTURE_CONFIG = 'vr_indicator=0'
+$env:XR_EYE_CAPTURE_CONFIG = 'projection=flat;vr_indicator=0'
 $o = & $exe --api d3d11 --layout two --seconds 6 --record 4 --out-dir $out 2>&1 | Out-String
 if ($null -ne $prevCfg) { $env:XR_EYE_CAPTURE_CONFIG = $prevCfg } else { Remove-Item Env:\XR_EYE_CAPTURE_CONFIG -ErrorAction SilentlyContinue }
 $m = [regex]::Match($o, 'E2E_OUTPUT=(.+)')

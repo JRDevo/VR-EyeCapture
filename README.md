@@ -49,7 +49,8 @@ Set `require_tray = 0` in `config.ini` to always arm without the tray (old behav
 3. Press **Ctrl+Shift+F10** again → two beeps: stopped, the MP4 is finalized.
    One long low beep = it could not start (see the log).
 4. The file lands in the `captures` folder next to `eye_capture.dll`, named
-   `<game exe>_<yyyyMMdd_HHmmss>_SBS.mp4`, e.g. `eurotrucks2_20261009_201512_SBS.mp4`.
+   `<game exe>_<yyyyMMdd_HHmmss>_SBS.mp4`, e.g. `eurotrucks2_20261009_201512_SBS.mp4` (`_VR180.mp4` / `_VR360.mp4` in
+   dome mode, see "VR180 / VR360 dome mode").
 
 Recording also stops and the file is finalized when the game closes its VR session (quitting the game normally).
 If the game crashes or is killed while recording, the MP4 is lost (it is only finalized at the end).
@@ -76,6 +77,8 @@ Processing of large files takes a while; the 3D version can appear later than th
 - Needs ffmpeg: `winget install Gyan.FFmpeg.Essentials`. The tray finds it on `PATH`, else in the WinGet packages folder, else
   in an `ffmpeg` folder next to the tray app (or set `ffmpeg_path`). Without ffmpeg you get one balloon "ffmpeg not found"
   and the MP4 stays as it is.
+- Dome recordings (`_VR180` / `_VR360`): the same, the MKV keeps the VR180 / 360 metadata (`stereo_mode` is `top_bottom`
+  for VR360). See "VR180 / VR360 dome mode".
 - Only recordings that finish while the tray runs are converted; older ones: `scripts\make_mkv.ps1 <file.mp4>` (the manual
   path, same result) or "Convert last recording now".
 - `post_flat = 1` also writes `<name>_FLAT.mp4` (normal 2D video: left eye, 16:9 centre crop, 3840 wide, NVENC HEVC or x264;
@@ -109,6 +112,7 @@ starts its OpenXR instance.
 | `roll_lock` | `0` | Smoothing: `1` = keep the horizon level. |
 | `output_fov_scale` | `0.9` | Smoothing: fraction of the game's field of view in the recording (room for the correction). |
 | `edge_guard` | `1` | Smoothing: `1` = never show black edges (the correction is limited to what the game rendered). |
+| `projection`, `dome_width`, `dome_forward`, `fill`, `fill_fade_s`, `window_feather_deg` | | `[dome]`: VR180 / VR360 output, see "VR180 / VR360 dome mode". |
 | `post_mkv` | `1` | Tray app: after each recording, remux the MP4 to `<name>.mkv` with the Matroska 3D tag (what YouTube reads). |
 | `keep_mp4` | `0` | Tray app: `0` = delete the MP4 once the MKV (and the flat file, if requested) is verified; `1` = keep both. |
 | `post_flat` | `0` | Tray app: also write `<name>_FLAT.mp4`, a normal 2D video (left eye, 16:9 centre crop, 3840 wide). |
@@ -171,6 +175,55 @@ is a little narrower than the raw eye images (it keeps the game's pixel density,
 eye for a -50 / +40 view) and costs one GPU pass per frame. `symmetric_fov = 0` records the raw eye images as before.
 The log shows the numbers at the start of each recording, e.g.
 `symmetric fov: source L[-50.0,+40.0]x[-45.0,+45.0] R[-40.0,+50.0]x[-45.0,+45.0] -> output ±40.0° x ±45.0° per eye, 5058x6496 per eye`.
+
+## VR180 / VR360 dome mode
+
+`[dome] projection = vr180` (or `vr360`) records a **VR180 (or 360) 3D video** instead of a flat side-by-side one: in
+YouTube VR the viewer is placed *inside* the scene and can look around, instead of watching a rectangle that follows
+your head.
+
+**Mental model: the dome is a world-locked canvas; only what you looked at is painted; stale areas fade.** At the start
+of a recording the recorder fixes a "dome" around you, facing the way your head pointed (level with the horizon). Every
+frame, each eye's image is painted onto that dome at the place it was actually looking. Your head moving does not move
+the picture (head shake simply disappears), and when you look left the left part of the dome gets painted. What you
+looked at earlier stays visible (`fill = last_seen`) until it is older than `fill_fade_s` seconds, then fades to black
+over 2 s; areas you never looked at are black. The live view always has the game's full resolution and the stereo of
+the two eyes (each eye's dome is centred on that eye, like a VR180 camera).
+
+- **Layout.** VR180: two square half-spheres (180 x 180 degrees), left eye left, right eye right. VR360: two 2:1 full
+  spheres, left eye on top, right eye below (what YouTube's 360 3D expects).
+- **Size.** By default each eye's dome gets the game's own pixel density at the image centre, limited to an 8192 frame:
+  ETS2 / ATS on a Quest 3 (3072 x 3264 per eye) would need about 4750 px per eye for VR180, so it is capped at 4096 (frame
+  8192 x 4096); VR360 is capped at 8192 x 8192. `dome_width` sets the per-eye width yourself. The log line
+  `recorder: dome vr180: source density ... -> ... px per eye, clamped to ...` shows what was chosen.
+- **What it ignores.** `symmetric_fov`, `head_smoothing` and its settings are not used in dome mode (not needed: the dome
+  is world-locked). `swap_eyes` still works.
+- **Which games suit it.** Seated games where the world around you matters and you mostly look forward: driving and flight
+  sims, cockpit games (ETS2 / ATS fit well). Fast games where you whip your head around show a lot of half-faded
+  dome; `fill = black` shows only the live view.
+- **Limits.** The video only contains what you looked at. Rotation only: if you lean far forward the painted areas from
+  before do not line up perfectly with the live view (small seams). The horizon is levelled from the play space
+  (LOCAL / STAGE), and the dome faces where you looked at the first frame of the recording (`dome_forward = start`).
+  VR360 frames are big (8192 x 8192 HEVC at most); the dome needs extra VRAM (the output plus two colour and two time
+  copies of the dome: ~640 MB at 8192 x 4096, ~1.3 GB at 8192 x 8192; `fill = black` needs only the output).
+- **Files and upload.** Files are named `<game>_<time>_VR180.mp4` / `_VR360.mp4`, with a `<same name>.json` next to it
+  that tells the tray app what it is. The MP4 carries the Spherical Video V2 boxes (`st3d` + `sv3d`, equirectangular,
+  VR180 = left / right cropped to +-90 degrees), and the tray's MKV keeps them (ffmpeg turns `sv3d` into the Matroska
+  `Projection` element), so the routine is the same as for flat recordings: **upload the `.mkv`** (balloon "Ready for
+  YouTube (VR180): ..."). The MKV route is verified with ffprobe on both files (`tests\run_dome.ps1`); YouTube's own
+  processing of these files has not been tried yet -- if YouTube shows it flat, upload the MP4 (`keep_mp4 = 1`) instead,
+  which carries the same metadata in the form Google's spatial-media tools write. `post_flat = 1` makes the `_FLAT.mp4`
+  from the left eye's view straight ahead (ffmpeg `v360`, 100 degrees wide, 3840 x 2160); `scripts\make_flat.ps1` is
+  for side-by-side recordings only.
+
+| Key (`[dome]`) | Default | Meaning |
+|---|---|---|
+| `projection` | `flat` | `flat` = side-by-side 3D (as before), `vr180`, `vr360`. |
+| `dome_width` | `0` | Per-eye width in pixels; `0` = from the game's pixel density (capped at an 8192 frame). |
+| `dome_forward` | `start` | The dome faces your head's direction at the start of the recording (only value for now). |
+| `fill` | `last_seen` | `last_seen` = keep what you looked at earlier; `black` = only the live view, the rest black. |
+| `fill_fade_s` | `8` | Seconds a painted area stays before fading to black (over 2 s); `0` = never fade. |
+| `window_feather_deg` | `1` | Soft edge (degrees) where the live view blends into the dome; `0` = hard edge. |
 
 ## Log and troubleshooting
 
