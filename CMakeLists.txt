@@ -65,9 +65,10 @@ add_custom_command(TARGET eye_capture POST_BUILD
             $<TARGET_FILE_DIR:eye_capture>/${EYE_LAYER_NAME}.json)
 
 # --- tray control app (optional; the layer works without it) ---
-add_executable(EyeCaptureTray WIN32 tray/tray.cpp tray/postprocess.cpp)
+add_executable(EyeCaptureTray WIN32 tray/tray.cpp tray/postprocess.cpp tray/settings.cpp)
 target_compile_options(EyeCaptureTray PRIVATE ${EYE_WARN_FLAGS})
 target_link_libraries(EyeCaptureTray PRIVATE eye_capture_core comctl32)
+target_include_directories(EyeCaptureTray PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tray)
 
 # --- tests ---
 option(EYE_BUILD_TESTS "Build the self-tests (encoder self-test, loader test, mock runtime end-to-end)" ON)
@@ -88,6 +89,12 @@ if (EYE_BUILD_TESTS)
     add_executable(control_final_test tests/control_final_test.cpp src/control.cpp)
     target_compile_options(control_final_test PRIVATE ${EYE_WARN_FLAGS})
     target_link_libraries(control_final_test PRIVATE eye_capture_core)
+
+    # Settings window: config.ini writer (in-place edit, validation, hotkey names) + driver for the real dialog (no GPU).
+    add_executable(settings_test tests/settings_test.cpp tray/settings.cpp)
+    target_compile_options(settings_test PRIVATE ${EYE_WARN_FLAGS})
+    target_link_libraries(settings_test PRIVATE eye_capture_core comctl32)
+    target_include_directories(settings_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tray)
 
     # Head-smoothing filter unit test (CPU only).
     add_executable(head_smoothing_test tests/head_smoothing_test.cpp)

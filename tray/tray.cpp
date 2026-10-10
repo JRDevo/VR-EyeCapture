@@ -4,7 +4,7 @@
 // Tray icon: grey = no game, green = game running (ready), red = recording, amber = starting / finalizing / failed,
 // blue = converting a finished recording (post-processing, see tray/postprocess.h).
 // Right-click (or left-click) menu: Start / Stop recording, Open captures folder, Convert last recording now, Open log,
-// Edit config, Exit.
+// Settings..., Edit config, Exit.
 // Tooltip: game, API, resolution, fps, frames dropped, elapsed, conversion progress. Talks to the layer through
 // src/shared_status.h. After each recording the tray remuxes it to .mkv (YouTube 3D tag) in a worker thread.
 // Start it BEFORE the game: the layer decides at xrCreateSession whether to arm (config require_tray=0 = always arm).
@@ -16,13 +16,16 @@
 #include <string>
 #include "config.h"
 #include "postprocess.h"
+#include "settings.h"
 #include "shared_status.h"
 
 namespace {
 const UINT WM_TRAY = WM_APP + 1;
 const UINT WM_PP = WM_APP + 2;     // the post-processing worker changed state / queued a notice
+const UINT WM_OPEN_SETTINGS = WM_APP + 3;   // also posted by tests/settings_test.exe to open the Settings window
 const UINT kTimer = 1;
-enum : UINT { ID_TOGGLE = 100, ID_FOLDER, ID_CONVERT, ID_LOG, ID_CONFIG, ID_EXIT };
+const UINT kTipTimer = 2;     // one-shot: end of the "settings saved" tooltip
+enum : UINT { ID_TOGGLE = 100, ID_FOLDER, ID_CONVERT, ID_LOG, ID_SETTINGS, ID_CONFIG, ID_EXIT };
 
 HINSTANCE      g_inst;
 HWND           g_wnd;
@@ -45,6 +48,9 @@ std::set<std::wstring> g_queuedPaths;              // normalised full paths queu
 struct Pending { ULONGLONG size = 0; ULONGLONG stableSince = 0; std::wstring path; };
 std::map<std::wstring, Pending> g_pending;         // scan candidates waiting for their size to settle
 bool           g_wasLive = false;
+bool           g_testMode = false;
+std::wstring   g_savedTip;                         // temporary tooltip after Settings -> Save
+ULONGLONG      g_savedTipUntil = 0;
 ULONGLONG      g_lastScan = 0;
 
 HICON MakeDotIcon(COLORREF c) {
@@ -254,6 +260,7 @@ void Refresh() {
     if (jobLine.empty()) wcsncpy_s(full, tip, _TRUNCATE);
     else if (state == ECS_RECORDING) swprintf_s(full, L"%s\n%s", tip, jobLine.c_str());   // recording info first
     else swprintf_s(full, L"%s\n%s", jobLine.c_str(), tip);
+    if (!g_savedTip.empty() && GetTickCount64() < g_savedTipUntil) wcsncpy_s(full, g_savedTip.c_str(), _TRUNCATE);
     g_nid.uFlags = NIF_TIP | NIF_ICON;
     wcsncpy_s(g_nid.szTip, full, _TRUNCATE);     // szTip holds 127 characters
     g_nid.hIcon = g_icons[idx];
@@ -280,6 +287,32 @@ void OpenPath(const std::wstring& p, const wchar_t* verb = L"open") {
     if (!p.empty()) ShellExecuteW(nullptr, verb, p.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 }
 
+std::wstring SettingsPath() {
+    return g_live && g_st.configPath[0] ? std::wstring(g_st.configPath) : ConfigPath(g_exeDir);
+}
+
+// Settings -> Save: log the changed keys, show "settings saved" in the tooltip for 5 s.
+void OnSettingsSaved(const std::vector<std::wstring>& changed) {
+    std::wstring list;
+    for (const auto& c : changed) list += (list.empty() ? L"" : L", ") + c;
+    LOGI("tray: settings saved to %s: %s", elog::Narrow(SettingsPath()).c_str(),
+         changed.empty() ? "no changes" : ("changed " + elog::Narrow(list)).c_str());
+    g_savedTip = L"settings saved — applies to the next recording";
+    g_savedTipUntil = GetTickCount64() + 5000;
+    SetTimer(g_wnd, kTipTimer, 5100, nullptr);
+    Refresh();
+    LOGI("tray: tooltip now: %s", elog::Narrow(g_nid.szTip).c_str());
+}
+
+void SettingsReporter(const std::wstring& title, const std::wstring& text) {
+    LOGI("tray: settings message box [%s]: %s", elog::Narrow(title).c_str(), elog::Narrow(text).c_str());
+}
+
+void OpenSettings() {
+    if (settings::DialogWindow()) { settings::ShowDialog(L"", nullptr); return; }
+    settings::ShowDialog(SettingsPath(), OnSettingsSaved);
+}
+
 void ShowMenu() {
     Refresh();
     HMENU m = CreatePopupMenu();
@@ -292,6 +325,7 @@ void ShowMenu() {
     AppendMenuW(m, MF_STRING, ID_FOLDER, L"Open captures folder");
     AppendMenuW(m, MF_STRING, ID_CONVERT, L"Convert last recording now");
     AppendMenuW(m, MF_STRING, ID_LOG, L"Open log");
+    AppendMenuW(m, MF_STRING, ID_SETTINGS, L"Settings...");
     AppendMenuW(m, MF_STRING, ID_CONFIG, L"Edit config");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING, ID_EXIT, L"Exit");
@@ -347,8 +381,11 @@ void ShowMenu() {
     case ID_LOG:
         OpenPath(g_live && g_st.logPath[0] ? std::wstring(g_st.logPath) : g_exeDir + L"\\logs\\eye_capture.log");
         break;
+    case ID_SETTINGS:
+        OpenSettings();
+        break;
     case ID_CONFIG: {
-        const std::wstring p = g_live && g_st.configPath[0] ? std::wstring(g_st.configPath) : ConfigPath(g_exeDir);
+        const std::wstring p = SettingsPath();
         ShellExecuteW(nullptr, L"open", L"notepad.exe", (L"\"" + p + L"\"").c_str(), nullptr, SW_SHOWNORMAL);
         break;
     }
@@ -365,8 +402,14 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == s_taskbarCreated) { Shell_NotifyIconW(NIM_ADD, &g_nid); return 0; }
     switch (msg) {
     case WM_TIMER:
+        if (wp == kTipTimer) { KillTimer(h, kTipTimer); g_savedTip.clear(); Refresh(); LOGI("tray: tooltip restored: %s", elog::Narrow(g_nid.szTip).c_str()); return 0; }
+        Refresh();
+        return 0;
     case WM_PP:
         Refresh();
+        return 0;
+    case WM_OPEN_SETTINGS:
+        OpenSettings();
         return 0;
     case WM_TRAY:
         if (LOWORD(lp) == WM_RBUTTONUP || LOWORD(lp) == WM_LBUTTONUP || LOWORD(lp) == WM_CONTEXTMENU) ShowMenu();
@@ -437,6 +480,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     // check, no tray-alive marker), so tests/status_sim.exe can drive it without touching a real game's status.
     wchar_t testShm[128];
     const bool testMode = GetEnvironmentVariableW(L"EYECAP_TRAY_TEST_SHM", testShm, 128) > 0;
+    g_testMode = testMode;
+    if (testMode) settings::SetReporter(SettingsReporter);   // tests: log what the message box would show
     HANDLE single = nullptr;
     if (!testMode) {
         single = CreateMutexW(nullptr, TRUE, L"Local\\OpenXR-EyeCapture-Tray");

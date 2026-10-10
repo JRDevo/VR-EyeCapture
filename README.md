@@ -88,7 +88,25 @@ Processing of large files takes a while; the 3D version can appear later than th
 ## Settings — `config.ini`
 
 Next to `eye_capture.dll` (or `%APPDATA%\OpenXR-EyeCapture\config.ini`, which wins if it exists). Read when a game
-starts its OpenXR instance.
+starts its OpenXR instance, and read again at the start of every recording: edits to the recording and 3D settings
+(`output_dir`, `codec`, `bitrate_mbps`, `max_fps`, `max_width`, `gamma`, `swap_eyes`, audio, head smoothing / symmetric
+fov, the `[dome]` block, `log_level`) apply to the next recording without restarting the game. Only `hotkey`,
+`require_tray` and the `[indicator]` keys are fixed until the game restarts (the `post_*` keys are read by the tray for
+every conversion). The log says what changed: `config reloaded for this recording
+from <path>: changed bitrate_mbps=20->60, ...`.
+
+### Settings window
+
+Tray menu -> **Settings...** edits the same file (the `%APPDATA%` copy if it exists, else the one next to the tray app;
+the path is shown at the top of the window): recording (hotkey with a "Press a key..." button, codec, bitrate, max fps,
+output folder, audio), 3D (projection, fill, symmetric fov, swap eyes, roll lock, head-smoothing slider, output fov scale),
+the in-headset indicator, what happens after a recording, and require_tray / log level. **Save** rewrites only the lines
+whose value changed, in place: comments, blank lines, section headers and keys the window does not know stay as they are
+(a missing key is added at the end of its section). A value the parser would reject is refused with a message and nothing
+is written. After a save the tray tooltip says "settings saved" for 5 s and `logs\tray.log` lists the changed keys. The
+change applies to the next recording, no game restart needed; the exceptions are the **hotkey**, **require_tray** and the
+**indicator** settings, which need a game restart. "Open config.ini" opens the file, "Restore defaults" fills the window with
+the built-in defaults (nothing is written until Save).
 
 | Key | Default | Meaning |
 |---|---|---|

@@ -4,6 +4,7 @@
 // Unknown keys and bad values are logged and ignored (the default is kept).
 #pragma once
 #include <string>
+#include <vector>
 #include "dome.h"
 #include "head_smoothing.h"
 #include "log.h"
@@ -60,3 +61,7 @@ void LoadConfig(const std::wstring& dllDir, Config& out);
 void ApplyConfigOverrides(const std::wstring& list, Config& c);
 // Path LoadConfig would read (may not exist): %APPDATA% copy if present, else <dllDir>\config.ini.
 std::wstring ConfigPath(const std::wstring& dllDir);
+// Parses one ini file like LoadConfig (same rules, same logging) but starts from plain defaults and ALSO collects every
+// "bad value" as a message ("line 12: bad value 'x' for key"). Returns true when the file was read with no problems.
+// Used by the tray's Settings window to validate a candidate file before saving it.
+bool ParseConfigFile(const std::wstring& path, Config& out, std::vector<std::wstring>& problems);

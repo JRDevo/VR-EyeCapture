@@ -105,6 +105,8 @@ struct SessionData {
     // autorecord (XR_EYE_CAPTURE_AUTORECORD=<seconds>, for tests / automation)
     bool autoDone = false;
     int64_t autoStopAt = 0;
+    bool auto2Done = false;
+    int64_t auto2At = 0;                 // XR_EYE_CAPTURE_AUTORECORD2: second recording (config reload test)
     // in-headset recording indicator (armed sessions with a recorder only; created on first use)
     IndicatorSettings indCfg;
     IndicatorTracker indTracker;
@@ -134,6 +136,7 @@ std::once_flag g_initOnce;
 Config g_cfg;
 std::wstring g_dllDir, g_exeName, g_logPath;
 double g_autoRecordSec = 0;
+double g_autoRecord2Sec = 0;   // test-only XR_EYE_CAPTURE_AUTORECORD2=<s>: a second autorecord ~1 s after the first stopped
 bool g_trayIpc = true;   // test-only XR_EYE_CAPTURE_TRAY_IPC=0: no control thread (no hotkey, nothing published to a tray)
 
 // ------------------------------------------------------------------------------------------------ helpers
@@ -176,6 +179,8 @@ void InitProcess() {
     if (!outOverride.empty()) g_cfg.outputDir = outOverride;
     const std::wstring autoRec = EnvW(L"XR_EYE_CAPTURE_AUTORECORD");
     if (!autoRec.empty()) g_autoRecordSec = _wtof(autoRec.c_str());
+    const std::wstring autoRec2 = EnvW(L"XR_EYE_CAPTURE_AUTORECORD2");
+    if (!autoRec2.empty()) g_autoRecord2Sec = _wtof(autoRec2.c_str());
     const std::wstring cfgOverride = EnvW(L"XR_EYE_CAPTURE_CONFIG");   // test-only: "key=value;key=value"
     if (!cfgOverride.empty()) ApplyConfigOverrides(cfgOverride, g_cfg);
     elog::SetLevel(g_cfg.logLevel);
@@ -354,6 +359,67 @@ int64_t VideoClock(SessionData* sd, XrTime displayTime) {
     return ts;
 }
 
+// Re-read config.ini at the start of each recording (the tray's Settings window edits it): only keys that can change
+// per recording are copied over; hotkey, require_tray, vr_indicator / indicator_* keep their game-start values
+// (post_* belong to the tray). Called with g_lock held, on the game thread, before the swap_eyes decision.
+void ReloadConfigForRecording() {
+    Config n;
+    LoadConfig(g_dllDir, n);
+    if (n.loadedFrom.empty()) {
+        LOGW("config reload: %s could not be read -- keeping the current settings", elog::Narrow(ConfigPath(g_dllDir)).c_str());
+        return;
+    }
+    const std::wstring outOverride = EnvW(L"XR_EYE_CAPTURE_OUTPUT_DIR");
+    if (!outOverride.empty()) n.outputDir = outOverride;
+    const std::wstring cfgOverride = EnvW(L"XR_EYE_CAPTURE_CONFIG");
+    if (!cfgOverride.empty()) ApplyConfigOverrides(cfgOverride, n);
+
+    std::string changes;
+    auto note = [&](const char* key, const std::string& o, const std::string& v) {
+        if (o == v) return;
+        if (!changes.empty()) changes += ", ";
+        changes += std::string(key) + "=" + o + "->" + v;
+    };
+    auto B = [](bool b) { return std::string(b ? "1" : "0"); };
+    auto U = [](unsigned u) { return std::to_string(u); };
+    auto F = [](float f) { char b[32]; snprintf(b, sizeof(b), "%g", f); return std::string(b); };
+    Config& c = g_cfg;
+    note("output_dir", elog::Narrow(c.outputDir), elog::Narrow(n.outputDir));
+    note("codec", c.hevc ? "hevc" : "h264", n.hevc ? "hevc" : "h264");
+    note("bitrate_mbps", U(c.bitrateMbps), U(n.bitrateMbps));
+    note("fps", U(c.fps), U(n.fps));
+    note("max_fps", U(c.maxFps), U(n.maxFps));
+    note("max_width", U(c.maxWidth), U(n.maxWidth));
+    note("gamma", c.gamma == GammaMode::Auto ? "auto" : c.gamma == GammaMode::Srgb ? "srgb" : "linear",
+         n.gamma == GammaMode::Auto ? "auto" : n.gamma == GammaMode::Srgb ? "srgb" : "linear");
+    note("swap_eyes", B(c.swapEyes), B(n.swapEyes));
+    note("audio_enabled", B(c.audioEnabled), B(n.audioEnabled));
+    note("audio_device", elog::Narrow(c.audioDevice), elog::Narrow(n.audioDevice));
+    note("symmetric_fov", B(c.head.symmetricFov), B(n.head.symmetricFov));
+    note("head_smoothing", F(c.head.smoothing), F(n.head.smoothing));
+    note("head_follow_deg", F(c.head.followDeg), F(n.head.followDeg));
+    note("roll_lock", B(c.head.rollLock), B(n.head.rollLock));
+    note("output_fov_scale", F(c.head.fovScale), F(n.head.fovScale));
+    note("edge_guard", B(c.head.edgeGuard), B(n.head.edgeGuard));
+    note("projection", DomeProjectionName(c.dome.projection), DomeProjectionName(n.dome.projection));
+    note("dome_width", U(c.dome.width), U(n.dome.width));
+    note("fill", c.dome.fill == DomeFill::LastSeen ? "last_seen" : "black", n.dome.fill == DomeFill::LastSeen ? "last_seen" : "black");
+    note("fill_fade_s", F(c.dome.fadeS), F(n.dome.fadeS));
+    note("window_feather_deg", F(c.dome.featherDeg), F(n.dome.featherDeg));
+    static const char* kLevel[] = {"error", "warn", "info", "debug"};
+    auto lv = [&](LogLevel l) { return std::string(kLevel[(int)l >= 0 && (int)l < 4 ? (int)l : 2]); };
+    note("log_level", lv(c.logLevel), lv(n.logLevel));
+
+    const bool outChanged = c.outputDir != n.outputDir;
+    c.outputDir = n.outputDir; c.hevc = n.hevc; c.bitrateMbps = n.bitrateMbps; c.fps = n.fps; c.maxFps = n.maxFps;
+    c.maxWidth = n.maxWidth; c.gamma = n.gamma; c.swapEyes = n.swapEyes; c.audioEnabled = n.audioEnabled;
+    c.audioDevice = n.audioDevice; c.head = n.head; c.dome = n.dome; c.logLevel = n.logLevel;
+    elog::SetLevel(c.logLevel);
+    if (outChanged) elog::SetMirror(c.outputDir + L"\\eye_capture.log");
+    LOGI("config reloaded for this recording from %s: %s%s", elog::Narrow(n.loadedFrom).c_str(),
+         changes.empty() ? "no changes" : "changed ", changes.c_str());
+}
+
 void CaptureImpl(SessionData* sd, const XrFrameEndInfo* info) {
     ++sd->frames;
     if (sd->lastDisplayTime && info->displayTime > sd->lastDisplayTime) {
@@ -384,6 +450,13 @@ void CaptureImpl(SessionData* sd, const XrFrameEndInfo* info) {
         sd->autoStopAt = 0;
         LOGI("record: autorecord time reached -- stopping");
         sd->rec->Stop();
+        if (g_autoRecord2Sec > 0 && !sd->auto2Done) { sd->auto2Done = true; sd->auto2At = QpcNow100ns() + 10000000; }   // second recording 1 s later
+    }
+    if (sd->auto2At && QpcNow100ns() >= sd->auto2At && sd->rec->State() == RecState::Idle && sd == g_active) {
+        sd->auto2At = 0;
+        wantStart = true;
+        sd->autoStopAt = QpcNow100ns() + (int64_t)(g_autoRecord2Sec * 1e7);
+        LOGI("XR_EYE_CAPTURE_AUTORECORD2=%.1f s: second recording", g_autoRecord2Sec);
     }
     if (!proj) {
         if (wantStart) g_startRequested = true;   // keep waiting (loading screens submit no projection layer)
@@ -436,6 +509,11 @@ void CaptureImpl(SessionData* sd, const XrFrameEndInfo* info) {
         e.orientation[2] = pv.pose.orientation.z; e.orientation[3] = pv.pose.orientation.w;
         e.position[0] = pv.pose.position.x; e.position[1] = pv.pose.position.y; e.position[2] = pv.pose.position.z;
         e.fov[0] = pv.fov.angleLeft; e.fov[1] = pv.fov.angleRight; e.fov[2] = pv.fov.angleUp; e.fov[3] = pv.fov.angleDown;
+    }
+    {
+        // a recording is about to start: pick up config.ini edits (Settings window) before swap_eyes / dome are used
+        const RecState rs0 = sd->rec->State();
+        if (wantStart && rs0 != RecState::Starting && rs0 != RecState::Recording) ReloadConfigForRecording();
     }
     if (g_cfg.swapEyes) std::swap(eyes[0], eyes[1]);   // swap_eyes = 1: right eye goes into the left half
     LogLayout(sd, info, proj, eyes[0], eyes[1]);

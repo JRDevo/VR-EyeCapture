@@ -104,29 +104,9 @@ enum class KeyResult { Ok, Bad, Unknown };
 KeyResult ApplyKey(Config& c, const std::wstring& key, std::wstring val);
 } // namespace
 
-std::wstring ConfigPath(const std::wstring& dllDir) {
-    wchar_t appdata[MAX_PATH];
-    const DWORD n = GetEnvironmentVariableW(L"APPDATA", appdata, MAX_PATH);
-    if (n > 0 && n < MAX_PATH) {
-        const std::wstring p = std::wstring(appdata) + L"\\OpenXR-EyeCapture\\config.ini";
-        if (FileExists(p)) return p;
-    }
-    return dllDir + L"\\config.ini";
-}
-
-void LoadConfig(const std::wstring& dllDir, Config& c) {
-    c = Config();
-    ParseHotkey(L"Ctrl+Shift+F10", c.hotkey);
-    c.outputDir = dllDir + L"\\captures";
-
-    const std::wstring path = ConfigPath(dllDir);
-    if (!FileExists(path)) {
-        LOGW("config: no config.ini found (looked in %%APPDATA%%\\OpenXR-EyeCapture and %s); using defaults",
-             elog::Narrow(dllDir).c_str());
-        return;
-    }
-    c.loadedFrom = path;
-
+namespace {
+// Shared by LoadConfig (problems == nullptr: log only) and ParseConfigFile (problems collected as well as logged).
+void ParseFileInto(const std::wstring& path, Config& c, std::vector<std::wstring>* problems) {
     std::ifstream f(path, std::ios::binary);
     std::stringstream ss;
     ss << f.rdbuf();
@@ -154,8 +134,48 @@ void LoadConfig(const std::wstring& dllDir, Config& c) {
         const std::string k8 = elog::Narrow(key), v8 = elog::Narrow(val);
         const KeyResult r = ApplyKey(c, key, val);
         if (r == KeyResult::Unknown) LOGW("config line %d: unknown key '%s' (ignored)", lineNo, k8.c_str());
-        else if (r == KeyResult::Bad) LOGW("config line %d: bad value '%s' for '%s' (default kept)", lineNo, v8.c_str(), k8.c_str());
+        else if (r == KeyResult::Bad) {
+            LOGW("config line %d: bad value '%s' for '%s' (default kept)", lineNo, v8.c_str(), k8.c_str());
+            if (problems) problems->push_back(L"line " + std::to_wstring(lineNo) + L": bad value '" + val + L"' for " + key);
+        }
     }
+}
+} // namespace
+
+std::wstring ConfigPath(const std::wstring& dllDir) {
+    wchar_t appdata[MAX_PATH];
+    const DWORD n = GetEnvironmentVariableW(L"APPDATA", appdata, MAX_PATH);
+    if (n > 0 && n < MAX_PATH) {
+        const std::wstring p = std::wstring(appdata) + L"\\OpenXR-EyeCapture\\config.ini";
+        if (FileExists(p)) return p;
+    }
+    return dllDir + L"\\config.ini";
+}
+
+void LoadConfig(const std::wstring& dllDir, Config& c) {
+    c = Config();
+    ParseHotkey(L"Ctrl+Shift+F10", c.hotkey);
+    c.outputDir = dllDir + L"\\captures";
+
+    const std::wstring path = ConfigPath(dllDir);
+    if (!FileExists(path)) {
+        LOGW("config: no config.ini found (looked in %%APPDATA%%\\OpenXR-EyeCapture and %s); using defaults",
+             elog::Narrow(dllDir).c_str());
+        return;
+    }
+    c.loadedFrom = path;
+
+    ParseFileInto(path, c, nullptr);
+}
+
+bool ParseConfigFile(const std::wstring& path, Config& out, std::vector<std::wstring>& problems) {
+    out = Config();
+    ParseHotkey(L"Ctrl+Shift+F10", out.hotkey);
+    problems.clear();
+    if (!FileExists(path)) { problems.push_back(L"cannot read " + path); return false; }
+    out.loadedFrom = path;
+    ParseFileInto(path, out, &problems);
+    return problems.empty();
 }
 
 void ApplyConfigOverrides(const std::wstring& list, Config& c) {
