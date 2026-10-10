@@ -8,6 +8,10 @@
 //      anything is deleted.
 //   2. flat (post_flat, default off): <name>_FLAT.mp4, left eye, 16:9 centre crop, 3840 wide (same as scripts\make_flat.ps1);
 //      dome recordings: the left eye's view straight ahead rendered flat (v360), 3840x2160.
+//  2b. 8K (post_yt8k, default off, flat SBS only; dome recordings log "skipped" and count as ok): <name>_YT8K.mkv,
+//      each eye scaled (lanczos, aspect kept) into its own 3840x4320 box and padded there, hstacked to 7680x4320, so
+//      YouTube keeps its 8K tier and bitrate; capped to 60 fps when ffprobe reports r_frame_rate > 60. hevc_nvenc
+//      150 Mbit/s VBR, else libx265 crf 18 (slow). Matroska stereo_mode=left_right, written directly (no MP4 step).
 //   3. the MP4 (and its sidecar) is deleted only if the MKV was verified and every requested step succeeded, and keep_mp4 = 0.
 // Config is re-read at the start of every job. The UI thread never blocks: it polls GetState() / PopNotice().
 #pragma once
@@ -29,7 +33,7 @@ struct Notice {
 struct State {
     bool         busy = false;
     std::wstring file;       // file name of the MP4 being processed
-    std::wstring step;       // "MKV" / "flat"
+    std::wstring step;       // "MKV" / "flat" / "8K"
     size_t       queued = 0; // waiting behind the running job
     std::wstring lastLine;   // "last: x.mkv ready" / "last: x.mp4 conversion FAILED (see tray.log)"; empty = no job yet
     bool         lastOk = true;

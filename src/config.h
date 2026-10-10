@@ -46,6 +46,7 @@ struct Config {
     bool         postMkv = true;         // post_mkv: remux the MP4 to <name>.mkv with Matroska stereo_mode=left_right
     bool         keepMp4 = false;        // keep_mp4: keep the MP4 after a verified MKV (and flat) conversion
     bool         postFlat = false;       // post_flat: also write <name>_FLAT.mp4 (left eye, 16:9, 3840 wide)
+    bool         postYt8k = false;       // post_yt8k: also write <name>_YT8K.mkv (flat SBS only: each eye in a 3840x4320 box, 7680x4320)
     std::wstring ffmpegPath;             // ffmpeg_path: empty = PATH, then WinGet packages, then <dll folder>\ffmpeg\ffmpeg.exe
     IndicatorSettings indicator;         // vr_indicator, indicator_x/_y/_z, indicator_size, indicator_opacity
     HeadSmoothingSettings head;          // head_smoothing, head_follow_deg, roll_lock, output_fov_scale, edge_guard, symmetric_fov

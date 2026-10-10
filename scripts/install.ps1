@@ -1,5 +1,8 @@
 ﻿<#
-    install.ps1 -- register the OpenXR-EyeCapture implicit API layer.
+    install.ps1 -- register the OpenXR-EyeCapture implicit API layer. DEVELOPER SCRIPT (building from source); it is not
+    in the release zip. Users just run EyeCaptureTray.exe: it registers the layer itself (one UAC prompt, the same
+    rules as this script; tray/install.cpp) and unregisters it from its tray menu. Command-line equivalent from an
+    admin prompt: EyeCaptureTray.exe --register / --unregister.
 
     Writes  HKLM\SOFTWARE\Khronos\OpenXR\1\ApiLayers\Implicit\<full path of XR_APILAYER_JRDEVO_eye_capture.json> = DWORD 0
     (0 = enabled), the same way Virtual Desktop registers its own layer, and verifies it with `reg query`.
@@ -88,6 +91,6 @@ if ($LASTEXITCODE -ne 0) { Fail 'registry verification failed' }
 Write-Host ''
 Write-Host "Installed: $json ($hive)" -ForegroundColor Green
 Write-Host 'Start any OpenXR game; press the hotkey from config.ini (default Ctrl+Shift+F10) to start / stop recording.'
-Write-Host "Optional: run $(Join-Path $root 'EyeCaptureTray.exe') for a tray icon."
+Write-Host "Required: run $(Join-Path $root 'EyeCaptureTray.exe') BEFORE the game (require_tray = 1: without the tray the layer stays dormant)."
 if ($Elevated) { Start-Sleep -Seconds 2 }
 exit 0

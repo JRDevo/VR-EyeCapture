@@ -239,6 +239,8 @@ KeyResult ApplyKey(Config& c, const std::wstring& key, std::wstring val) {
         if (ParseBool(val, b)) c.keepMp4 = b; else ok = false;
     } else if (key == L"post_flat") {
         if (ParseBool(val, b)) c.postFlat = b; else ok = false;
+    } else if (key == L"post_yt8k") {
+        if (ParseBool(val, b)) c.postYt8k = b; else ok = false;
     } else if (key == L"ffmpeg_path") {
         c.ffmpegPath = val;
     } else if (key == L"head_smoothing") {

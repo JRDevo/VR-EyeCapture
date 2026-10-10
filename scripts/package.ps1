@@ -3,8 +3,9 @@
 
     Produces dist\OpenXR-EyeCapture-v<version>.zip containing:
         eye_capture.dll, XR_APILAYER_JRDEVO_eye_capture.json, EyeCaptureTray.exe, config.ini,
-        scripts\install.ps1, scripts\uninstall.ps1, scripts\make_mkv.ps1, README.md, THIRD_PARTY.md
-    (install.ps1 run from the unzipped folder registers the json where it is.)
+        scripts\make_mkv.ps1, README.md, THIRD_PARTY.md
+    Users only unzip and run EyeCaptureTray.exe: it registers the layer itself (one UAC prompt; tray/install.cpp) and
+    unregisters it from its tray menu. scripts\install.ps1 / uninstall.ps1 are developer scripts and stay out of the zip.
 
     The version comes from project(... VERSION x.y.z) in CMakeLists.txt.
     Windows PowerShell 5.1 compatible.  powershell -ExecutionPolicy Bypass -File scripts\package.ps1
@@ -55,8 +56,6 @@ $files = @(
     @{ src = (Join-Path $root 'config.ini'); name = 'config.ini' },
     @{ src = (Join-Path $root 'README.md'); name = 'README.md' },
     @{ src = (Join-Path $root 'THIRD_PARTY.md'); name = 'THIRD_PARTY.md' },
-    @{ src = (Join-Path $root 'scripts\install.ps1'); name = 'scripts\install.ps1' },
-    @{ src = (Join-Path $root 'scripts\uninstall.ps1'); name = 'scripts\uninstall.ps1' },
     @{ src = (Join-Path $root 'scripts\make_mkv.ps1'); name = 'scripts\make_mkv.ps1' }
 )
 foreach ($f in $files) {

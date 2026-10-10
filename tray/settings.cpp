@@ -53,6 +53,7 @@ const Field kFields[] = {
     {L"post_mkv",          L"post_processing", Kind::Check, ID_POSTMKV,    nullptr},
     {L"keep_mp4",          L"post_processing", Kind::Check, ID_KEEPMP4,    nullptr},
     {L"post_flat",         L"post_processing", Kind::Check, ID_POSTFLAT,   nullptr},
+    {L"post_yt8k",         L"post_processing", Kind::Check, ID_POSTYT8K,   nullptr},
     {L"log_level",         L"debug",           Kind::Combo, ID_LOGLEVEL,   L"none|error|warn|info|debug", L"none (no logging)|error|warn|info|debug"},
 };
 
@@ -257,6 +258,7 @@ KeyValues FromConfig(const Config& c) {
     kv.emplace_back(L"post_mkv", B(c.postMkv));
     kv.emplace_back(L"keep_mp4", B(c.keepMp4));
     kv.emplace_back(L"post_flat", B(c.postFlat));
+    kv.emplace_back(L"post_yt8k", B(c.postYt8k));
     static const wchar_t* lv[] = {L"none", L"error", L"warn", L"info", L"debug"};   // index = (int)LogLevel + 1
     kv.emplace_back(L"log_level", lv[(int)c.logLevel >= -1 && (int)c.logLevel < 4 ? (int)c.logLevel + 1 : 3]);
     return kv;
@@ -471,12 +473,17 @@ const Help kHelp[] = {
     {ID_INDSIZE, L"Edge length of the dot in metres at its distance Z. At -0.8 m: 0.02 = about 1.4 degrees, 0.005 = a small dot, "
                  L"0.002 = a few pixels. Below about 0.001 it is smaller than one headset pixel and disappears. Smallest allowed 0.0005."},
     {ID_INDOPACITY, L"How solid the red dot is. 1 = fully visible, 0.3 = faint."},
-    {ID_POSTMKV, L"After a recording the tray copies the video into an .mkv with the 3D tags YouTube reads "
-                 L"(the MP4 tags are ignored by YouTube). No re-encoding; takes seconds. Upload the .mkv."},
-    {ID_KEEPMP4, L"Keep the original .mp4 next to the .mkv. Off = the .mp4 is deleted once the .mkv is made."},
-    {ID_POSTFLAT, L"Also makes a normal 2D video from the left eye (_FLAT.mp4) for viewers without 3D. "
-                  L"This re-encodes with ffmpeg and takes a while."},
-    {ID_REQTRAY, L"The layer stays asleep unless this tray app runs. Keep it on, so a game never records by surprise. Read when the game starts."},
+    {ID_YTMODE, L"What the tray makes after each recording, for uploading to YouTube.\r\n"
+                L"3D .mkv: a copy of the recording with the 3D tags YouTube reads. Takes seconds, same quality as the recording. "
+                L"YouTube shows it in its 4K tier.\r\n"
+                L"8K 3D .mkv (<name>_YT8K.mkv): each eye scaled into a 3840x4320 box, frame 7680x4320, 60 fps. "
+                L"YouTube then keeps its 8K tier and a much higher bitrate, so the 3D is far sharper on the headset. "
+                L"Re-encodes on the GPU, about twice the clip length. Flat 3D recordings only.\r\n"
+                L"Upload the .mkv file the balloon names."},
+    {ID_KEEPMP4, L"Keep the original .mp4 next to the .mkv files. Off = the .mp4 is deleted once the 3D .mkv is made and checked. "
+                 L"The .mp4 is always kept when no 3D .mkv is made."},
+    {ID_POSTFLAT, L"Also makes a normal 2D video from the left eye (<name>_FLAT.mp4) for viewers without a headset. "
+                  L"Re-encodes with ffmpeg and takes a while."},
     {ID_LOGLEVEL, L"How much logs\\eye_capture.log and logs\\tray.log write. none = nothing at all. info is normal. debug is for bug reports."},
     {ID_OPENINI, L"Opens config.ini in a text editor. The file has every setting, with comments."},
     {ID_DEFAULTS, L"Puts every field back to the built-in default. Nothing is saved until you click Save."},
@@ -531,6 +538,21 @@ std::wstring GetText(int id) {
     return b;
 }
 
+// "Make for YouTube" drop-down <-> the two hidden checks bound to post_mkv / post_yt8k.
+// 0 = 3D .mkv (mkv 1, 8k 0), 1 = 8K 3D .mkv (0, 1), 2 = both files (1, 1), 3 = nothing (0, 0)
+void YtModeFromChecks() {
+    const bool mkv = SendMessageW(Ctl(ID_POSTMKV), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    const bool k8 = SendMessageW(Ctl(ID_POSTYT8K), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    const int sel = mkv ? (k8 ? 2 : 0) : (k8 ? 1 : 3);
+    SendMessageW(Ctl(ID_YTMODE), CB_SETCURSEL, (WPARAM)sel, 0);
+}
+void ChecksFromYtMode() {
+    const int sel = (int)SendMessageW(Ctl(ID_YTMODE), CB_GETCURSEL, 0, 0);
+    if (sel < 0 || sel > 3) return;   // no selection: keep the checks as they are
+    SendMessageW(Ctl(ID_POSTMKV), BM_SETCHECK, (sel == 0 || sel == 2) ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(Ctl(ID_POSTYT8K), BM_SETCHECK, (sel == 1 || sel == 2) ? BST_CHECKED : BST_UNCHECKED, 0);
+}
+
 void SetControls(const KeyValues& kv) {
     for (const auto& e : kv) {
         const Field* f = FindField(e.first);
@@ -567,10 +589,12 @@ void SetControls(const KeyValues& kv) {
         }
         }
     }
+    YtModeFromChecks();
 }
 
 KeyValues CollectControls() {
     KeyValues kv;
+    ChecksFromYtMode();
     for (const Field& f : kFields) {
         HWND h = Ctl(f.id);
         std::wstring v;
@@ -652,7 +676,7 @@ void CommandHandler(int id, int code) {
         if (id != ID_HELPTEXT) { ShowHelp(HelpText(id)); g_hover = Ctl(id); }
         return;
     }
-    if (id == ID_PROJECTION && code == CBN_SELCHANGE) { ShowHelp(HelpText(ID_PROJECTION)); return; }
+    if ((id == ID_PROJECTION || id == ID_YTMODE) && code == CBN_SELCHANGE) { ShowHelp(HelpText(id)); return; }
     if ((id == ID_SAVE || id == ID_CANCEL || id == ID_OPENINI || id == ID_DEFAULTS || id == ID_BROWSE) && code != BN_CLICKED) return;
     switch (id) {
     case ID_SAVE: DoSave(); break;
@@ -774,14 +798,25 @@ struct Builder {
         AddTip(Make(L"BUTTON", t, WS_TABSTOP | BS_NOTIFY | (def ? BS_DEFPUSHBUTTON : BS_PUSHBUTTON), x, y, w, 24, id), HelpText(id));
     }
     void Group(int x, int y, int w, int hgt, const wchar_t* t) { Make(L"BUTTON", t, BS_GROUPBOX, x, y, w, hgt, -1); }
+    // A check box bound to a config key but not shown (the "Make for YouTube" drop-down drives it): no WS_VISIBLE, no tab stop, 0x0.
+    void HiddenCheck(int id) {
+        HWND c = CreateWindowExW(0, L"BUTTON", L"", WS_CHILD | BS_AUTOCHECKBOX, 0, 0, 0, 0, parent, (HMENU)(INT_PTR)id,
+                                 GetModuleHandleW(nullptr), nullptr);
+        if (g_font) SendMessageW(c, WM_SETFONT, (WPARAM)g_font, TRUE);
+    }
     // The items come from the Field (display labels when it has them): the values written to config.ini are mapped by INDEX.
     void Combo(int id, int x, int y, int w) {
         const Field* f = FindFieldById(id);
+        ComboItems(id, x, y, w, f ? (f->labels ? f->labels : f->options) : nullptr);
+    }
+    // Explicit '|'-separated display items, for a combo that is not a config Field (ID_YTMODE).
+    void Combo(int id, int x, int y, int w, const wchar_t* items) { ComboItems(id, x, y, w, items); }
+    void ComboItems(int id, int x, int y, int w, const wchar_t* items) {
         HWND c = Make(L"COMBOBOX", L"", WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, x, y, w, 120, id);
         AddTip(c, HelpText(id));
-        if (!f) return;
+        if (!items) return;
         SendMessageW(c, CB_SETDROPPEDWIDTH, (WPARAM)(w > 190 ? w : 190), 0);
-        const std::wstring o = f->labels ? f->labels : f->options;
+        const std::wstring o = items;
         size_t pos = 0;
         while (pos <= o.size()) {
             size_t bar = o.find(L'|', pos);
@@ -875,19 +910,24 @@ int BuildControls(HWND dlg) {
     y += 22 + 2 * row + 6 + 6;
 
     // ---- after recording
-    b.Group(gx, y, gw, 22 + row + 6, L"After recording");
+    b.Group(gx, y, gw, 22 + 2 * row + 6, L"After recording");
     r = y + 20;
-    b.Check(ID_POSTMKV, ix, r, 170, L"Make a .mkv (YouTube 3D)");
-    b.Check(ID_KEEPMP4, ix + 190, r, 150, L"Keep the .mp4");
-    b.Check(ID_POSTFLAT, ix + 350, r, 190, L"Also make a flat 2D copy");
-    y += 22 + row + 6 + 6;
+    b.Label(ix, r, 105, L"Make for YouTube", ID_YTMODE);
+    b.Combo(ID_YTMODE, ix + 110, r, 290,
+            L"3D .mkv (fast, no re-encode)|8K 3D .mkv (sharper on YouTube, slow)|both files|nothing");
+    b.Check(ID_KEEPMP4, ix + 410, r, 140, L"Keep the original .mp4");
+    r += row;
+    b.Check(ID_POSTFLAT, ix, r, 420, L"Also make a flat 2D copy (for people without a headset)");
+    b.HiddenCheck(ID_POSTMKV);     // bound to post_mkv / post_yt8k, set from / read into the drop-down
+    b.HiddenCheck(ID_POSTYT8K);
+    y += 22 + 2 * row + 6 + 6;
 
     // ---- advanced
     b.Group(gx, y, gw, 22 + row + 6, L"Advanced");
     r = y + 20;
-    b.Check(ID_REQTRAY, ix, r, 330, L"Only record while this tray app is running");
-    b.Label(ix + 370, r, 65, L"Log level", ID_LOGLEVEL);
-    b.Combo(ID_LOGLEVEL, ix + 440, r, 80);
+    b.HiddenCheck(ID_REQTRAY);   // require_tray stays a config.ini key (default 1); the tray is required anyway, so no checkbox
+    b.Label(ix, r, 65, L"Log level", ID_LOGLEVEL);
+    b.Combo(ID_LOGLEVEL, ix + 70, r, 160);
     y += 22 + row + 6 + 6;
 
     // ---- description panel (follows the mouse / keyboard focus, see Hover / ShowHelp)
@@ -897,7 +937,7 @@ int BuildControls(HWND dlg) {
     g_shown = kOverview;
     y += 20 + helpH + 8 + 6;
 
-    b.Make(L"STATIC", L"Saving applies to the NEXT recording. The hotkey, 'only record while the tray runs' and the indicator are read when the game starts: restart the game for those.",
+    b.Make(L"STATIC", L"Saving applies to the NEXT recording. The hotkey and the indicator are read when the game starts: restart the game for those.",
            SS_LEFT, gx, y, gw, 32, -1);
     y += 38;
     b.Button(ID_OPENINI, gx, y, 110, L"Open config.ini");

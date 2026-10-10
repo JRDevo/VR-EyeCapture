@@ -227,6 +227,8 @@ int TestDrive(DWORD pid, bool leaveSlider) {
     SetEdit(d, settings::ID_BITRATE, L"20");
     SendMessageW(GetDlgItem(d, settings::ID_PROJECTION), CB_SETCURSEL, 0, 0);          // flat
     SendMessageW(GetDlgItem(d, settings::ID_SWAP), BM_SETCHECK, BST_CHECKED, 0);
+    // "Make for YouTube" drop-down: item 2 = "both files" (post_mkv = 1 and post_yt8k = 1; run_settings.ps1 checks the saved file)
+    SendMessageW(GetDlgItem(d, settings::ID_YTMODE), CB_SETCURSEL, 2, 0);
     if (!leaveSlider) SendMessageW(GetDlgItem(d, settings::ID_SMOOTH), TBM_SETPOS, TRUE, 7);   // 0.35 ("noslider": untouched keeps the file text)
     SendMessageW(GetDlgItem(d, settings::ID_SAVE), BM_CLICK, 0, 0);
     Check(WaitDialog(pid, false) == nullptr, "good values: Save closed the window");

@@ -8,7 +8,10 @@ Project memory lives in the Claude workspace for this folder (`~/.claude/project
 - CMake is NOT on PATH. Use:
   `"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" --build build --config Release`
 - 0 warnings in our sources is the bar. Tests: `tests\run_selftests.ps1`, `tests\run_e2e.ps1`, `tests\run_jitter.ps1`,
-  `tests\run_dome.ps1`, `tests\run_settings.ps1`, `tests\run_reload.ps1`, plus the unit-test exes in `build\Release`.
+  `tests\run_dome.ps1`, `tests\run_settings.ps1`, `tests\run_reload.ps1`, `tests\run_yt8k.ps1` (tray 8K step, CPU only),
+  `tests\run_install.ps1` (registration:
+  `install_test.exe` + the tray's `--register/--unregister/--status` and GUI flow on test keys under
+  `HKCU\Software\OpenXR-EyeCapture-Test`; no admin, run it NON-elevated), plus the unit-test exes in `build\Release`.
 - NEVER run GPU/encoder tests while `amtrucks.exe`, `eurotrucks2.exe` or `obs64.exe` run (`Get-Process` first) —
   it stutters the user's VR stream. Test scripts set `XR_EYE_CAPTURE_REQUIRE_TRAY=0` and `XR_EYE_CAPTURE_TRAY_IPC=0`
   so a running tray does not convert test files.
@@ -18,9 +21,11 @@ Project memory lives in the Claude workspace for this folder (`~/.claude/project
 - The game loads the ROOT copies: `E:\OpenXR-EyeCapture\eye_capture.dll` + json + `EyeCaptureTray.exe`.
   Refresh them from `build\Release` after a build — the DLL only when no game has it loaded, the tray only when
   no `EyeCaptureTray` process runs (close it, copy, start it again).
-- Registry: the layer is registered in **HKLM only** (`scripts\install.ps1`, needs UAC). ETS2/ATS use their own
-  built-in OpenXR loader that reads only HKLM. Never also register HKCU — the official loader then loads the layer
-  twice and crashes.
+- Registry: the layer is registered in **HKLM only**, written by `EyeCaptureTray.exe --register` running elevated (the
+  tray offers it at start / from its menu with one UAC prompt; `--unregister` removes it; `tray/install.cpp`). ETS2/ATS
+  use their own built-in OpenXR loader that reads only HKLM. Never also register HKCU — the official loader then loads
+  the layer twice and crashes (the tray removes HKCU copies at every start). `scripts\install.ps1` / `uninstall.ps1`
+  are dev-only (not in the zip); never run `--register` / `install.ps1` from a session without asking (UAC + HKLM).
 
 ## Git
 - Branch `master`, remote `origin` = GitHub `JRDevo/OpenXR-EyeCapture` (public). Commit with `-c user.name=JRDevo -c user.email=42043842+JRDevo@users.noreply.github.com`. Push only when the user asks.

@@ -42,7 +42,7 @@ if (Test-Path $t) { Remove-Item -Recurse -Force $t }
 New-Item -ItemType Directory (Join-Path $t 'appdata\OpenXR-EyeCapture') | Out-Null
 Copy-Item (Join-Path $bin 'EyeCaptureTray.exe') $t
 $ini = Join-Path $t 'appdata\OpenXR-EyeCapture\config.ini'
-(Get-Content (Join-Path $root 'config.ini') -Raw) -replace '(?m)^head_smoothing = [\d.]+', 'head_smoothing = 0.57' -replace '(?m)^projection = \S+', 'projection = vr180' | Set-Content $ini -NoNewline -Encoding utf8
+(Get-Content (Join-Path $root 'config.ini') -Raw) -replace '(?m)^head_smoothing = [\d.]+', 'head_smoothing = 0.57' -replace '(?m)^projection = \S+', 'projection = vr180' -replace '(?m)^post_mkv = \S+', 'post_mkv = 1' -replace '(?m)^post_yt8k = \S+', 'post_yt8k = 0' | Set-Content $ini -NoNewline -Encoding utf8
 Copy-Item $ini (Join-Path $t 'before.ini')
 $oldAppdata = $env:APPDATA
 try {
@@ -56,7 +56,7 @@ try {
     Write-Host '--- tray.log (settings lines):'
     $log -split "`r?`n" | Where-Object { $_ -match 'settings|tooltip' -or $_ -match '^\s*line \d+' } | ForEach-Object { Write-Host "  $_" }
     Step 'bad value went through the reporter (not a real message box)' ($log -match "settings message box \[Settings -- not saved\][\s\S]*bad value '7' for output_fov_scale")
-    Step 'tray.log lists the changed keys' ($log -match 'settings saved to .*changed hotkey ScrollLock->F7, bitrate_mbps 0->20, swap_eyes 0->1, output_fov_scale 0\.9->0\.85, projection vr180->flat')
+    Step 'tray.log lists the changed keys' ($log -match 'settings saved to .*changed hotkey ScrollLock->F7, bitrate_mbps 0->20, swap_eyes 0->1, output_fov_scale 0\.9->0\.85, projection vr180->flat, post_yt8k 0->1')
     Step 'tooltip says settings saved' ($log -match "tooltip now: settings saved \S+ applies to the next recording")
     Step 'tooltip restored after 5 s' ($log -match 'tooltip restored: OpenXR-EyeCapture: no OpenXR game running')
 } finally {
@@ -66,5 +66,7 @@ try {
 $b = Get-Content (Join-Path $t 'before.ini'); $a = Get-Content $ini
 $d = @(Compare-Object $b $a)
 Write-Host 'diff of the scratch tray config (before => after):'; $d | ForEach-Object { Write-Host ("  {0} {1}" -f $_.SideIndicator, $_.InputObject) }
-Step 'window diff is exactly the 5 changed lines (slider untouched: head_smoothing 0.57 kept)' ($d.Count -eq 10)
+Step 'window diff is exactly the 6 changed lines (slider untouched: head_smoothing 0.57 kept)' ($d.Count -eq 12)
+$aText = Get-Content $ini -Raw
+Step 'combo "both files": saved file has post_mkv = 1 and post_yt8k = 1' (($aText -match '(?m)^post_yt8k = 1\s*$') -and ($aText -match '(?m)^post_mkv = 1\s*$'))
 if ($fail) { exit 1 } else { exit 0 }

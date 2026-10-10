@@ -48,7 +48,9 @@ enum : int {
     ID_INDICATOR, ID_INDSIZE, ID_INDOPACITY, ID_POSTMKV, ID_KEEPMP4, ID_POSTFLAT, ID_REQTRAY, ID_LOGLEVEL,
     ID_SAVE, ID_CANCEL, ID_OPENINI, ID_DEFAULTS,
     ID_HELPTEXT,  // the read-only "What does this do?" panel (appended: existing ids do not move)
-    ID_INDX, ID_INDY, ID_INDZ   // indicator position (appended after ID_HELPTEXT for the same reason)
+    ID_INDX, ID_INDY, ID_INDZ,  // indicator position (appended after ID_HELPTEXT for the same reason)
+    ID_POSTYT8K,                // hidden check bound to post_yt8k (appended for the same reason)
+    ID_YTMODE                   // "Make for YouTube" drop-down: drives the hidden ID_POSTMKV / ID_POSTYT8K checks
 };
 extern const wchar_t* const kWindowTitle;
 

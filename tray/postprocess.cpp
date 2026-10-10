@@ -77,6 +77,38 @@ std::string JsonString(const std::string& j, const char* key) {
     return e == std::string::npos ? "" : j.substr(p + 1, e - p - 1);
 }
 
+// Value of a "key=value" line in ffprobe's `-of default=nw=1` output ("" if absent).
+std::string ProbeValue(const std::string& out, const char* key) {
+    const std::string k = std::string(key) + "=";
+    size_t p = 0;
+    while ((p = out.find(k, p)) != std::string::npos) {
+        if (p == 0 || out[p - 1] == '\n' || out[p - 1] == '\r') {
+            const size_t s = p + k.size();
+            const size_t e = out.find_first_of("\r\n", s);
+            return out.substr(s, e == std::string::npos ? std::string::npos : e - s);
+        }
+        p += k.size();
+    }
+    return "";
+}
+
+// "66/1", "60000/1001" or "30" -> frames per second. False for "0/0" and garbage.
+bool ParseRate(const std::string& s, double& fps) {
+    double num = 0.0, den = 1.0;
+    const size_t slash = s.find('/');
+    char* end = nullptr;
+    num = strtod(s.c_str(), &end);
+    if (end == s.c_str()) return false;
+    if (slash != std::string::npos) {
+        const char* d = s.c_str() + slash + 1;
+        den = strtod(d, &end);
+        if (end == d) return false;
+    }
+    if (!(num > 0.0) || !(den > 0.0)) return false;
+    fps = num / den;
+    return true;
+}
+
 } // namespace
 
 Recording ReadSidecar(const std::wstring& mp4) {
@@ -285,10 +317,11 @@ void Processor::RunJob(const std::wstring& mp4) {
 
     Config cfg;
     LoadConfig(exeDir_, cfg);
-    LOGI("job: start %s (post_mkv=%d post_flat=%d keep_mp4=%d)", N(name).c_str(), cfg.postMkv, cfg.postFlat, cfg.keepMp4);
-    if (!cfg.postMkv && !cfg.postFlat) {
-        LOGI("job: post_mkv and post_flat are both 0 -- nothing to do");
-        Notice n{L"Nothing to convert", L"post_mkv and post_flat are both 0 in config.ini.", false};
+    LOGI("job: start %s (post_mkv=%d post_flat=%d post_yt8k=%d keep_mp4=%d)", N(name).c_str(), cfg.postMkv, cfg.postFlat,
+         cfg.postYt8k, cfg.keepMp4);
+    if (!cfg.postMkv && !cfg.postFlat && !cfg.postYt8k) {
+        LOGI("job: post_mkv, post_flat and post_yt8k are all 0 -- nothing to do");
+        Notice n{L"Nothing to convert", L"post_mkv, post_flat and post_yt8k are all 0 in config.ini.", false};
         Finish(true, L"", &n);
         return;
     }
@@ -321,9 +354,53 @@ void Processor::RunJob(const std::wstring& mp4) {
     const std::wstring base = StripExt(mp4);
     const std::wstring mkv = base + L".mkv";
     const std::wstring flat = base + L"_FLAT.mp4";
+    const std::wstring yt8k = base + L"_YT8K.mkv";
     std::string out;
     DWORD code = 0;
-    bool mkvOk = false, flatOk = false;
+    bool mkvOk = false, flatOk = false, yt8kOk = false;
+
+    // hevc_nvenc detection, shared by the flat and the 8K step: asked once per job, only when a re-encode step runs.
+    int nvencState = -1;   // -1 = not asked yet
+    auto haveNvenc = [&]() {
+        if (nvencState < 0) {
+            std::string encOut;
+            DWORD encCode = 0;
+            bool nv = RunFfmpeg(Q(ff) + L" -hide_banner -encoders", encOut, encCode) && encCode == 0 &&
+                      encOut.find("hevc_nvenc") != std::string::npos;
+            wchar_t noNv[8];
+            if (GetEnvironmentVariableW(L"EYECAP_TRAY_TEST_NO_NVENC", noNv, 8) > 0) {   // test-only: never touch the GPU
+                LOGI("job: EYECAP_TRAY_TEST_NO_NVENC is set -- hevc_nvenc not used (test)");
+                nv = false;
+            }
+            nvencState = nv ? 1 : 0;
+        }
+        return nvencState == 1;
+    };
+    // One re-encode: `common + encNv + tail` with hevc_nvenc when available, else (or when it fails) `common + encSw + tail`.
+    // `swWarn` (optional) is logged as a warning before the software encoder runs. Afterwards `ran` / `code` / `out`
+    // describe the last attempt. Returns false when the tray is exiting (`outFile` deleted, nothing else to do).
+    auto encode = [&](const char* step, const std::wstring& common, const std::wstring& encNv, const std::wstring& encSw,
+                      const char* swName, const char* swWarn, const std::wstring& tail, const std::wstring& outFile, bool& ran) {
+        ran = false;
+        code = (DWORD)-1;
+        if (haveNvenc()) {
+            const std::wstring cmd = common + encNv + tail;
+            LOGI("job: %s cmd (hevc_nvenc): %s", step, N(cmd).c_str());
+            ran = RunFfmpeg(cmd, out, code);
+            if (quitting()) { DeleteFileW(outFile.c_str()); LOGW("job: cancelled (tray exiting)"); return false; }
+            if (!ran || code != 0) LOGW("job: hevc_nvenc failed (%s) -- retrying with %s", N(FirstLine(out)).c_str(), swName);
+        } else {
+            LOGI("job: hevc_nvenc not available -- using %s", swName);
+        }
+        if (!ran || code != 0) {
+            if (swWarn) LOGW("job: %s", swWarn);
+            const std::wstring cmd = common + encSw + tail;
+            LOGI("job: %s cmd (%s): %s", step, swName, N(cmd).c_str());
+            ran = RunFfmpeg(cmd, out, code);
+            if (quitting()) { DeleteFileW(outFile.c_str()); LOGW("job: cancelled (tray exiting)"); return false; }
+        }
+        return true;
+    };
 
     if (cfg.postMkv) {
         SetStep(L"MKV");
@@ -357,10 +434,6 @@ void Processor::RunJob(const std::wstring& mp4) {
 
     if (cfg.postFlat) {
         SetStep(L"flat");
-        bool nvenc = false;
-        if (RunFfmpeg(Q(ff) + L" -hide_banner -encoders", out, code) && code == 0) nvenc = out.find("hevc_nvenc") != std::string::npos;
-        wchar_t noNv[8];
-        if (GetEnvironmentVariableW(L"EYECAP_TRAY_TEST_NO_NVENC", noNv, 8) > 0) nvenc = false;   // test-only: never touch the GPU
         // Flat SBS: left half, 16:9 centre crop. Dome: the left eye's view straight ahead as a normal 16:9 picture,
         // 100 x 67.7 degrees (v360; vr180 = left half, half-equirect; vr360 = top half, full equirect).
         std::wstring vf = L"crop=iw/2:ih:0:0,crop=iw:min(ih\\,iw*9/16),scale=3840:-2";
@@ -374,22 +447,7 @@ void Processor::RunJob(const std::wstring& mp4) {
         const std::wstring encX = L"-c:v libx264 -preset medium -crf 18";
         const ULONGLONG s0 = GetTickCount64();
         bool ran = false;
-        code = (DWORD)-1;
-        if (nvenc) {
-            const std::wstring cmd = common + encNv + tail;
-            LOGI("job: flat cmd (hevc_nvenc): %s", N(cmd).c_str());
-            ran = RunFfmpeg(cmd, out, code);
-            if (quitting()) { DeleteFileW(flat.c_str()); LOGW("job: cancelled (tray exiting)"); return; }
-            if (!ran || code != 0) LOGW("job: hevc_nvenc failed (%s) -- retrying with libx264", N(FirstLine(out)).c_str());
-        } else {
-            LOGI("job: hevc_nvenc not listed by ffmpeg -- using libx264");
-        }
-        if (!ran || code != 0) {
-            const std::wstring cmd = common + encX + tail;
-            LOGI("job: flat cmd (libx264): %s", N(cmd).c_str());
-            ran = RunFfmpeg(cmd, out, code);
-            if (quitting()) { DeleteFileW(flat.c_str()); LOGW("job: cancelled (tray exiting)"); return; }
-        }
+        if (!encode("flat", common, encNv, encX, "libx264", nullptr, tail, flat, ran)) return;
         const double sec = (GetTickCount64() - s0) / 1000.0;
         unsigned long long flatSize = 0;
         if (!ran || code != 0 || !FileSize(flat, flatSize) || flatSize == 0) {
@@ -402,6 +460,84 @@ void Processor::RunJob(const std::wstring& mp4) {
         }
         flatOk = true;
         LOGI("job: flat step ok in %.1f s (%llu bytes) -> %s", sec, flatSize, N(FileName(flat)).c_str());
+    }
+
+    // 8K copy for YouTube: YouTube puts a 4640 / 5804 wide SBS frame in its 4K tier (1920 per eye, low bitrate);
+    // 7680x4320 gets the 8K tier and about 3x the bitrate. Each eye is scaled into its own 3840x4320 box and padded
+    // there, so both eyes get exactly the same geometry (padding the whole frame would shift the eyes against each other).
+    if (cfg.postYt8k) {
+        SetStep(L"8K");
+        if (rec.Dome()) {
+            LOGI("job: 8K step skipped: %s recordings are already full-frame", N(rec.Name()).c_str());
+        } else {
+            int eyeW = 3840, eyeH = 4320;
+            wchar_t sz[32];
+            if (GetEnvironmentVariableW(L"EYECAP_TRAY_TEST_YT8K_SIZE", sz, 32) > 0) {   // test-only: small output
+                int w = 0, h = 0;
+                if (swscanf_s(sz, L"%dx%d", &w, &h) == 2 && w >= 16 && h >= 16 && w <= 16384 && h <= 16384 && w % 4 == 0 && h % 2 == 0) {
+                    eyeW = w / 2;
+                    eyeH = h;
+                    LOGW("job: 8K step: EYECAP_TRAY_TEST_YT8K_SIZE=%s (test) -- frame %dx%d, each eye in a %dx%d box",
+                         N(sz).c_str(), w, h, eyeW, eyeH);
+                } else {
+                    LOGW("job: 8K step: EYECAP_TRAY_TEST_YT8K_SIZE=%s ignored (want <w>x<h>, w a multiple of 4, h even)", N(sz).c_str());
+                }
+            }
+            // YouTube plays at most 60 fps: cap a faster source (72 / 90 Hz headsets) with the fps filter. ffprobe sits
+            // next to ffmpeg in every ffmpeg build; without it the frame rate is left alone.
+            std::wstring fpsCap;
+            const size_t slash = ff.find_last_of(L"\\/");
+            const std::wstring probe = (slash == std::wstring::npos ? std::wstring() : ff.substr(0, slash + 1)) + L"ffprobe.exe";
+            if (!FileExists(probe)) {
+                LOGW("job: 8K step: %s not found -- frame rate not checked (no 60 fps cap)", N(probe).c_str());
+            } else {
+                const std::wstring pcmd = Q(probe) + L" -v error -select_streams v:0 -show_entries stream=r_frame_rate,avg_frame_rate"
+                                                     L" -of default=nw=1 " + Q(mp4);
+                double fps = 0.0;
+                if (RunFfmpeg(pcmd, out, code) && code == 0 && ParseRate(ProbeValue(out, "r_frame_rate"), fps)) {
+                    const std::string r = ProbeValue(out, "r_frame_rate"), a = ProbeValue(out, "avg_frame_rate");
+                    if (fps > 60.0) {
+                        fpsCap = L"fps=60,";
+                        LOGI("job: 8K step: source r_frame_rate %s (%.3f fps, avg %s) > 60 -- capped to 60 fps (YouTube plays at most 60)",
+                             r.c_str(), fps, a.c_str());
+                    } else {
+                        LOGI("job: 8K step: source r_frame_rate %s (%.3f fps, avg %s) <= 60 -- frame rate kept", r.c_str(), fps, a.c_str());
+                    }
+                } else {
+                    if (quitting()) { LOGW("job: cancelled (tray exiting)"); return; }
+                    LOGW("job: 8K step: ffprobe could not read the frame rate (%s) -- no 60 fps cap", N(FirstLine(out)).c_str());
+                }
+            }
+            // The fps cap goes first: same result as capping at the end, and the scalers then see only the kept frames.
+            const std::wstring box = std::to_wstring(eyeW) + L":" + std::to_wstring(eyeH);
+            const std::wstring fit = L"scale=" + box + L":force_original_aspect_ratio=decrease:force_divisible_by=2:flags=lanczos,"
+                                     L"pad=" + box + L":-1:-1:color=black";
+            const std::wstring vf = fpsCap + L"split=2[l][r];[l]crop=iw/2:ih:0:0," + fit + L"[L];[r]crop=iw/2:ih:iw/2:0," + fit +
+                                    L"[R];[L][R]hstack=inputs=2,format=yuv420p";
+            const std::wstring common = Q(ff) + L" -hide_banner -loglevel error -y -i " + Q(mp4) + L" -map 0:v:0 -map 0:a? -vf \"" +
+                                        vf + L"\" ";
+            const std::wstring tail = L" -c:a copy -max_muxing_queue_size 4096 -metadata:s:v:0 stereo_mode=left_right " + Q(yt8k);
+            const std::wstring encNv = L"-c:v hevc_nvenc -preset p5 -rc vbr -tier high -b:v 150M -maxrate 200M -bufsize 300M";
+            const std::wstring encX = L"-c:v libx265 -preset medium -crf 18";
+            const ULONGLONG s0 = GetTickCount64();
+            bool ran = false;
+            if (!encode("8K", common, encNv, encX, "libx265",
+                        "8K step: no working hevc_nvenc -- libx265 at 8K is slow (many times the clip length)",
+                        tail, yt8k, ran))
+                return;
+            const double sec = (GetTickCount64() - s0) / 1000.0;
+            unsigned long long ySize = 0;
+            if (!ran || code != 0 || !FileSize(yt8k, ySize) || ySize == 0) {
+                DeleteFileW(yt8k.c_str());
+                std::wstring why = FirstLine(out);
+                if (why.empty()) why = L"ffmpeg exit code " + std::to_wstring(code);
+                LOGE("job: 8K step FAILED after %.1f s: %s", sec, N(why).c_str());
+                fail(L"8K version: " + why);   // the MKV / flat file (if made) stay, and so does the MP4
+                return;
+            }
+            yt8kOk = true;
+            LOGI("job: 8K step ok in %.1f s (%llu bytes) -> %s", sec, ySize, N(FileName(yt8k)).c_str());
+        }
     }
 
     // Delete the MP4 only when the verified MKV replaces it and every requested step worked.
@@ -419,10 +555,19 @@ void Processor::RunJob(const std::wstring& mp4) {
         }
     }
 
-    const std::wstring mainOut = mkvOk ? FileName(mkv) : FileName(flat);
     const std::wstring ready = rec.Dome() ? std::wstring(L"Ready for YouTube (") + rec.Name() + L"): " : std::wstring(L"Ready for YouTube: ");
-    std::wstring text = mkvOk ? ready + FileName(mkv) : L"Flat 2D version ready: " + FileName(flat);
-    if (mkvOk && flatOk) text += L"\nFlat 2D: " + FileName(flat);
+    std::wstring mainOut, text;
+    if (mkvOk) { mainOut = FileName(mkv); text = ready + mainOut; }
+    else if (yt8kOk) { mainOut = FileName(yt8k); text = L"Ready for YouTube (8K): " + mainOut; }
+    else if (flatOk) { mainOut = FileName(flat); text = L"Flat 2D version ready: " + mainOut; }
+    if (mkvOk && yt8kOk) text += L"\nYouTube 8K: " + FileName(yt8k);
+    if (flatOk && (mkvOk || yt8kOk)) text += L"\nFlat 2D: " + FileName(flat);
+    if (mainOut.empty()) {   // only the 8K step was requested and it was skipped (dome recording): nothing was made
+        LOGI("job: done %s in %.1f s -- nothing made (8K step skipped)", N(name).c_str(), (GetTickCount64() - t0) / 1000.0);
+        Notice skip{L"Nothing to convert", name + L"\n" + rec.Name() + L" recordings are already full-frame; the 8K copy is for flat 3D recordings.", false};
+        Finish(true, L"last: " + name + L" (8K copy skipped: " + rec.Name() + L")", &skip);
+        return;
+    }
     Notice n{L"OpenXR-EyeCapture", text, false};
     LOGI("job: done %s in %.1f s%s", N(mainOut).c_str(), (GetTickCount64() - t0) / 1000.0, N(deleted).c_str());
     Finish(true, L"last: " + mainOut + L" ready", &n);

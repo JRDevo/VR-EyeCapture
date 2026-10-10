@@ -64,8 +64,8 @@ add_custom_command(TARGET eye_capture POST_BUILD
             ${CMAKE_CURRENT_BINARY_DIR}/${EYE_LAYER_NAME}.json
             $<TARGET_FILE_DIR:eye_capture>/${EYE_LAYER_NAME}.json)
 
-# --- tray control app (optional; the layer works without it) ---
-add_executable(EyeCaptureTray WIN32 tray/tray.cpp tray/postprocess.cpp tray/settings.cpp)
+# --- tray control app (required: the layer is dormant without it; it also registers the layer, tray/install.cpp) ---
+add_executable(EyeCaptureTray WIN32 tray/tray.cpp tray/postprocess.cpp tray/settings.cpp tray/install.cpp)
 target_compile_options(EyeCaptureTray PRIVATE ${EYE_WARN_FLAGS})
 target_link_libraries(EyeCaptureTray PRIVATE eye_capture_core comctl32)
 target_include_directories(EyeCaptureTray PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tray)
@@ -95,6 +95,12 @@ if (EYE_BUILD_TESTS)
     target_compile_options(settings_test PRIVATE ${EYE_WARN_FLAGS})
     target_link_libraries(settings_test PRIVATE eye_capture_core comctl32)
     target_include_directories(settings_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tray)
+
+    # Layer registration (tray/install.cpp) on test keys under HKCU (no admin, never the real OpenXR keys).
+    add_executable(install_test tests/install_test.cpp tray/install.cpp)
+    target_compile_options(install_test PRIVATE ${EYE_WARN_FLAGS})
+    target_link_libraries(install_test PRIVATE eye_capture_core advapi32)
+    target_include_directories(install_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tray)
 
     # Head-smoothing filter unit test (CPU only).
     add_executable(head_smoothing_test tests/head_smoothing_test.cpp)

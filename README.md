@@ -12,6 +12,21 @@ game files are touched.
 First tested target: **Euro Truck Simulator 2 / American Truck Simulator** (OpenXR beta, Direct3D 11) on Virtual
 Desktop. Any other OpenXR game that renders with Direct3D 11 or Direct3D 12 should work the same way.
 
+## Download
+
+Get the latest `OpenXR-EyeCapture-v<version>.zip` from the
+[Releases page](https://github.com/JRDevo/OpenXR-EyeCapture/releases). To build it yourself, see "Building from source".
+
+## What is new
+
+- **Settings window** in the tray menu: every option with a plain-English help text, no need to edit `config.ini`.
+- **One-click registration**: the tray app registers the layer for you (one UAC prompt), also from its menu.
+- **8K YouTube copy** (`post_yt8k`): a sharper 3D file for YouTube's 8K tier.
+- **VR180 / VR360 dome mode** (experimental).
+- **Head-motion smoothing** and a **symmetric view** for comfortable 3D.
+- **In-headset recording dot** that never appears in the video.
+- Config changes apply to the next recording, no game restart.
+
 ## Requirements
 
 - Windows 10 (1703 or newer) or Windows 11, 64-bit.
@@ -24,13 +39,21 @@ Desktop. Any other OpenXR game that renders with Direct3D 11 or Direct3D 12 shou
 
 1. Unzip `OpenXR-EyeCapture-v<version>.zip` to a folder you keep (the layer is loaded from there), for example
    `C:\Tools\OpenXR-EyeCapture`.
-2. Right-click `scripts\install.ps1` → *Run with PowerShell* (or `powershell -ExecutionPolicy Bypass -File scripts\install.ps1`).
-   It asks for administrator rights once and registers the layer for all OpenXR apps:
-   `HKLM\SOFTWARE\Khronos\OpenXR\1\ApiLayers\Implicit\<folder>\XR_APILAYER_JRDEVO_eye_capture.json = 0`.
-   No admin rights? `install.ps1 -CurrentUser` registers it for your user only (HKCU; ignored by games run as admin).
-3. Put a shortcut to `EyeCaptureTray.exe` in `shell:startup` (Win+R, `shell:startup`) so it always runs. See "How it works".
+2. Run `EyeCaptureTray.exe`. The first time it asks *"OpenXR-EyeCapture is not registered for VR games yet. Register it
+   now?"*: click **Yes** and accept the one Windows administrator (UAC) prompt. That registers the layer for all OpenXR
+   apps: `HKLM\SOFTWARE\Khronos\OpenXR\1\ApiLayers\Implicit\<folder>\XR_APILAYER_JRDEVO_eye_capture.json = 0`
+   (any older registration from another folder is replaced). Clicked No? Right-click the tray icon →
+   **Register for VR games...** whenever you are ready; until then the tooltip says "Not registered for VR games".
+   Moved the folder? Start the tray from the new folder and it offers to re-register from there.
+3. Optional: put a shortcut to `EyeCaptureTray.exe` in `shell:startup` (Win+R, `shell:startup`) so it always runs
+   (it must run before the game, see "How it works").
 
-Uninstall: `scripts\uninstall.ps1` (removes the registration; files and recordings stay).
+Uninstall: right-click the tray icon → **Unregister from VR games...** (one UAC prompt), exit the tray app and delete
+the folder (recordings in `captures\` stay until you delete them).
+
+Command-line forms (from an administrator prompt): `EyeCaptureTray.exe --register` / `--unregister` (exit code 0 = done,
+5 = no administrator rights); `EyeCaptureTray.exe --status` prints `registered=yes|no|stale` among the status fields.
+`scripts\install.ps1` / `uninstall.ps1` are only for building from source (see [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)).
 
 ## How it works: start the tray app first
 
@@ -41,6 +64,8 @@ session and arms itself only if it is there. The decision is made once per sessi
 is already in VR does not arm it: restart the game (or its VR session). Closing the tray while a game is already armed
 does not stop the layer; the hotkey keeps working until the game ends.
 Set `require_tray = 0` in `config.ini` to always arm without the tray (old behaviour, hotkey only).
+The tray app also owns the registration: at start it checks that the layer is registered for its own folder (and removes
+any per-user HKCU copy, which would make some loaders load the layer twice) and offers to register it if not.
 
 ## Record
 
@@ -84,6 +109,12 @@ Processing of large files takes a while; the 3D version can appear later than th
 - `post_flat = 1` also writes `<name>_FLAT.mp4` (normal 2D video: left eye, 16:9 centre crop, 3840 wide, NVENC HEVC or x264;
   same as `scripts\make_flat.ps1`) for viewers without a headset. The tray log is `logs\tray.log` (each ffmpeg command line,
   duration and result).
+- `post_yt8k = 1` (Settings: "Also make an 8K copy for YouTube") also writes `<name>_YT8K.mkv`: each eye scaled into a
+  3840x4320 box (aspect kept, black bars inside each eye's box), 7680x4320 in total, capped to 60 fps, NVENC HEVC
+  150 Mbit/s (x265 without NVENC, much slower), with the same 3D tag. YouTube shrinks a 4640 / 5804 wide side-by-side
+  upload to its 4K tier (1920 per eye) at a low bitrate; the 8K file keeps the 8K tier and about 3x the bitrate, so the 3D
+  is far sharper on a headset. **Upload the `_YT8K.mkv`** instead of the `.mkv`. Flat 3D recordings only (VR180 / VR360
+  are skipped). The balloon names both files ("YouTube 8K: ...").
 
 ## Settings — `config.ini`
 
@@ -100,7 +131,7 @@ from <path>: changed bitrate_mbps=20->60, ...`.
 Tray menu -> **Settings...** edits the same file (the `%APPDATA%` copy if it exists, else the one next to the tray app;
 the path is shown at the top of the window): recording (hotkey with a "Press a key..." button, codec, bitrate, max fps,
 output folder, audio), 3D (projection, fill, symmetric fov, swap eyes, roll lock, head-smoothing slider, output fov scale),
-the in-headset indicator, what happens after a recording, and require_tray / log level. **Save** rewrites only the lines
+the in-headset indicator, what happens after a recording, and the log level (`require_tray` is a config.ini-only key: the tray is required anyway). **Save** rewrites only the lines
 whose value changed, in place: comments, blank lines, section headers and keys the window does not know stay as they are
 (a missing key is added at the end of its section). A value the parser would reject is refused with a message and nothing
 is written. After a save the tray tooltip says "settings saved" for 5 s and `logs\tray.log` lists the changed keys. The
@@ -134,8 +165,9 @@ projections are labelled "experimental" in the window.
 | `edge_guard` | `1` | Smoothing: `1` = never show black edges (the correction is limited to what the game rendered). |
 | `projection`, `dome_width`, `dome_forward`, `fill`, `fill_fade_s`, `window_feather_deg` | | `[dome]`: VR180 / VR360 output, see "VR180 / VR360 dome mode". |
 | `post_mkv` | `1` | Tray app: after each recording, remux the MP4 to `<name>.mkv` with the Matroska 3D tag (what YouTube reads). |
-| `keep_mp4` | `0` | Tray app: `0` = delete the MP4 once the MKV (and the flat file, if requested) is verified; `1` = keep both. |
+| `keep_mp4` | `0` | Tray app: `0` = delete the MP4 once the MKV (and the flat / 8K files, if requested) is verified; `1` = keep both. |
 | `post_flat` | `0` | Tray app: also write `<name>_FLAT.mp4`, a normal 2D video (left eye, 16:9 centre crop, 3840 wide). |
+| `post_yt8k` | `0` | Tray app: also write `<name>_YT8K.mkv`, an 8K (7680x4320) copy for YouTube: each eye scaled into a 3840x4320 box, capped to 60 fps, NVENC HEVC 150 Mbit/s. YouTube then keeps its 8K tier and bitrate (a 4640 / 5804 wide file lands in the 4K tier, 1920 per eye). Upload the `_YT8K.mkv`. Flat 3D recordings only. |
 | `ffmpeg_path` | *(empty)* = auto | Tray app: full path of `ffmpeg.exe`. Empty = `PATH`, then WinGet packages, then an `ffmpeg` folder next to the tray app. |
 | `require_tray` | `1` | `1` = the layer is only active while `EyeCaptureTray.exe` is running (checked when the game creates its VR session). `0` = always active. |
 | `log_level` | `info` | `none` (no logging at all), `error`, `warn`, `info`, `debug`. |
@@ -257,8 +289,9 @@ the frame layout it detected (`TWO_SWAPCHAINS`, `TEXTURE_ARRAY`, `ONE_SWAPCHAIN_
 
 - **Nothing happens on the hotkey**: first make sure `EyeCaptureTray.exe` was running before the game started; if not the
   log says `EyeCaptureTray not running ... layer dormant for this session`. Then check the log has a `session ... created: graphics API D3D11 -> capture AVAILABLE`
-  line for the game. No `loaded into <game>.exe` line at all = the layer is not registered (run `install.ps1`) or the
-  game does not use OpenXR.
+  line for the game. No `loaded into <game>.exe` line at all = the layer is not registered (the tray tooltip then says
+  "Not registered for VR games": right-click the tray icon → **Register for VR games...**) or the game does not use
+  OpenXR. Registration problems are logged in `logs\tray.log` (`tray: registration: ...`, `tray: --register ...`).
 - **Dropped frames** in the summary: lower `max_fps` or `max_width`, or `bitrate_mbps`.
 - **Disable without uninstalling**: set the environment variable `DISABLE_XR_APILAYER_JRDEVO_eye_capture=1`.
 
