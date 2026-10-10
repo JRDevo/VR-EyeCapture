@@ -202,6 +202,15 @@ void InitProcess() {
     LOGI("symmetric_fov %d: %s", g_cfg.head.symmetricFov ? 1 : 0,
          g_cfg.head.symmetricFov ? "both eyes re-projected to one common symmetric view (standard 3D SBS)"
                                  : "raw eye images (asymmetric per-eye fov)");
+    if (g_cfg.dome.Enabled())
+        LOGI("dome: projection %s (%s, files *_%s.mp4) | dome_width %u%s | fill %s | fill_fade_s %.1f | window_feather_deg %.1f | "
+             "dome_forward start -- symmetric_fov / head smoothing are ignored",
+             DomeProjectionName(g_cfg.dome.projection),
+             g_cfg.dome.projection == DomeProjection::Vr180 ? "VR180, left | right" : "VR360, left on top / right below",
+             DomeFileTag(g_cfg.dome.projection), g_cfg.dome.width, g_cfg.dome.width ? "" : " (from the source density)",
+             g_cfg.dome.fill == DomeFill::LastSeen ? "last_seen" : "black", g_cfg.dome.fadeS, g_cfg.dome.featherDeg);
+    else
+        LOGI("dome: projection flat (standard SBS; [dome] projection = vr180 | vr360 for a world-locked dome)");
     if (g_autoRecordSec > 0) LOGI("XR_EYE_CAPTURE_AUTORECORD=%.1f s: recording starts at the first frame", g_autoRecordSec);
     if (EnvW(L"XR_EYE_CAPTURE_TRAY_IPC") == L"0") {
         g_trayIpc = false;
@@ -299,8 +308,9 @@ void StartRecording(SessionData* sd, const EyeView& L, const EyeView& R) {
     SYSTEMTIME st;
     GetLocalTime(&st);
     wchar_t name[128];
-    swprintf_s(name, L"%s_%04u%02u%02u_%02u%02u%02u_SBS.mp4", g_exeName.c_str(), st.wYear, st.wMonth, st.wDay, st.wHour,
-               st.wMinute, st.wSecond);
+    // <exe>_<stamp>_SBS.mp4 (flat), _VR180.mp4 / _VR360.mp4 (dome)
+    swprintf_s(name, L"%s_%04u%02u%02u_%02u%02u%02u_%hs.mp4", g_exeName.c_str(), st.wYear, st.wMonth, st.wDay, st.wHour,
+               st.wMinute, st.wSecond, DomeFileTag(g_cfg.dome.projection));
     SHCreateDirectoryExW(nullptr, g_cfg.outputDir.c_str(), nullptr);
 
     RecorderSettings rs;
@@ -313,6 +323,7 @@ void StartRecording(SessionData* sd, const EyeView& L, const EyeView& R) {
     rs.audio = g_cfg.audioEnabled;
     rs.audioDevice = g_cfg.audioDevice;
     rs.head = g_cfg.head;
+    rs.dome = g_cfg.dome;
     rs.startFovValid = L.hasPose && R.hasPose;
     for (int i = 0; i < 4; ++i) { rs.startFov[0][i] = L.fov[i]; rs.startFov[1][i] = R.fov[i]; }
     rs.startEyeW[0] = L.w; rs.startEyeH[0] = L.h; rs.startEyeW[1] = R.w; rs.startEyeH[1] = R.h;

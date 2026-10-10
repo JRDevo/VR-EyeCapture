@@ -1,8 +1,10 @@
-// head_smoothing_test -- CPU unit test of src/head_smoothing (filter, conventions, roll lock, follow, edge guard).
+// head_smoothing_test -- CPU unit test of src/head_smoothing (filter, conventions, roll lock, follow, edge guard) and
+// src/dome (VR180 / VR360 size, lon / lat convention, dome frame, eye matrix, world lock).
 // No GPU, no files. Exit code 0 = all checks passed.
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include "dome.h"
 #include "head_smoothing.h"
 #include "test_motion.h"
 
@@ -208,6 +210,98 @@ int main() {
         hs.Update(0, none, f);
         Check(f.noPose && f.eye[0].m[0] == 1.0f && f.eye[0].outTan[1] == f.eye[0].srcTan[1], "no pose -> identity pass-through", 0);
     }
+    // ---------------------------------------------------------------------------------------------------- dome
+    {   // dome size: density from the source, rounding, clamping to an 8192 frame
+        const double D = test_motion::kDeg;
+        const float fl[4] = {(float)(-50 * D), (float)(40 * D), (float)(45 * D), (float)(-45 * D)};
+        const float fr[4] = {(float)(-40 * D), (float)(50 * D), (float)(45 * D), (float)(-45 * D)};
+        const double dens = 1408.0 / (std::tan(50 * D) + std::tan(40 * D));
+        const DomeSize a = ComputeDomeSize(DomeProjection::Vr180, 0, true, fl, fr, 1408, 1408);
+        printf("    mock 1408 px eyes: density %.1f px/rad; vr180 %ux%u per eye, frame %ux%u\n", a.density, a.eyeW, a.eyeH, a.frameW, a.frameH);
+        Check(a.valid && std::fabs(a.density - dens) < 1e-3 && a.eyeW == 2u * (uint32_t)std::lround(dens * test_motion::kPi / 2) &&
+              a.eyeH == a.eyeW && a.frameW == 2 * a.eyeW && a.frameH == a.eyeW && !a.clamped,
+              "vr180: per-eye width = round_even(density * pi), square, SBS frame", (double)a.eyeW);
+        const DomeSize b = ComputeDomeSize(DomeProjection::Vr360, 0, true, fl, fr, 1408, 1408);
+        printf("    mock 1408 px eyes: vr360 %ux%u per eye, frame %ux%u\n", b.eyeW, b.eyeH, b.frameW, b.frameH);
+        Check(b.eyeW % 4 == 0 && std::abs((double)b.eyeW - dens * 2 * test_motion::kPi) <= 2.0 && b.eyeH == b.eyeW / 2 &&
+              b.frameW == b.eyeW && b.frameH == b.eyeW, "vr360: width = density * 2 pi (multiple of 4), 2:1 per eye, top-bottom frame",
+              (double)b.eyeW);
+        const DomeSize q = ComputeDomeSize(DomeProjection::Vr180, 0, true, fl, fr, 3072, 3072);
+        const DomeSize q3 = ComputeDomeSize(DomeProjection::Vr360, 0, true, fl, fr, 3072, 3072);
+        printf("    3072 px eyes (Quest-3-like): density %.1f -> vr180 wants %u, frame %ux%u; vr360 wants %u, frame %ux%u\n",
+               q.density, q.wanted, q.frameW, q.frameH, q3.wanted, q3.frameW, q3.frameH);
+        Check(q.clamped && q.eyeW == 4096 && q.frameW == 8192 && q.frameH == 4096 && q3.clamped && q3.eyeW == 8192 &&
+              q3.frameW == 8192 && q3.frameH == 8192, "clamped to an 8192 frame (vr180 4096 per eye, vr360 8192)", (double)q.wanted);
+        const DomeSize e1 = ComputeDomeSize(DomeProjection::Vr180, 2001, true, fl, fr, 1408, 1408);
+        const DomeSize e2 = ComputeDomeSize(DomeProjection::Vr180, 6000, true, fl, fr, 1408, 1408);
+        const DomeSize e3 = ComputeDomeSize(DomeProjection::Vr360, 3002, false, fl, fr, 1408, 1408);
+        Check(e1.eyeW % 2 == 0 && std::abs((int)e1.eyeW - 2001) == 1 && e1.fromExplicit && e2.eyeW == 4096 && e2.clamped &&
+              e3.eyeW % 4 == 0 && std::abs((int)e3.eyeW - 3002) <= 2, "explicit dome_width: rounded (even / x4) and clamped", (double)e1.eyeW);
+        const DomeSize nf = ComputeDomeSize(DomeProjection::Vr180, 0, false, fl, fr, 1000, 1000);
+        Check(nf.valid && nf.fallback && nf.eyeW == 2u * (uint32_t)std::lround(500.0 * test_motion::kPi / 2),
+              "no usable fov: density fallback eye width / 2", (double)nf.eyeW);
+    }
+    {   // lon / lat -> dome ray convention
+        double r[3];
+        DomeRay(test_motion::kPi / 2, 0, r);
+        const bool px = std::fabs(r[0] - 1) < 1e-12 && std::fabs(r[1]) < 1e-12 && std::fabs(r[2]) < 1e-12;
+        DomeRay(0, test_motion::kPi / 2, r);
+        const bool py = std::fabs(r[1] - 1) < 1e-12 && std::fabs(r[0]) < 1e-12 && std::fabs(r[2]) < 1e-12;
+        DomeRay(0, 0, r);
+        const bool mz = std::fabs(r[2] + 1) < 1e-12 && std::fabs(r[0]) < 1e-12 && std::fabs(r[1]) < 1e-12;
+        Check(px && py && mz, "dome ray: lon = +90 -> +X, lat = +90 -> +Y, lon = 0 -> -Z", 0);
+    }
+    {   // dome frame: yaw only, from the head at record start
+        const DomeFrame f = ComputeDomeFrame(YawPitchRoll(25, 30, 10), YawPitchRoll(25, 30, 10));
+        double m[9];
+        QuatToMatrix(f.D, m);
+        Check(std::fabs(f.yawDeg - 25) < 1e-9 && std::fabs(m[4] - 1) < 1e-12 && !f.degenerate,
+              "dome frame: head yaw 25 / pitch 30 / roll 10 -> D = yaw 25 only (up stays +Y)", f.yawDeg);
+        const DomeFrame g = ComputeDomeFrame(YawPitchRoll(40, 89, 0), YawPitchRoll(40, 89, 0));
+        Check(g.degenerate && std::fabs(g.yawDeg) < 1e-12, "looking straight up: degenerate, D = identity (-Z forward)", g.yawDeg);
+        // left / right eye slerp: eyes canted +-5 degrees about the head's yaw 10 -> D yaw 10
+        const DomeFrame c = ComputeDomeFrame(YawPitchRoll(15, 0, 0), YawPitchRoll(5, 0, 0));
+        Check(std::fabs(c.yawDeg - 10) < 1e-9, "D from slerp(qLeft, qRight, 0.5)", c.yawDeg);
+    }
+    {   // eye matrix for a yawed head: D = start head (yaw 0); head now yawed 20 deg LEFT: the dome ray at lon = -20
+        // (to the left) is the eye's forward; lon = 0 lies at +20 deg (to the right) in the eye image
+        SmoothQuat D;
+        double m[9], r[3];
+        DomeEyeMatrix(D, YawPitchRoll(20, 0, 0), m);
+        DomeRay(-20 * test_motion::kDeg, 0, r);
+        const double ax = m[0] * r[0] + m[1] * r[1] + m[2] * r[2], ay = m[3] * r[0] + m[4] * r[1] + m[5] * r[2],
+                     az = m[6] * r[0] + m[7] * r[1] + m[8] * r[2];
+        DomeRay(0, 0, r);
+        const double bx = m[0] * r[0] + m[1] * r[1] + m[2] * r[2], bz = m[6] * r[0] + m[7] * r[1] + m[8] * r[2];
+        const double ang = std::atan2(bx, -bz) / test_motion::kDeg;
+        Check(std::fabs(ax) < 1e-12 && std::fabs(ay) < 1e-12 && std::fabs(az + 1) < 1e-12 && std::fabs(ang - 20) < 1e-9,
+              "eye matrix, head yaw +20 (left): lon -20 = eye forward, lon 0 at +20 deg in the eye", ang);
+    }
+    {   // world lock: a direction at infinity (world -Z, the test marker) maps to the SAME equirect pixel whatever the
+        // head does, and every frame's eye matrix sends that pixel's ray to exactly where the eye sees the marker
+        const SmoothQuat start = YawPitchRoll(7, 5, 3);
+        const DomeFrame f = ComputeDomeFrame(start, start);
+        const double marker[3] = {0, 0, -1};
+        double u0 = 0, v0 = 0;
+        const bool in = DomeDirToUv(DomeProjection::Vr180, f.D, marker, u0, v0);
+        double worst = 0;
+        for (int i = 0; i < 40; ++i) {
+            const SmoothQuat head = YawPitchRoll(7 + 30 * std::sin(i * 0.37), 5 * std::cos(i * 0.5), 4 * std::sin(i * 0.9));
+            double m[9], r[3], h[9];
+            DomeEyeMatrix(f.D, head, m);
+            DomeRay((u0 - 0.5) * test_motion::kPi, (0.5 - v0) * test_motion::kPi, r);
+            const double a[3] = {m[0] * r[0] + m[1] * r[1] + m[2] * r[2], m[3] * r[0] + m[4] * r[1] + m[5] * r[2],
+                                 m[6] * r[0] + m[7] * r[1] + m[8] * r[2]};
+            QuatToMatrix(QuatConj(head), h);   // where the eye camera sees the marker: head^-1 * marker
+            const double e[3] = {h[2] * -1, h[5] * -1, h[8] * -1};
+            worst = std::fmax(worst, std::sqrt((a[0] - e[0]) * (a[0] - e[0]) + (a[1] - e[1]) * (a[1] - e[1]) + (a[2] - e[2]) * (a[2] - e[2])));
+        }
+        printf("    marker (world -Z) at equirect u %.6f v %.6f (lon %+.3f deg, lat %+.3f deg) with D yaw %.2f deg\n", u0, v0,
+               (u0 - 0.5) * 180, (0.5 - v0) * 180, f.yawDeg);
+        Check(in && std::fabs((u0 - 0.5) * 180 - 7) < 1e-9 && std::fabs(v0 - 0.5) < 1e-12 && worst < 1e-12,
+              "world lock: marker pixel independent of the head pose (lon = +start yaw, lat 0)", worst);
+    }
+
     printf("=== head_smoothing_test %s\n", g_fail ? "FAIL" : "PASS");
     return g_fail ? 1 : 0;
 }

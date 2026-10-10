@@ -10,6 +10,7 @@
 #include <mftransform.h>
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <vector>
 #include "audio_capture.h"
@@ -70,6 +71,71 @@ const char kReprojPs[] =
 struct RpEye { float r0[4], r1[4], r2[4], outTan[4], srcTan[4], src[4], dst[4]; };
 struct RpConstants { RpEye eye[2]; float misc[4]; };
 static_assert(sizeof(RpConstants) % 16 == 0, "constant buffer size");
+
+// VR180 / VR360 dome (see dome.h). Same full-screen triangle; the eye is picked by its destination rectangle (SBS for
+// vr180, top-bottom for vr360). Per output pixel: equirect (lon, lat) -> dome ray -> M_e (= q_e^-1 * D) -> the eye
+// camera -> coverage weight w (0 outside the eye's fov, 1 inside, ramping over window_feather_deg at the window edge,
+// from the angular distance to the nearest fov edge plane) and a bilinear sample of that eye's half of the source.
+// DOME_LAST_SEEN (fill = last_seen): MRT. RT0 = the output the video processor reads, RT1 / RT2 = the new dome colour /
+// last-write time (ping-pong with t1 / t2 = the previous ones): dome' = lerp(dome, sample, w), time' = w >= 0.5 ? now :
+// time, output = dome' * fade(now - time'). Without it (fill = black): output = sample * w.
+const char kDomePs[] =
+    "struct Eye { float4 r0, r1, r2, srcTan, src, dst; };\n"   // r0.w = 1: paint this eye this frame (usable pose)
+    "cbuffer P : register(b0) { Eye eye[2]; float4 misc; float4 dome; };\n"   // misc: 1/srcW, 1/srcH; dome: lonSpan, now (s), fill_fade_s, feather (rad)
+    "Texture2D<float4> src : register(t0);\n"
+    "SamplerState smp : register(s0);\n"
+    "#ifdef DOME_LAST_SEEN\n"
+    "Texture2D<float4> oldDome : register(t1);\n"
+    "Texture2D<float> oldTime : register(t2);\n"
+    "struct Out { float4 o : SV_Target0; float4 d : SV_Target1; float t : SV_Target2; };\n"
+    "#else\n"
+    "struct Out { float4 o : SV_Target0; };\n"
+    "#endif\n"
+    "static const float kPi = 3.14159265358979;\n"
+    "float EdgeDist(float3 n, float3 plane) { return dot(n, normalize(plane)); }\n"   // sin of the angular distance
+    "Out main(float4 pos : SV_Position) {\n"
+    "    const int e = (pos.x >= eye[1].dst.x && pos.y >= eye[1].dst.y) ? 1 : 0;\n"
+    "    Eye E = eye[e];\n"
+    "    float2 uv = (pos.xy - E.dst.xy) / E.dst.zw;\n"
+    "    float lon = (uv.x - 0.5) * dome.x, lat = (0.5 - uv.y) * kPi;\n"
+    "    float3 r = float3(cos(lat) * sin(lon), sin(lat), -cos(lat) * cos(lon));\n"
+    "    float3 a = float3(dot(E.r0.xyz, r), dot(E.r1.xyz, r), dot(E.r2.xyz, r));\n"
+    "    float w = 0.0;\n"
+    "    float3 c = float3(0.0, 0.0, 0.0);\n"
+    "    if (E.r0.w > 0.5 && a.z < -1e-6) {\n"
+    "        float2 t = a.xy / -a.z;\n"
+    "        float2 s = float2((t.x - E.srcTan.x) / (E.srcTan.y - E.srcTan.x), (E.srcTan.z - t.y) / (E.srcTan.z - E.srcTan.w));\n"
+    "        if (all(s >= 0.0) && all(s <= 1.0)) {\n"
+    "            w = 1.0;\n"
+    "            if (dome.w > 0.0) {\n"
+    "                float3 n = normalize(a);\n"
+    "                float m = min(min(EdgeDist(n, float3(1.0, 0.0, E.srcTan.x)), EdgeDist(n, float3(-1.0, 0.0, -E.srcTan.y))),\n"
+    "                              min(EdgeDist(n, float3(0.0, -1.0, -E.srcTan.z)), EdgeDist(n, float3(0.0, 1.0, E.srcTan.w))));\n"
+    "                w = saturate(asin(saturate(m)) / dome.w);\n"
+    "            }\n"
+    "            float2 p = clamp(E.src.xy + s * E.src.zw, E.src.xy + 0.5, E.src.xy + E.src.zw - 0.5);\n"
+    "            c = src.SampleLevel(smp, p * misc.xy, 0).rgb;\n"
+    "        }\n"
+    "    }\n"
+    "    Out o;\n"
+    "#ifdef DOME_LAST_SEEN\n"
+    "    const int3 ip = int3(int2(pos.xy), 0);\n"
+    "    float3 nd = lerp(oldDome.Load(ip).rgb, c, w);\n"
+    "    float nt = w >= 0.5 ? dome.y : oldTime.Load(ip);\n"
+    "    float fade = dome.z > 0.0 ? 1.0 - saturate((dome.y - nt - dome.z) / 2.0) : 1.0;\n"
+    "    o.o = float4(nd * fade, 1.0);\n"
+    "    o.d = float4(nd, 1.0);\n"
+    "    o.t = nt;\n"
+    "#else\n"
+    "    o.o = float4(c * w, 1.0);\n"
+    "#endif\n"
+    "    return o;\n"
+    "}\n";
+
+struct DomeEyeCb { float r0[4], r1[4], r2[4], srcTan[4], src[4], dst[4]; };
+struct DomeConstants { DomeEyeCb eye[2]; float misc[4]; float dome[4]; };
+static_assert(sizeof(DomeConstants) % 16 == 0, "constant buffer size");
+const float kDomeTimeReset = -1e9f;   // last-write time of never-painted dome pixels (always fully faded)
 
 const UINT kTimingQueries = 6;
 
@@ -247,6 +313,17 @@ struct Recorder::Impl {
     struct TsQuery { ComPtr<ID3D11Query> disjoint, begin, end; bool pending = false; };
     std::vector<TsQuery> rpQ;
     UINT rpQi = 0;
+    // VR180 / VR360 dome (projection != flat; replaces the symmetric / smoothing re-projection)
+    DomeSize dome;                     // valid = dome mode for this recording
+    bool domeHaveFrame = false;        // D fixed (first frame with a usable pose)
+    DomeFrame domeFrame;
+    bool domeLastSeen = false;         // fill = last_seen: persistent ping-pong dome
+    bool domeClear = false;            // clear the dome at the next frame (inside the device lock)
+    int domeCur = 0;                   // index of the current (read) dome / time texture
+    ComPtr<ID3D11Texture2D> domeTex[2], domeTimeTex[2];
+    ComPtr<ID3D11RenderTargetView> domeRtv[2], domeTimeRtv[2];
+    ComPtr<ID3D11ShaderResourceView> domeSrv[2], domeTimeSrv[2];
+    uint64_t domePainted = 0, domeNoPose = 0;
     // smoothing stats (worker thread only)
     uint64_t smFrames = 0, smGuarded = 0, smUncovered = 0, smCatch = 0, smNoPose = 0, smResets = 0, gpuN = 0;
     double smCorrSum = 0, smCorrMax = 0, gpuSum = 0, gpuMax = 0, cpuSum = 0, cpuMax = 0;
@@ -286,7 +363,11 @@ struct Recorder::Impl {
     bool InitVideoProcessor();
     bool InitLinearPass();
     bool InitReprojection(DXGI_FORMAT vpFmt);
-    void Reproject(ID3D11ShaderResourceView* srcSrv, const RpConstants& c);
+    bool InitDomeTextures(DXGI_FORMAT vpFmt, double& mb);
+    void Reproject(ID3D11ShaderResourceView* const* srvs, UINT nSrv, ID3D11RenderTargetView* const* rtvs, UINT nRtv,
+                   const void* cb, size_t cbSize);
+    void DomeConstantsFor(const Item& it, DomeConstants& dc);
+    void WriteSidecar(const std::string& file);
     void ReadTimings();
     HRESULT CreateWriter(bool useHevc, bool hardware, std::string& why);
     void LogTransforms();
@@ -324,15 +405,24 @@ bool Recorder::Start(IFrameSource* src, const RecorderSettings& s, UINT w, UINT 
     m.written = 0; m.dropRing = 0; m.dropGpu = 0; m.dropPool = 0; m.dropDup = 0; m.decimated = 0; m.audioFrames = 0; m.writeErrors = 0;
     m.t0Disp = 0;
     m.loggedFirst = false;
+    m.dome = DomeSize();
+    if (s.dome.Enabled())   // the dome replaces symmetric_fov / head smoothing
+        m.dome = ComputeDomeSize(s.dome.projection, s.dome.width, s.startFovValid, s.startFov[0], s.startFov[1],
+                                 s.startEyeW[0], s.startEyeW[1]);
+    m.domeHaveFrame = false;
+    m.domeLastSeen = m.dome.valid && s.dome.fill == DomeFill::LastSeen;
+    m.domeClear = false;
+    m.domeCur = 0;
+    m.domePainted = m.domeNoPose = 0;
     m.sym = SymmetricFov();
-    if (s.head.symmetricFov && s.startFovValid)
+    if (!m.dome.valid && s.head.symmetricFov && s.startFovValid)
         m.sym = ComputeSymmetricFov(s.startFov[0], s.startFov[1], s.startEyeW[0], s.startEyeH[0], s.startEyeW[1], s.startEyeH[1]);
-    m.stage = s.head.Enabled() || m.sym.valid;
+    m.stage = m.dome.valid || s.head.Enabled() || m.sym.valid;
     m.smoother.Configure(s.head);   // also resets the filter: every recording starts at the actual head pose
     m.smoother.SetSymmetricOutput(m.sym.valid ? m.sym.tanH : 0.0, m.sym.valid ? m.sym.tanV : 0.0);
-    m.vpW = m.sym.valid ? 2 * m.sym.eyeW : w;
-    m.vpH = m.sym.valid ? m.sym.eyeH : h;
-    m.outRightX = m.sym.valid ? m.sym.eyeW : leftWidth;
+    m.vpW = m.dome.valid ? m.dome.frameW : m.sym.valid ? 2 * m.sym.eyeW : w;
+    m.vpH = m.dome.valid ? m.dome.frameH : m.sym.valid ? m.sym.eyeH : h;
+    m.outRightX = m.dome.valid ? m.dome.eyeW : m.sym.valid ? m.sym.eyeW : leftWidth;
     m.smFrames = m.smGuarded = m.smUncovered = m.smCatch = m.smNoPose = m.smResets = m.gpuN = 0;
     m.smCorrSum = m.smCorrMax = m.gpuSum = m.gpuMax = m.cpuSum = m.cpuMax = 0;
     m.queue.clear();
@@ -517,7 +607,13 @@ void Recorder::Impl::Run() {
     const uint64_t frames = written.load();
     std::string st3dReport = "st3d: skipped";
     bool fileOk = SUCCEEDED(fhr) && frames > 0;
-    if (fileOk) {
+    if (fileOk && dome.valid) {
+        // VR180: a quarter of the sphere cropped on each side (+-90 degrees covered); VR360: the full sphere.
+        const bool v180 = s.dome.projection == DomeProjection::Vr180;
+        const uint32_t bounds[4] = {0, 0, v180 ? 0x40000000u : 0u, v180 ? 0x40000000u : 0u};
+        PatchStereoSpherical(s.path, v180 ? 2 /*left-right*/ : 1 /*top-bottom*/, true, bounds, st3dReport);
+        WriteSidecar(file);
+    } else if (fileOk) {
         PatchSt3d(s.path, 2 /*left-right*/, st3dReport);
     } else {
         DeleteFileW(s.path.c_str());
@@ -535,7 +631,15 @@ void Recorder::Impl::Run() {
              hasAudio ? "AAC" : "none", (unsigned long long)audioFrames.load(), audioFrames.load() / 48000.0,
              HrText(fhr).c_str(), st3dReport.c_str());
     if (fileOk) LOGI("%s", sum); else LOGE("%s", sum);
-    if (stage) {
+    if (stage && dome.valid) {
+        LOGI("re-projection summary (dome %s, fill %s): %llu frames | dome: %llu frames painted, %llu frames without pose | "
+             "D yaw %+.2f deg%s | re-projection %ux%u: GPU %.3f ms avg, %.3f ms max (%llu samples), worker CPU %.3f ms avg, "
+             "%.3f ms max",
+             DomeProjectionName(s.dome.projection), domeLastSeen ? "last_seen" : "black", (unsigned long long)smFrames,
+             (unsigned long long)domePainted, (unsigned long long)domeNoPose, domeFrame.yawDeg,
+             domeHaveFrame ? "" : " (never set: no usable pose)", vpW, vpH, gpuN ? gpuSum / gpuN : 0.0, gpuMax,
+             (unsigned long long)gpuN, smFrames ? cpuSum / smFrames : 0.0, cpuMax);
+    } else if (stage) {
         const double n = smFrames ? (double)smFrames : 1.0;
         LOGI("re-projection summary (head smoothing %s, symmetric fov %s): %llu frames | correction mean %.2f deg, max %.2f deg | edge guard limited the "
              "correction in %llu frames | source did not cover the output (black edges) in %llu frames | follow / "
@@ -585,7 +689,23 @@ bool Recorder::Impl::Init() {
          GfxApiName(src->Api()), W, H, leftW, DxgiFormatName(fmt), srgb ? "sRGB-encoded" : "linear", outW, outH,
          hevc ? "HEVC" : "H.264", bitrate / 1e6, fps, fps * 2);
 
-    if (sym.valid) {
+    if (dome.valid) {
+        const char* pn = DomeProjectionName(s.dome.projection);
+        char why[200];
+        if (dome.fromExplicit) snprintf(why, sizeof(why), "dome_width %u", s.dome.width);
+        else if (dome.fallback) snprintf(why, sizeof(why), "no usable view fov at record start, assumed +-45 deg eye images");
+        else snprintf(why, sizeof(why), "source density %.1f px/rad", dome.density);
+        LOGI("recorder: dome %s: %s -> %u px per eye%s; per eye %ux%u, frame %ux%u (%s)", pn, why, dome.wanted,
+             dome.clamped ? (std::string(", clamped to ") + std::to_string(dome.eyeW) + " (frame <= 8192)").c_str() : "",
+             dome.eyeW, dome.eyeH, dome.frameW, dome.frameH,
+             s.dome.projection == DomeProjection::Vr180 ? "left | right, lon +-90 x lat +-90 each"
+                                                        : "left on top / right below, lon +-180 x lat +-90 each");
+        LOGI("recorder: dome %s: fill %s, fill_fade_s %.1f%s, window_feather_deg %.1f, dome_forward start (world-locked to the "
+             "projection space, yaw of the first frame with a pose) -- symmetric_fov, head_smoothing, head_follow_deg, roll_lock, "
+             "output_fov_scale and edge_guard are ignored in dome mode",
+             pn, s.dome.fill == DomeFill::LastSeen ? "last_seen" : "black", s.dome.fadeS, s.dome.fadeS > 0 ? "" : " (never fade)",
+             s.dome.featherDeg);
+    } else if (sym.valid) {
         const double D = 180.0 / 3.14159265358979323846;
         const float* fl = s.startFov[0];
         const float* fr = s.startFov[1];
@@ -599,7 +719,9 @@ bool Recorder::Impl::Init() {
     } else {
         LOGI("recorder: symmetric fov off (symmetric_fov = 0): raw eye images");
     }
-    if (s.head.Enabled())
+    if (dome.valid) {
+        // smoothing is not used in dome mode (logged above)
+    } else if (s.head.Enabled())
         LOGI("recorder: head smoothing ON -- head_smoothing %.2f (time constant %.3f s), head_follow_deg %.1f, roll_lock %d, "
              "output_fov_scale %.2f, edge_guard %d",
              s.head.smoothing, HeadSmoothingTimeConstant(s.head.smoothing), s.head.followDeg, s.head.rollLock ? 1 : 0,
@@ -736,7 +858,7 @@ bool Recorder::Impl::InitVideoProcessor() {
         if (FAILED(hr)) { LOGE("recorder: input view on the linear pre-pass texture hr=0x%08lx", (unsigned long)hr); SetMessage("video processor input view"); return false; }
     }
     if (stage && !InitReprojection(vpFmt)) {
-        if (vpW != W || vpH != H) { SetMessage("re-projection setup failed"); return false; }   // VP sized for its output
+        if (dome.valid || vpW != W || vpH != H) { SetMessage("re-projection setup failed"); return false; }   // VP sized for its output
         LOGW("recorder: head smoothing disabled for this recording (re-projection setup failed)");
         stage = false;
     }
@@ -833,7 +955,12 @@ bool Recorder::Impl::InitReprojection(DXGI_FORMAT vpFmt) {
     ComPtr<ID3DBlob> vsCode, psCode, errs;
     HRESULT hr = D3DCompile(kReprojVs, sizeof(kReprojVs) - 1, "reproject_vs", nullptr, nullptr, "main", "vs_5_0",
                             D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &vsCode, &errs);
-    if (SUCCEEDED(hr)) {
+    if (SUCCEEDED(hr) && dome.valid) {
+        errs.Reset();
+        const D3D_SHADER_MACRO lastSeen[] = {{"DOME_LAST_SEEN", "1"}, {nullptr, nullptr}};
+        hr = D3DCompile(kDomePs, sizeof(kDomePs) - 1, "dome_ps", domeLastSeen ? lastSeen : nullptr, nullptr, "main", "ps_5_0",
+                        D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &psCode, &errs);
+    } else if (SUCCEEDED(hr)) {
         errs.Reset();
         hr = D3DCompile(kReprojPs, sizeof(kReprojPs) - 1, "reproject_ps", nullptr, nullptr, "main", "ps_5_0",
                         D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &psCode, &errs);
@@ -847,7 +974,7 @@ bool Recorder::Impl::InitReprojection(DXGI_FORMAT vpFmt) {
     if (SUCCEEDED(hr)) hr = enc->CreatePixelShader(psCode->GetBufferPointer(), psCode->GetBufferSize(), nullptr, &rpPs);
     if (SUCCEEDED(hr)) {
         D3D11_BUFFER_DESC bd{};
-        bd.ByteWidth = sizeof(RpConstants);
+        bd.ByteWidth = dome.valid ? sizeof(DomeConstants) : sizeof(RpConstants);
         bd.Usage = D3D11_USAGE_DYNAMIC;
         bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
         bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
@@ -902,10 +1029,107 @@ bool Recorder::Impl::InitReprojection(DXGI_FORMAT vpFmt) {
             break;
         }
     }
+    const double outMb = (double)vpW * vpH * (vpFmt == DXGI_FORMAT_R16G16B16A16_FLOAT ? 8 : 4) / (1024.0 * 1024.0);
+    if (dome.valid) {
+        double domeMb = 0;
+        if (domeLastSeen && !InitDomeTextures(vpFmt, domeMb)) return false;
+        LOGI("recorder: dome pass on the encoder device: %ux%u -> %ux%u, %s -> %s, +%.0f MB VRAM (output %.0f MB%s)", W, H,
+             vpW, vpH, srgb ? "ring" : "linear pre-pass output", DxgiFormatName(vpFmt), outMb + domeMb, outMb,
+             domeLastSeen ? (std::string(" + last_seen dome colour x2 / time x2 ") + std::to_string((int)std::lround(domeMb)) + " MB").c_str()
+                          : ", fill black: no persistent dome");
+        return true;
+    }
     LOGI("recorder: re-projection pass on the encoder device: %ux%u -> %ux%u, %s -> %s, +%.0f MB VRAM",
-         W, H, vpW, vpH, srgb ? "ring" : "linear pre-pass output", DxgiFormatName(vpFmt),
-         (double)vpW * vpH * (vpFmt == DXGI_FORMAT_R16G16B16A16_FLOAT ? 8 : 4) / (1024.0 * 1024.0));
+         W, H, vpW, vpH, srgb ? "ring" : "linear pre-pass output", DxgiFormatName(vpFmt), outMb);
     return true;
+}
+
+// fill = last_seen: dome colour (the stage format) and last-write time (R32_FLOAT, seconds), two of each (ping-pong).
+bool Recorder::Impl::InitDomeTextures(DXGI_FORMAT vpFmt, double& mb) {
+    HRESULT hr = S_OK;
+    for (int i = 0; SUCCEEDED(hr) && i < 2; ++i) {
+        D3D11_TEXTURE2D_DESC d{};
+        d.Width = vpW; d.Height = vpH; d.MipLevels = 1; d.ArraySize = 1; d.Format = vpFmt; d.SampleDesc.Count = 1;
+        d.Usage = D3D11_USAGE_DEFAULT; d.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        hr = enc->CreateTexture2D(&d, nullptr, &domeTex[i]);
+        if (SUCCEEDED(hr)) hr = enc->CreateRenderTargetView(domeTex[i].Get(), nullptr, &domeRtv[i]);
+        if (SUCCEEDED(hr)) hr = enc->CreateShaderResourceView(domeTex[i].Get(), nullptr, &domeSrv[i]);
+        d.Format = DXGI_FORMAT_R32_FLOAT;
+        if (SUCCEEDED(hr)) hr = enc->CreateTexture2D(&d, nullptr, &domeTimeTex[i]);
+        if (SUCCEEDED(hr)) hr = enc->CreateRenderTargetView(domeTimeTex[i].Get(), nullptr, &domeTimeRtv[i]);
+        if (SUCCEEDED(hr)) hr = enc->CreateShaderResourceView(domeTimeTex[i].Get(), nullptr, &domeTimeSrv[i]);
+    }
+    if (FAILED(hr)) { LOGE("recorder: dome textures %ux%u failed hr=0x%08lx", vpW, vpH, (unsigned long)hr); return false; }
+    mb = 2.0 * (double)vpW * vpH * ((vpFmt == DXGI_FORMAT_R16G16B16A16_FLOAT ? 8 : 4) + 4) / (1024.0 * 1024.0);
+    domeCur = 0;
+    domeClear = true;   // black / never painted, done at the first frame inside the device lock
+    return true;
+}
+
+// Dome constants for one frame (worker thread). D is fixed at the first frame with a usable pose; frames without one
+// paint nothing (the dome is shown as it is, fading).
+void Recorder::Impl::DomeConstantsFor(const Item& it, DomeConstants& dc) {
+    SmoothQuat q[2];
+    for (int e = 0; e < 2; ++e) {
+        q[e].x = it.eye[e].q[0]; q[e].y = it.eye[e].q[1]; q[e].z = it.eye[e].q[2]; q[e].w = it.eye[e].q[3];
+    }
+    const bool ok0 = it.eye[0].valid, ok1 = it.eye[1].valid;
+    const double now = (double)(it.disp - t0Disp.load()) * 1e-9;
+    if (!ok0 && !ok1) {
+        ++domeNoPose;
+    } else {
+        if (!domeHaveFrame) {
+            domeFrame = ComputeDomeFrame(ok0 ? q[0] : q[1], ok1 ? q[1] : q[0]);
+            domeHaveFrame = true;
+            LOGI("recorder: dome frame D fixed at the first frame with a pose (t = %.3f s): yaw %+.2f deg%s, pitch = roll = 0 "
+                 "(horizon level), world-locked to the projection layer's space",
+                 now, domeFrame.yawDeg, domeFrame.degenerate ? " (looking straight up / down: forward = -Z)" : "");
+        }
+        ++domePainted;
+    }
+    const bool v180 = s.dome.projection == DomeProjection::Vr180;
+    for (int e = 0; e < 2; ++e) {
+        const ItemEye& ie = it.eye[e];
+        DomeEyeCb& de = dc.eye[e];
+        if (ie.valid && domeHaveFrame) {
+            double m[9];
+            DomeEyeMatrix(domeFrame.D, q[e], m);
+            for (int c = 0; c < 3; ++c) { de.r0[c] = (float)m[c]; de.r1[c] = (float)m[3 + c]; de.r2[c] = (float)m[6 + c]; }
+            de.r0[3] = 1.0f;   // paint
+            for (int i = 0; i < 4; ++i) de.srcTan[i] = (float)std::tan((double)ie.fov[i]);
+        } else {
+            de.r0[0] = de.r1[1] = de.r2[2] = 1.0f;   // not painted (r0.w = 0)
+            de.srcTan[0] = -1.0f; de.srcTan[1] = 1.0f; de.srcTan[2] = 1.0f; de.srcTan[3] = -1.0f;
+        }
+        de.src[0] = (float)ie.x0; de.src[1] = 0.0f;
+        de.src[2] = (float)std::max<UINT>(1, ie.w); de.src[3] = (float)std::max<UINT>(1, ie.h);
+        de.dst[0] = (float)(v180 ? e * dome.eyeW : 0); de.dst[1] = (float)(v180 ? 0 : e * dome.eyeH);
+        de.dst[2] = (float)dome.eyeW; de.dst[3] = (float)dome.eyeH;
+    }
+    dc.misc[0] = 1.0f / (float)W; dc.misc[1] = 1.0f / (float)H;
+    dc.dome[0] = (float)DomeLonSpan(s.dome.projection);
+    dc.dome[1] = (float)now;
+    dc.dome[2] = s.dome.fadeS;
+    dc.dome[3] = (float)(s.dome.featherDeg * 3.14159265358979323846 / 180.0);
+}
+
+// <name>.json next to the MP4: what the tray needs to tag the upload (dome recordings only; no sidecar = flat SBS).
+void Recorder::Impl::WriteSidecar(const std::string& file) {
+    std::wstring base = s.path;
+    const size_t dot = base.find_last_of(L'.'), slash = base.find_last_of(L"\\/");
+    if (dot != std::wstring::npos && (slash == std::wstring::npos || dot > slash)) base.resize(dot);
+    const std::wstring json = base + L".json";
+    const bool v180 = s.dome.projection == DomeProjection::Vr180;
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, json.c_str(), L"wb") != 0 || !f) {
+        LOGW("recorder: could not write the sidecar %s", elog::Narrow(json).c_str());
+        return;
+    }
+    fprintf(f, "{\"projection\":\"%s\",\"layout\":\"%s\",\"eyes\":2,\"width\":%u,\"height\":%u,\"dome_width\":%u}\n",
+            DomeProjectionName(s.dome.projection), v180 ? "left_right" : "top_bottom", outW, outH, v180 ? outW / 2 : outW);
+    fclose(f);
+    LOGI("recorder: sidecar %s (%s, %ux%u) for %s", elog::Narrow(json).c_str(), DomeProjectionName(s.dome.projection), outW,
+         outH, file.c_str());
 }
 
 void Recorder::Impl::ReadTimings() {
@@ -925,10 +1149,11 @@ void Recorder::Impl::ReadTimings() {
     }
 }
 
-void Recorder::Impl::Reproject(ID3D11ShaderResourceView* srcSrv, const RpConstants& c) {
+void Recorder::Impl::Reproject(ID3D11ShaderResourceView* const* srvs, UINT nSrv, ID3D11RenderTargetView* const* rtvs, UINT nRtv,
+                               const void* c, size_t cSize) {
     D3D11_MAPPED_SUBRESOURCE ms{};
     if (SUCCEEDED(encCtx->Map(rpCb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &ms))) {
-        memcpy(ms.pData, &c, sizeof(c));
+        memcpy(ms.pData, c, cSize);
         encCtx->Unmap(rpCb.Get(), 0);
     }
     ReadTimings();
@@ -941,7 +1166,6 @@ void Recorder::Impl::Reproject(ID3D11ShaderResourceView* srcSrv, const RpConstan
 
     ID3D11Buffer* cb = rpCb.Get();
     ID3D11SamplerState* smp = rpSmp.Get();
-    ID3D11RenderTargetView* rtv = rpRtv.Get();
     const D3D11_VIEWPORT vpt{0.0f, 0.0f, (float)vpW, (float)vpH, 0.0f, 1.0f};
     encCtx->IASetInputLayout(nullptr);
     encCtx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -951,17 +1175,17 @@ void Recorder::Impl::Reproject(ID3D11ShaderResourceView* srcSrv, const RpConstan
     encCtx->DSSetShader(nullptr, nullptr, 0);
     encCtx->PSSetShader(rpPs.Get(), nullptr, 0);
     encCtx->PSSetConstantBuffers(0, 1, &cb);
-    encCtx->PSSetShaderResources(0, 1, &srcSrv);
+    encCtx->PSSetShaderResources(0, nSrv, srvs);
     encCtx->PSSetSamplers(0, 1, &smp);
     encCtx->RSSetState(nullptr);
     encCtx->RSSetViewports(1, &vpt);
     encCtx->OMSetBlendState(nullptr, nullptr, 0xffffffff);
     encCtx->OMSetDepthStencilState(nullptr, 0);
-    encCtx->OMSetRenderTargets(1, &rtv, nullptr);
+    encCtx->OMSetRenderTargets(nRtv, rtvs, nullptr);
     encCtx->Draw(3, 0);
-    ID3D11ShaderResourceView* nullSrv = nullptr;
+    ID3D11ShaderResourceView* nullSrv[3] = {};
     encCtx->OMSetRenderTargets(0, nullptr, nullptr);
-    encCtx->PSSetShaderResources(0, 1, &nullSrv);
+    encCtx->PSSetShaderResources(0, nSrv, nullSrv);
     encCtx->VSSetShader(nullptr, nullptr, 0);
     encCtx->PSSetShader(nullptr, nullptr, 0);
 
@@ -1092,8 +1316,14 @@ void Recorder::Impl::Process(const Item& it) {
 
     // head smoothing, CPU part: filter + per-eye re-projection constants (before taking the device lock)
     RpConstants rc{};
+    DomeConstants dc{};
     int64_t cpuTicks = 0;   // our own CPU time on the worker (filter + constants + draw submission), not lock / pool waits
-    if (stage) {
+    if (stage && dome.valid) {
+        const int64_t c0 = QpcNow100ns();
+        DomeConstantsFor(it, dc);
+        ++smFrames;
+        cpuTicks += QpcNow100ns() - c0;
+    } else if (stage) {
         const int64_t c0 = QpcNow100ns();
         SmoothEyeIn in[2];
         for (int e = 0; e < 2; ++e) {
@@ -1164,9 +1394,31 @@ void Recorder::Impl::Process(const Item& it) {
         view = inViews[it.slot].Get();
         if (!localCopies.empty()) encCtx->CopyResource(localCopies[it.slot].Get(), ring.tex[it.slot].Get());
     }
-    if (stage) {
+    if (stage && dome.valid) {
         const int64_t c0 = QpcNow100ns();
-        Reproject(rpSrc, rc);   // after the pre-pass (linear formats), so the colour path is unchanged
+        if (domeLastSeen) {
+            if (domeClear) {   // record start: black dome, never painted
+                const float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+                const float never[4] = {kDomeTimeReset, kDomeTimeReset, kDomeTimeReset, kDomeTimeReset};
+                encCtx->ClearRenderTargetView(domeRtv[domeCur].Get(), black);
+                encCtx->ClearRenderTargetView(domeTimeRtv[domeCur].Get(), never);
+                domeClear = false;
+            }
+            const int nx = domeCur ^ 1;
+            ID3D11ShaderResourceView* srvs[3] = {rpSrc, domeSrv[domeCur].Get(), domeTimeSrv[domeCur].Get()};
+            ID3D11RenderTargetView* rtvs[3] = {rpRtv.Get(), domeRtv[nx].Get(), domeTimeRtv[nx].Get()};
+            Reproject(srvs, 3, rtvs, 3, &dc, sizeof(dc));
+            domeCur = nx;
+        } else {
+            ID3D11RenderTargetView* rtv = rpRtv.Get();
+            Reproject(&rpSrc, 1, &rtv, 1, &dc, sizeof(dc));
+        }
+        view = rpView.Get();
+        cpuTicks += QpcNow100ns() - c0;
+    } else if (stage) {
+        const int64_t c0 = QpcNow100ns();
+        ID3D11RenderTargetView* rtv = rpRtv.Get();
+        Reproject(&rpSrc, 1, &rtv, 1, &rc, sizeof(rc));   // after the pre-pass (linear formats), so the colour path is unchanged
         view = rpView.Get();
         cpuTicks += QpcNow100ns() - c0;
     }
@@ -1261,6 +1513,9 @@ void Recorder::Impl::Cleanup() {
     linView.Reset(); linUav.Reset(); linTex.Reset(); linSrv.clear(); linCs.Reset();
     rpView.Reset(); rpRtv.Reset(); rpTex.Reset(); rpRingSrv.clear(); rpLinSrv.Reset(); rpQ.clear();
     rpCb.Reset(); rpSmp.Reset(); rpVs.Reset(); rpPs.Reset();
+    for (int i = 0; i < 2; ++i) {
+        domeTex[i].Reset(); domeTimeTex[i].Reset(); domeRtv[i].Reset(); domeTimeRtv[i].Reset(); domeSrv[i].Reset(); domeTimeSrv[i].Reset();
+    }
     outViews.clear();
     nv12.clear();
     poolCb.clear();

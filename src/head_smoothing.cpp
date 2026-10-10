@@ -120,6 +120,12 @@ void Identity(SmoothEyeOut& e) {
 
 } // namespace
 
+SmoothQuat QuatMul(const SmoothQuat& a, const SmoothQuat& b) { return Mul(a, b); }
+SmoothQuat QuatConj(const SmoothQuat& a) { return Conj(a); }
+SmoothQuat QuatNormalize(const SmoothQuat& a) { return Normalize(a); }
+SmoothQuat QuatSlerp(const SmoothQuat& a, const SmoothQuat& b, double t) { return Slerp(a, b, t); }
+void QuatToMatrix(const SmoothQuat& q, double m[9]) { ToMatrix(q, m); }
+
 SymmetricFov ComputeSymmetricFov(const float fovL[4], const float fovR[4], uint32_t wL, uint32_t hL, uint32_t wR, uint32_t hR) {
     SymmetricFov r;
     const float* f[2] = {fovL, fovR};

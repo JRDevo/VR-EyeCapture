@@ -6,7 +6,8 @@
 //   * game thread  : SubmitFrame() -- picks a free ring slot, IFrameSource::CopyEyes (GPU work only), queues it.
 //                    Never waits: a full ring (or a slot still busy on the GPU) drops the frame and counts it.
 //   * worker thread: everything else (device + ring creation, sink writer, per-frame [linear->sRGB pre-pass],
-//                    [head-motion smoothing re-projection], NV12 conversion and WriteSample, finalize, st3d).
+//                    [head-motion smoothing re-projection | VR180 / VR360 dome pass], NV12 conversion and WriteSample,
+//                    finalize, st3d (+ sv3d and a <name>.json sidecar for dome recordings).
 //                    One worker per recording.
 //   * audio thread : AudioCapture -> WriteSample on the audio stream.
 // The encoder device is private (created on the game's adapter); Media Foundation never touches the game's device.
@@ -20,6 +21,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include "dome.h"
 #include "frame_source.h"
 #include "head_smoothing.h"
 
@@ -33,6 +35,7 @@ struct RecorderSettings {
     bool         audio = true;
     std::wstring audioDevice;
     HeadSmoothingSettings head;      // head-motion smoothing + symmetric fov (both off: re-projection stage bypassed)
+    DomeSettings dome;               // projection = vr180 / vr360: dome output instead of the flat re-projection
     // The two views' fov (angleLeft, angleRight, angleUp, angleDown) and image sizes at record start: symmetric_fov
     // fixes the output frustum and size of the whole recording from these.
     bool         startFovValid = false;

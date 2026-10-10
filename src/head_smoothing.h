@@ -60,6 +60,13 @@ double HeadSmoothingTimeConstant(float smoothing);
 
 struct SmoothQuat { double x = 0, y = 0, z = 0, w = 1; };
 
+// Quaternion helpers (Hamilton product, unit quaternions; also used by dome.cpp).
+SmoothQuat QuatMul(const SmoothQuat& a, const SmoothQuat& b);
+SmoothQuat QuatConj(const SmoothQuat& a);
+SmoothQuat QuatNormalize(const SmoothQuat& a);
+SmoothQuat QuatSlerp(const SmoothQuat& a, const SmoothQuat& b, double t);
+void       QuatToMatrix(const SmoothQuat& q, double m[9]);   // row-major, v' = M v
+
 struct SmoothEyeIn {
     bool valid = false;              // pose and fov usable
     SmoothQuat q;                    // actual eye orientation

@@ -35,6 +35,7 @@ add_library(eye_capture_core STATIC
     src/source_vulkan.cpp
     src/recorder.cpp
     src/head_smoothing.cpp
+    src/dome.cpp
     src/indicator.cpp
     src/audio_capture.cpp
     src/st3d.cpp)

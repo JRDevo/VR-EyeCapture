@@ -245,6 +245,27 @@ KeyResult ApplyKey(Config& c, const std::wstring& key, std::wstring val) {
         if (ParseFloat(val, fl) && fl >= 0.0f && fl <= 1.0f) c.indicator.opacity = fl; else ok = false;
     } else if (key == L"symmetric_fov") {
         if (ParseBool(val, b)) c.head.symmetricFov = b; else ok = false;
+    } else if (key == L"projection") {
+        const std::wstring l = Lower(val);
+        if (l == L"flat") c.dome.projection = DomeProjection::Flat;
+        else if (l == L"vr180") c.dome.projection = DomeProjection::Vr180;
+        else if (l == L"vr360") c.dome.projection = DomeProjection::Vr360;
+        else ok = false;
+    } else if (key == L"dome_width") {
+        if (ParseUInt(val, u) && (u == 0 || (u >= 256 && u <= 16384))) c.dome.width = u; else ok = false;
+    } else if (key == L"dome_forward") {
+        const std::wstring l = Lower(val);
+        if (l == L"reset_on_hotkey") LOGW("config: dome_forward = reset_on_hotkey is not implemented yet -- using start");
+        else if (l != L"start") ok = false;
+    } else if (key == L"fill") {
+        const std::wstring l = Lower(val);
+        if (l == L"black") c.dome.fill = DomeFill::Black;
+        else if (l == L"last_seen") c.dome.fill = DomeFill::LastSeen;
+        else ok = false;
+    } else if (key == L"fill_fade_s") {
+        if (ParseFloat(val, fl) && fl >= 0.0f && fl <= 3600.0f) c.dome.fadeS = fl; else ok = false;
+    } else if (key == L"window_feather_deg") {
+        if (ParseFloat(val, fl) && fl >= 0.0f && fl <= 20.0f) c.dome.featherDeg = fl; else ok = false;
     } else if (key == L"log_level") {
         const std::wstring l = Lower(val);
         if (l == L"error") c.logLevel = LogLevel::Error;

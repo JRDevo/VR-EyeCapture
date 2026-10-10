@@ -4,6 +4,7 @@
 // Unknown keys and bad values are logged and ignored (the default is kept).
 #pragma once
 #include <string>
+#include "dome.h"
 #include "head_smoothing.h"
 #include "log.h"
 
@@ -47,6 +48,7 @@ struct Config {
     std::wstring ffmpegPath;             // ffmpeg_path: empty = PATH, then WinGet packages, then <dll folder>fmpegfmpeg.exe
     IndicatorSettings indicator;         // vr_indicator, indicator_x/_y/_z, indicator_size, indicator_opacity
     HeadSmoothingSettings head;          // head_smoothing, head_follow_deg, roll_lock, output_fov_scale, edge_guard, symmetric_fov
+    DomeSettings dome;                   // [dome] projection, dome_width, dome_forward, fill, fill_fade_s, window_feather_deg
     LogLevel     logLevel = LogLevel::Info;
     std::wstring loadedFrom;             // path of the ini that was read ("" = defaults only)
 };

@@ -103,10 +103,66 @@ bool ShiftChunkOffsets(std::vector<uint8_t>& buf, const Box& box, uint64_t child
     return true;
 }
 
+void PutBox(std::vector<uint8_t>& b, size_t at, const char* type) {   // size filled in by EndBox
+    b.resize(at + 8);
+    memcpy(&b[at + 4], type, 4);
+}
+void EndBox(std::vector<uint8_t>& b, size_t at) { PutBE32(&b[at], (uint32_t)(b.size() - at)); }
+void Put32(std::vector<uint8_t>& b, uint32_t v) { const size_t n = b.size(); b.resize(n + 4); PutBE32(&b[n], v); }
+
+// st3d (+ sv3d { svhd, proj { prhd, equi } }) -- Spherical Video V2 RFC, children of the video sample entry.
+std::vector<uint8_t> BuildBlob(unsigned char stereoMode, bool sv3d, const uint32_t bounds[4]) {
+    std::vector<uint8_t> b;
+    PutBox(b, 0, "st3d");
+    Put32(b, 0);                                   // version 0, flags 0
+    b.push_back(stereoMode);
+    EndBox(b, 0);
+    if (!sv3d) return b;
+    const size_t sv = b.size();
+    PutBox(b, sv, "sv3d");
+    const size_t hd = b.size();
+    PutBox(b, hd, "svhd");
+    Put32(b, 0);
+    const char src[] = "OpenXR-EyeCapture";       // metadata_source, null-terminated UTF-8
+    b.insert(b.end(), src, src + sizeof(src));
+    EndBox(b, hd);
+    const size_t pj = b.size();
+    PutBox(b, pj, "proj");
+    const size_t ph = b.size();
+    PutBox(b, ph, "prhd");
+    Put32(b, 0);
+    Put32(b, 0); Put32(b, 0); Put32(b, 0);         // pose yaw / pitch / roll, 16.16 fixed degrees
+    EndBox(b, ph);
+    const size_t eq = b.size();
+    PutBox(b, eq, "equi");
+    Put32(b, 0);
+    for (int i = 0; i < 4; ++i) Put32(b, bounds[i]);   // projection_bounds_top, bottom, left, right (0.32 fixed)
+    EndBox(b, eq);
+    EndBox(b, pj);
+    EndBox(b, sv);
+    return b;
+}
+
 } // namespace
 
 bool PatchSt3d(const std::wstring& path, unsigned char stereoMode, std::string& report) {
-    char msg[256];
+    return PatchStereoSpherical(path, stereoMode, false, nullptr, report);
+}
+
+bool PatchStereoSpherical(const std::wstring& path, unsigned char stereoMode, bool sv3d, const uint32_t equiBounds[4],
+                          std::string& report) {
+    char msg[320];
+    const uint32_t zero[4] = {0, 0, 0, 0};
+    const std::vector<uint8_t> blob = BuildBlob(stereoMode, sv3d, equiBounds ? equiBounds : zero);
+    char what[160];   // what was added, for the report
+    if (sv3d) {
+        const uint32_t* eb = equiBounds ? equiBounds : zero;
+        snprintf(what, sizeof(what), "stereo_mode=%u + sv3d (equirectangular, bounds t/b/l/r 0x%08x/0x%08x/0x%08x/0x%08x)",
+                 stereoMode, eb[0], eb[1], eb[2], eb[3]);
+    } else {
+        snprintf(what, sizeof(what), "stereo_mode=%u", stereoMode);
+    }
+    const char* tag = sv3d ? "st3d+sv3d" : "st3d";
     File f;
     f.h = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (f.h == INVALID_HANDLE_VALUE) { report = "st3d: cannot open the file for writing"; return false; }
@@ -174,11 +230,16 @@ bool PatchSt3d(const std::wstring& path, unsigned char stereoMode, std::string& 
         return true;
     }
 
+    if (sv3d && childStart <= entry.off + entry.size && FindChild(moov, entry, childStart, "sv3d", existing)) {
+        snprintf(msg, sizeof(msg), "%s: sv3d already present in '%s'", tag, entry.type);
+        report = msg;
+        return true;
+    }
+
     // --- build the new moov ---
-    const uint32_t kDelta = 13;
-    const uint8_t st3d[13] = {0, 0, 0, 13, 's', 't', '3', 'd', 0, 0, 0, 0, stereoMode};
+    const uint32_t kDelta = (uint32_t)blob.size();
     for (const Box* a : {&mv, &trak, &mdia, &minf, &stbl, &stsd, &entry}) GrowBox(moov, *a, kDelta);
-    moov.insert(moov.begin() + (ptrdiff_t)(entry.off + entry.size), st3d, st3d + kDelta);
+    moov.insert(moov.begin() + (ptrdiff_t)(entry.off + entry.size), blob.begin(), blob.end());
     // mv was parsed before the insert; size field already updated.
 
     const bool moovBeforeMdat = haveMdat && moovOff < mdatOff;
@@ -195,7 +256,7 @@ bool PatchSt3d(const std::wstring& path, unsigned char stereoMode, std::string& 
             return false;
         }
         FlushFileBuffers(f.h);
-        snprintf(msg, sizeof(msg), "st3d: added stereo_mode=%u to '%s' (moov after mdat, patched in place)", stereoMode, entry.type);
+        snprintf(msg, sizeof(msg), "%s: added %s to '%s' (moov after mdat, patched in place)", tag, what, entry.type);
         report = msg;
         return true;
     }
@@ -214,7 +275,7 @@ bool PatchSt3d(const std::wstring& path, unsigned char stereoMode, std::string& 
                     return false;
                 }
                 FlushFileBuffers(f.h);
-                snprintf(msg, sizeof(msg), "st3d: added stereo_mode=%u to '%s' (moov before mdat, used free box)", stereoMode, entry.type);
+                snprintf(msg, sizeof(msg), "%s: added %s to '%s' (moov before mdat, used free box)", tag, what, entry.type);
                 report = msg;
                 return true;
             }
@@ -249,7 +310,7 @@ bool PatchSt3d(const std::wstring& path, unsigned char stereoMode, std::string& 
         report = "st3d: rewrite failed (original file left unchanged)";
         return false;
     }
-    snprintf(msg, sizeof(msg), "st3d: added stereo_mode=%u to '%s' (moov before mdat, file rewritten, offsets +13)", stereoMode, entry.type);
+    snprintf(msg, sizeof(msg), "%s: added %s to '%s' (moov before mdat, file rewritten, offsets +%u)", tag, what, entry.type, kDelta);
     report = msg;
     return true;
 }
