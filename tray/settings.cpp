@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
+#include "install.h"
 #include "log.h"
 
 #pragma comment(linker, "\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
@@ -216,6 +217,15 @@ std::wstring TempPath() {
     wchar_t name[64];
     swprintf_s(name, L"eyecap-settings-%lu.ini", GetCurrentProcessId());
     return std::wstring(tmp) + name;
+}
+
+// Folder of the running exe: where the Run entry should point.
+std::wstring ExeFolder() {
+    wchar_t p[MAX_PATH * 2] = {};
+    const DWORD n = GetModuleFileNameW(nullptr, p, MAX_PATH * 2);
+    std::wstring s(p, n < MAX_PATH * 2 ? n : 0);
+    const size_t k = s.find_last_of(L"\\/");
+    return k == std::wstring::npos ? std::wstring() : s.substr(0, k);
 }
 
 Reporter g_reporter = nullptr;
@@ -485,6 +495,9 @@ const Help kHelp[] = {
     {ID_POSTFLAT, L"Also makes a normal 2D video from the left eye (<name>_FLAT.mp4) for viewers without a headset. "
                   L"Re-encodes with ffmpeg and takes a while."},
     {ID_LOGLEVEL, L"How much logs\\eye_capture.log and logs\\tray.log write. none = nothing at all. info is normal. debug is for bug reports."},
+    {ID_AUTOSTART, L"Starts this tray app when you sign in to Windows, so it already runs before you start a VR game "
+                   L"(the layer only records while the tray runs). Off by default. Writes one 'Run' entry for your Windows "
+                   L"account and nothing else. Untick it before you delete the folder."},
     {ID_OPENINI, L"Opens config.ini in a text editor. The file has every setting, with comments."},
     {ID_DEFAULTS, L"Puts every field back to the built-in default. Nothing is saved until you click Save."},
     {ID_SAVE, L"Writes the changed values into config.ini. The next recording uses them."},
@@ -632,6 +645,7 @@ void LoadFromFile() {
     ParseConfigFile(g_path, c, problems);
     if (c.hotkey.text.empty()) ParseHotkey(L"Ctrl+Shift+F10", c.hotkey);
     SetControls(FromConfig(c));
+    SendMessageW(Ctl(ID_AUTOSTART), BM_SETCHECK, install::AutostartEnabled() ? BST_CHECKED : BST_UNCHECKED, 0);
     if (!problems.empty()) {
         std::wstring m = L"These lines of the config file have a bad value. The window shows the default for them, and Save replaces them:\n\n";
         for (const auto& p : problems) m += p + L"\n";
@@ -651,6 +665,16 @@ void DoSave() {
         for (const auto& p : r.problems) m += p + L"\n";
         Report(L"Settings -- not saved", m);
         return;
+    }
+    // "Start with Windows" is a registry state, not a config.ini key: apply it after the config was written
+    const bool wantAuto = SendMessageW(Ctl(ID_AUTOSTART), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    const bool hadAuto = install::AutostartEnabled();
+    if (wantAuto != hadAuto) {
+        std::wstring err;
+        if (install::SetAutostart(wantAuto, ExeFolder(), err))
+            r.changed.push_back(wantAuto ? L"start_with_windows 0->1" : L"start_with_windows 1->0");
+        else
+            Report(L"Settings", L"Start with Windows could not be changed:\n" + err);
     }
     if (g_onSaved) g_onSaved(r.changed);
     DestroyWindow(g_dlg);
@@ -686,6 +710,7 @@ void CommandHandler(int id, int code) {
         Config d;
         ParseHotkey(L"Ctrl+Shift+F10", d.hotkey);
         SetControls(FromConfig(d));
+        SendMessageW(Ctl(ID_AUTOSTART), BM_SETCHECK, BST_UNCHECKED, 0);   // default: off
         break;
     }
     case ID_BROWSE: DoBrowse(); break;
@@ -928,6 +953,7 @@ int BuildControls(HWND dlg) {
     b.HiddenCheck(ID_REQTRAY);   // require_tray stays a config.ini key (default 1); the tray is required anyway, so no checkbox
     b.Label(ix, r, 65, L"Log level", ID_LOGLEVEL);
     b.Combo(ID_LOGLEVEL, ix + 70, r, 160);
+    b.Check(ID_AUTOSTART, ix + 250, r, 300, L"Start with Windows (this user)");
     y += 22 + row + 6 + 6;
 
     // ---- description panel (follows the mouse / keyboard focus, see Hover / ShowHelp)

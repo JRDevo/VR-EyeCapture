@@ -91,9 +91,9 @@ if (EYE_BUILD_TESTS)
     target_link_libraries(control_final_test PRIVATE eye_capture_core)
 
     # Settings window: config.ini writer (in-place edit, validation, hotkey names) + driver for the real dialog (no GPU).
-    add_executable(settings_test tests/settings_test.cpp tray/settings.cpp)
+    add_executable(settings_test tests/settings_test.cpp tray/settings.cpp tray/install.cpp)
     target_compile_options(settings_test PRIVATE ${EYE_WARN_FLAGS})
-    target_link_libraries(settings_test PRIVATE eye_capture_core comctl32)
+    target_link_libraries(settings_test PRIVATE eye_capture_core comctl32 advapi32)
     target_include_directories(settings_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tray)
 
     # Layer registration (tray/install.cpp) on test keys under HKCU (no admin, never the real OpenXR keys).

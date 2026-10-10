@@ -236,6 +236,21 @@ void ApplyTestRegRoots() {
     LOGI("tray: TEST registry roots: LM -> %s, CU -> %s", elog::Narrow(lm).c_str(), elog::Narrow(cu).c_str());
 }
 
+// Tests: EYECAP_TRAY_TEST_RUN_KEY=HKCU\<subkey> redirects the "Start with Windows" Run key (tray/install.h). A test-mode tray
+// (EYECAP_TRAY_TEST_SHM) without it uses Software\OpenXR-EyeCapture-Test\Run anyway, so a test never touches the real Run key.
+void ApplyTestRunKey(bool testMode) {
+    wchar_t v[512];
+    const DWORD n = GetEnvironmentVariableW(L"EYECAP_TRAY_TEST_RUN_KEY", v, 512);
+    if (n > 0 && n < 512) {
+        const std::wstring s = v;
+        if (s.size() > 5 && _wcsnicmp(s.c_str(), L"HKCU\\", 5) == 0) {
+            install::SetAutostartTestKey(s.substr(5));
+            return;
+        }
+    }
+    if (testMode) install::SetAutostartTestKey(L"Software\\OpenXR-EyeCapture-Test\\Run");
+}
+
 void Refresh() {
     g_live = false;
     const bool read = g_shm && EyeCapReadStatus(g_shm, g_st);
@@ -730,7 +745,8 @@ int RunRegCli(const std::wstring& arg) {
 
 // Command-line mode (no tray): EyeCaptureTray.exe --start | --stop | --toggle | --status
 // For scripts, Stream Deck buttons, and tests. Prints one status line; exit code 0 = a live game received the command.
-// --status also reports the layer registration: registered=yes|no|stale (read-only).
+// --status also reports the layer registration, registered=yes|no|stale, and autostart=yes|no ("Start with Windows",
+// the HKCU Run value) (read-only).
 int RunCli(const std::wstring& arg) {
     auto print = [](const std::wstring& s) { CliPrint(s); };
     if ((arg == L"--start" || arg == L"--toggle") && !EyeCapTrayRunning()) {
@@ -761,11 +777,13 @@ int RunCli(const std::wstring& arg) {
     std::wstring text = line;
     if (arg == L"--status") {
         ApplyTestRegRoots();
+        ApplyTestRunKey(GetEnvironmentVariableW(L"EYECAP_TRAY_TEST_SHM", nullptr, 0) > 0);
         const install::Status rs = install::Query(ExeDir());
         text += rs.state == install::State::StalePath ? L" registered=stale"
               : rs.state == install::State::NotRegistered ? L" registered=no" : L" registered=yes";
         if (rs.hkcuDuplicate) text += L" hkcu_duplicate=yes";
         if (!rs.filesPresent) text += L" files=missing";
+        text += install::AutostartEnabled() ? L" autostart=yes" : L" autostart=no";
     }
     print(text);
     UnmapViewOfFile(shm);
@@ -804,6 +822,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     GetSystemTimeAsFileTime(&g_trayStart);
     elog::Init(g_exeDir + L"\\logs\\tray.log", false);
     LOGI("tray: started%s (exe folder %s)", testMode ? " [TEST MODE, private status block]" : "", elog::Narrow(g_exeDir).c_str());
+    ApplyTestRunKey(testMode);   // before the settings window can open
     g_shm = testMode ? EyeCapOpenShared(&g_map, testShm) : EyeCapOpenShared(&g_map);
     g_icons[0] = MakeDotIcon(RGB(140, 140, 140));
     g_icons[1] = MakeDotIcon(RGB(40, 190, 70));
@@ -851,6 +870,10 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
             PostMessageW(g_wnd, WM_CHECK_REG, 0, 0);
         }
     }
+    // "Start with Windows" (HKCU Run value, tray/install.h): keep the entry pointed at this folder; runs in normal mode too
+    if (install::SyncAutostart(g_exeDir))
+        LOGI("tray: start-with-Windows entry pointed at another folder, updated to %s", elog::Narrow(install::AutostartCommand(g_exeDir)).c_str());
+    LOGI("tray: start with Windows: %s", install::AutostartEnabled() ? "on" : "off");
     Refresh();
 
     MSG m;

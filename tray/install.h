@@ -11,6 +11,15 @@
 //   - HKCU duplicates are removed by the NON-elevated tray itself (RemoveHkcuDuplicates): the elevated process may run
 //     as a different account, so its HKCU is not the user's.
 // Writing HKLM needs administrator rights: the tray runs itself elevated with --register / --unregister.
+//
+// "Start with Windows" (optional, off by default) is a separate, per-user registry state, NOT a config.ini key:
+//   HKCU\Software\Microsoft\Windows\CurrentVersion\Run, value "OpenXR-EyeCapture" (REG_SZ) = "<exeDir>\EyeCaptureTray.exe"
+//   (quoted, no arguments). No admin rights needed. Rules:
+//   - enabled = the value exists (whatever its data); SetAutostart(true) writes it, SetAutostart(false) deletes it
+//     (a missing value counts as success);
+//   - SyncAutostart rewrites an enabled entry whose data is not the expected command for this exe folder (the folder
+//     was moved); it never turns the option on by itself;
+//   - tests redirect the Run key to a subkey of HKCU with SetAutostartTestKey, so a real Run key is never touched.
 #pragma once
 #include <string>
 
@@ -45,6 +54,20 @@ int RemoveHkcuDuplicates();
 // Tests: replace the two roots (default HKLM / HKCU \SOFTWARE\Khronos\OpenXR\1\ApiLayers\Implicit) with keys given as
 // "HKCU\\Software\\OpenXR-EyeCapture-Test\\LM" (prefix HKCU\ or HKLM\). Empty strings restore the defaults.
 void SetTestRoots(const std::wstring& lmPath, const std::wstring& cuPath);
+
+// ---- Start with Windows (HKCU Run key, see the header comment) ----
+const wchar_t* AutostartValueName();   // "OpenXR-EyeCapture"
+// The command the Run value should hold for exeDir: "<exeDir>\EyeCaptureTray.exe" (quoted, no arguments).
+std::wstring AutostartCommand(const std::wstring& exeDir);
+// True when the Run value exists (any data); *storedCommand (optional) gets the data (empty when not enabled).
+bool AutostartEnabled(std::wstring* storedCommand = nullptr);
+// on: writes the Run value for exeDir. off: deletes it (already missing = success). False + err on a Win32 error.
+bool SetAutostart(bool on, const std::wstring& exeDir, std::wstring& err);
+// If enabled and the stored command differs from AutostartCommand(exeDir) (case-insensitive), rewrites it. Returns true
+// only when it rewrote the value; a no-op (false) when not enabled or already right.
+bool SyncAutostart(const std::wstring& exeDir);
+// Tests: redirect the Run key to "Software\\OpenXR-EyeCapture-Test\\Run" under HKCU. Empty restores the real key.
+void SetAutostartTestKey(const std::wstring& hkcuSubkey);
 
 const wchar_t* JsonName();   // "XR_APILAYER_JRDEVO_eye_capture.json"
 const wchar_t* DllName();    // "eye_capture.dll"

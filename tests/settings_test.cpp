@@ -19,6 +19,7 @@
 #include <string>
 #include <vector>
 #include "config.h"
+#include "install.h"
 #include "settings.h"
 
 namespace {
@@ -203,6 +204,9 @@ int TestDrive(DWORD pid, bool leaveSlider) {
     }
     Check(c.found != nullptr, "found the tray's message window");
     if (!c.found) return 1;
+    // the scratch tray (EYECAP_TRAY_TEST_SHM) keeps its "Start with Windows" entry in this test subkey, never the real Run key
+    install::SetAutostartTestKey(L"Software\\OpenXR-EyeCapture-Test\\Run");
+    { std::wstring e; install::SetAutostart(false, L"", e); }
     PostMessageW(c.found, WM_APP + 3, 0, 0);
     HWND d = WaitDialog(pid, true);
     Check(d != nullptr, "Settings window opened");
@@ -230,8 +234,18 @@ int TestDrive(DWORD pid, bool leaveSlider) {
     // "Make for YouTube" drop-down: item 2 = "both files" (post_mkv = 1 and post_yt8k = 1; run_settings.ps1 checks the saved file)
     SendMessageW(GetDlgItem(d, settings::ID_YTMODE), CB_SETCURSEL, 2, 0);
     if (!leaveSlider) SendMessageW(GetDlgItem(d, settings::ID_SMOOTH), TBM_SETPOS, TRUE, 7);   // 0.35 ("noslider": untouched keeps the file text)
+    Check(SendMessageW(GetDlgItem(d, settings::ID_AUTOSTART), BM_GETCHECK, 0, 0) == BST_UNCHECKED, "Start with Windows: unchecked by default");
+    SendMessageW(GetDlgItem(d, settings::ID_AUTOSTART), BM_SETCHECK, BST_CHECKED, 0);
     SendMessageW(GetDlgItem(d, settings::ID_SAVE), BM_CLICK, 0, 0);
     Check(WaitDialog(pid, false) == nullptr, "good values: Save closed the window");
+    std::wstring stored;
+    Check(install::AutostartEnabled(&stored), "Start with Windows ticked + Save: the (test) Run value exists");
+    Check(stored.size() > 2 && stored.front() == L'"' && stored.find(L"EyeCaptureTray.exe") != std::wstring::npos, "Run value is a quoted EyeCaptureTray.exe path");
+    printf("    Run value: %s\n", N(stored).c_str());
+    { std::wstring e; install::SetAutostart(false, L"", e); }
+    RegDeleteKeyW(HKEY_CURRENT_USER, L"Software\\OpenXR-EyeCapture-Test\\Run");
+    RegDeleteKeyW(HKEY_CURRENT_USER, L"Software\\OpenXR-EyeCapture-Test");   // only succeeds when empty
+    install::SetAutostartTestKey(L"");
     return g_fail;
 }
 } // namespace

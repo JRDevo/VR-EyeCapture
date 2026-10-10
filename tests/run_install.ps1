@@ -78,10 +78,17 @@ $gui = $null
 try {
     $env:APPDATA = Join-Path $t 'appdata'
     $env:EYECAP_TRAY_TEST_REG_ROOTS = $rootsEnv
+    $env:EYECAP_TRAY_TEST_RUN_KEY = 'HKCU\Software\OpenXR-EyeCapture-Test\Run'   # "Start with Windows" Run key redirected too
     $r = TrayCli $exe '--status'
     # guard: the real HKLM says "stale" for this folder; "no" proves the test roots are in effect
     if ($r.out -notmatch 'registered=no') { throw "test registry roots not in effect (got '$($r.out)'); stopping before any --register" }
     Step 'CLI --status on empty test keys: registered=no' $true
+    Step 'CLI --status on empty test keys: autostart=no' ($r.out -match 'autostart=no')
+    $runKey = 'HKCU:\Software\OpenXR-EyeCapture-Test\Run'
+    New-Item -Path $runKey -Force | Out-Null
+    New-ItemProperty -Path $runKey -Name 'OpenXR-EyeCapture' -Value 'x' -PropertyType String -Force | Out-Null
+    Step 'CLI --status with a test Run value: autostart=yes' ((TrayCli $exe '--status').out -match 'autostart=yes')
+    Remove-Item -Path $runKey -Recurse -Force
     SetVal $lmKey $stale
     Step 'CLI --status with a stale value: registered=stale' ((TrayCli $exe '--status').out -match 'registered=stale')
     $r = TrayCli $exe '--register'
@@ -138,7 +145,7 @@ try {
     Step 'GUI: picks up an outside --register within 15 s (re-query), tooltip back to normal' $ok
 } finally {
     $env:APPDATA = $oldAppdata
-    foreach ($v in @('EYECAP_TRAY_TEST_REG_ROOTS', 'EYECAP_TRAY_TEST_SHM', 'EYECAP_TRAY_TEST_REG')) { Remove-Item "Env:\$v" -ErrorAction SilentlyContinue }
+    foreach ($v in @('EYECAP_TRAY_TEST_REG_ROOTS', 'EYECAP_TRAY_TEST_RUN_KEY', 'EYECAP_TRAY_TEST_SHM', 'EYECAP_TRAY_TEST_REG')) { Remove-Item "Env:\$v" -ErrorAction SilentlyContinue }
     if ($gui -and -not $gui.HasExited) { Stop-Process -Id $gui.Id }
     & $unit cleanup | Out-Null
 }

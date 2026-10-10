@@ -20,6 +20,11 @@ struct Root {
 Root g_lm{HKEY_LOCAL_MACHINE, kImplicitKey};
 Root g_cu{HKEY_CURRENT_USER, kImplicitKey};
 
+const wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+const wchar_t kRunValue[] = L"OpenXR-EyeCapture";
+const wchar_t kTrayExe[] = L"EyeCaptureTray.exe";
+std::wstring g_runKey = kRunKey;   // HKCU subkey holding the Run value (tests redirect it)
+
 bool ParseRoot(const std::wstring& path, Root& out) {
     struct Prefix { const wchar_t* text; HKEY hive; };
     static const Prefix prefixes[] = {
@@ -265,6 +270,62 @@ bool Unregister(const std::wstring& exeDir, std::wstring& err, long* winErr) {
         return false;
     }
     return true;
+}
+
+const wchar_t* AutostartValueName() { return kRunValue; }
+
+std::wstring AutostartCommand(const std::wstring& exeDir) {
+    return L"\"" + ExeDirFull(exeDir) + L"\\" + kTrayExe + L"\"";
+}
+
+void SetAutostartTestKey(const std::wstring& hkcuSubkey) { g_runKey = hkcuSubkey.empty() ? std::wstring(kRunKey) : hkcuSubkey; }
+
+bool AutostartEnabled(std::wstring* storedCommand) {
+    if (storedCommand) storedCommand->clear();
+    HKEY k = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, g_runKey.c_str(), 0, KEY_QUERY_VALUE | kView, &k) != ERROR_SUCCESS) return false;
+    DWORD type = 0, size = 0;
+    LSTATUS e = RegQueryValueExW(k, kRunValue, nullptr, &type, nullptr, &size);
+    if (e != ERROR_SUCCESS) { RegCloseKey(k); return false; }
+    if (storedCommand && (type == REG_SZ || type == REG_EXPAND_SZ)) {
+        std::vector<wchar_t> buf(size / sizeof(wchar_t) + 2, 0);
+        DWORD sz2 = (DWORD)(buf.size() * sizeof(wchar_t)) - sizeof(wchar_t);
+        if (RegQueryValueExW(k, kRunValue, nullptr, &type, (LPBYTE)buf.data(), &sz2) == ERROR_SUCCESS) *storedCommand = buf.data();
+    }
+    RegCloseKey(k);
+    return true;
+}
+
+bool SetAutostart(bool on, const std::wstring& exeDir, std::wstring& err) {
+    err.clear();
+    const std::wstring what = L"HKCU\\" + g_runKey;
+    if (on) {
+        HKEY k = nullptr;
+        LSTATUS e = RegCreateKeyExW(HKEY_CURRENT_USER, g_runKey.c_str(), 0, nullptr, 0, KEY_SET_VALUE | kView, nullptr, &k, nullptr);
+        if (e != ERROR_SUCCESS) { err = L"cannot open " + what + L": " + Win32Text(e); return false; }
+        const std::wstring cmd = AutostartCommand(exeDir);
+        e = RegSetValueExW(k, kRunValue, 0, REG_SZ, (const BYTE*)cmd.c_str(), (DWORD)((cmd.size() + 1) * sizeof(wchar_t)));
+        RegCloseKey(k);
+        if (e != ERROR_SUCCESS) { err = L"cannot write " + std::wstring(kRunValue) + L" to " + what + L": " + Win32Text(e); return false; }
+        return true;
+    }
+    HKEY k = nullptr;
+    LSTATUS e = RegOpenKeyExW(HKEY_CURRENT_USER, g_runKey.c_str(), 0, KEY_SET_VALUE | kView, &k);
+    if (e == ERROR_FILE_NOT_FOUND) return true;   // no key = no value
+    if (e != ERROR_SUCCESS) { err = L"cannot open " + what + L": " + Win32Text(e); return false; }
+    e = RegDeleteValueW(k, kRunValue);
+    RegCloseKey(k);
+    if (e != ERROR_SUCCESS && e != ERROR_FILE_NOT_FOUND) { err = L"cannot remove " + std::wstring(kRunValue) + L" from " + what + L": " + Win32Text(e); return false; }
+    return true;
+}
+
+bool SyncAutostart(const std::wstring& exeDir) {
+    std::wstring stored;
+    if (!AutostartEnabled(&stored)) return false;
+    const std::wstring want = AutostartCommand(exeDir);
+    if (_wcsicmp(stored.c_str(), want.c_str()) == 0) return false;
+    std::wstring err;
+    return SetAutostart(true, exeDir, err);
 }
 
 int RemoveHkcuDuplicates() {

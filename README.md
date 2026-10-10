@@ -1,3 +1,14 @@
+> [!CAUTION]
+> ## THIS GITHUB PAGE IS THE ONLY PLACE THIS TOOL EXISTS
+> **`https://github.com/JRDevo/OpenXR-EyeCapture` is the only source of truth for this tool: the only place it is
+> published, the only place it is documented, and the only place to download it (its [Releases](https://github.com/JRDevo/OpenXR-EyeCapture/releases) page).**
+>
+> - There is **no website** for this tool. There **never will be** one. No Discord, no Patreon, no Nexus, no Steam Workshop, no app store.
+> - **DO NOT DOWNLOAD THIS TOOL FROM ANYWHERE ELSE.** Any other site, mirror, "launcher", "installer", video link or forum attachment that
+>   offers it is not mine and may carry anything. If it did not come from this GitHub page, do not run it.
+> - Updates, release notes, the hotkey and settings reference and the troubleshooting guide live here and only here. If someone tells you
+>   to get the tool somewhere else, they are wrong.
+
 # OpenXR-EyeCapture — stereo recorder for any OpenXR game
 
 Records **both eye images** of an OpenXR game, at exactly the resolution and quality the headset receives, into a
@@ -12,20 +23,44 @@ game files are touched.
 First tested target: **Euro Truck Simulator 2 / American Truck Simulator** (OpenXR beta, Direct3D 11) on Virtual
 Desktop. Any other OpenXR game that renders with Direct3D 11 or Direct3D 12 should work the same way.
 
-## Download
+**Menu:** [Features](#features) · [Download](#-download) · [Requirements](#requirements) · [Install](#install) · [How it works](#how-it-works-start-the-tray-app-first) · [Record](#record) · [YouTube](#upload-to-youtube) · [Settings](#settings--configini) · [Indicator](#in-headset-indicator) · [Smoothing](#head-motion-smoothing) · [Dome mode](#vr180--vr360-dome-mode-experimental) · [Troubleshooting](#log-and-troubleshooting) · [Cost](#cost) · [With other mods](#with-other-mods) · [Build](#building-from-source) · [Report a problem](#reporting-a-problem-what-to-upload) · [License](#license-and-credits)
 
-Get the latest `OpenXR-EyeCapture-v<version>.zip` from the
-[Releases page](https://github.com/JRDevo/OpenXR-EyeCapture/releases). To build it yourself, see "Building from source".
+## Features
 
-## What is new
+- **Both eyes, exact quality** — records each eye at the exact resolution and quality the headset receives, into a
+  side-by-side 3D MP4 with the game's audio.
+- **OpenXR API layer** — works with any runtime (Virtual Desktop VDXR, SteamVR, Oculus / Meta Link); nothing is injected
+  and no game files are touched.
+- **Direct3D 11 and 12 games** — any OpenXR game that renders with either.
+- **One hotkey** — default `Ctrl+Shift+F10`, or the tray icon, starts and stops a recording; beeps in the headset confirm.
+- **Tray app with a Settings window** — every option has a help text, no `config.ini` editing needed.
+- **One-click registration** — the tray registers the layer for you (one UAC prompt); **Register** / **Unregister** are in its menu.
+- **Tray menu** — Start / Stop recording, Open captures folder, Convert last recording now, Settings..., Open log,
+  Edit config, Register for VR games... / Unregister from VR games..., Exit.
+- **Tray icon colours** — grey, green, red, amber, blue; the tooltip shows game, resolution, fps, dropped frames and elapsed time.
+- **Start with Windows** — optional, off by default (Settings window → Advanced).
+- **Command line** — `--start | --stop | --toggle | --status` for scripts and Stream Deck buttons.
+- **Automatic MKV conversion** — with the Matroska 3D tag that YouTube recognises.
+- **Optional 8K YouTube copy** (`post_yt8k`) — a far sharper 3D picture on YouTube.
+- **Optional flat 2D copy** (`post_flat`) — for viewers without a headset.
+- **Head-motion smoothing and symmetric view** — for comfortable 3D.
+- **In-headset recording dot** — never appears in the video.
+- **VR180 / VR360 dome mode** — experimental.
+- **Config changes apply to the next recording** — no game restart.
+- **Hardware HEVC encoding** — NVIDIA GTX 10xx or newer, AMD RX 400 or newer, Intel 7th gen or newer.
+- **Dormant unless the tray runs** — the layer does nothing while the tray app is not running.
+- **Works alongside the [ETS2 / ATS DLAA + DLSS injector mod](https://github.com/JRDevo/ETS2-ATS-DLAA-DLSS-Injection-Mod)**.
+- **Log for bug reports** — `logs\eye_capture.log` and `logs\tray.log`.
 
-- **Settings window** in the tray menu: every option with a plain-English help text, no need to edit `config.ini`.
-- **One-click registration**: the tray app registers the layer for you (one UAC prompt), also from its menu.
-- **8K YouTube copy** (`post_yt8k`): a sharper 3D file for YouTube's 8K tier.
-- **VR180 / VR360 dome mode** (experimental).
-- **Head-motion smoothing** and a **symmetric view** for comfortable 3D.
-- **In-headset recording dot** that never appears in the video.
-- Config changes apply to the next recording, no game restart.
+## ⬇ Download
+
+**[Download the latest release here](https://github.com/JRDevo/OpenXR-EyeCapture/releases/latest)**
+— get `OpenXR-EyeCapture-v<version>.zip` under **Assets**, then follow [Install](#install) below.
+(The green **Code** button downloads the source code, not the tool.) To build it yourself, see "Building from source".
+
+This is an unofficial fan project. It is not affiliated with, or endorsed by, SCS Software, The Khronos Group, Meta,
+Valve or Virtual Desktop Inc. Euro Truck Simulator 2 and American Truck Simulator are trademarks of SCS Software;
+OpenXR is a trademark of The Khronos Group.
 
 ## Requirements
 
@@ -45,14 +80,16 @@ Get the latest `OpenXR-EyeCapture-v<version>.zip` from the
    (any older registration from another folder is replaced). Clicked No? Right-click the tray icon →
    **Register for VR games...** whenever you are ready; until then the tooltip says "Not registered for VR games".
    Moved the folder? Start the tray from the new folder and it offers to re-register from there.
-3. Optional: put a shortcut to `EyeCaptureTray.exe` in `shell:startup` (Win+R, `shell:startup`) so it always runs
-   (it must run before the game, see "How it works").
+3. Optional: tick **Start with Windows** in Settings... → Advanced so the tray app always runs (it must run before the
+   game, see "How it works"). This writes one Run entry for your Windows account (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`,
+   value `OpenXR-EyeCapture`).
 
-Uninstall: right-click the tray icon → **Unregister from VR games...** (one UAC prompt), exit the tray app and delete
+Uninstall: untick **Start with Windows** in Settings first (or delete that Run value), then right-click the tray icon →
+**Unregister from VR games...** (one UAC prompt), exit the tray app and delete
 the folder (recordings in `captures\` stay until you delete them).
 
 Command-line forms (from an administrator prompt): `EyeCaptureTray.exe --register` / `--unregister` (exit code 0 = done,
-5 = no administrator rights); `EyeCaptureTray.exe --status` prints `registered=yes|no|stale` among the status fields.
+5 = no administrator rights); `EyeCaptureTray.exe --status` prints `registered=yes|no|stale` and `autostart=yes|no` among the status fields.
 `scripts\install.ps1` / `uninstall.ps1` are only for building from source (see [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)).
 
 ## How it works: start the tray app first
@@ -84,7 +121,8 @@ If the game crashes or is killed while recording, the MP4 is lost (it is only fi
 blue = converting a finished recording (see "Upload to YouTube").
 Right-click: Start / Stop recording, Open captures folder, Convert last recording now, Open log, Edit config, Exit. The tooltip shows game,
 resolution, fps, dropped frames and elapsed time, and "converting <file> (MKV)..." / "last: <file>.mkv ready". `EyeCaptureTray.exe --start | --stop | --toggle | --status` does the
-same from a script or a Stream Deck button (`--start` / `--toggle` print an error if the tray app is not running).
+same from a script or a Stream Deck button (`--start` / `--toggle` print an error if the tray app is not running);
+`--status` also prints `registered=yes|no|stale` and `autostart=yes|no`.
 
 ## Upload to YouTube
 
@@ -133,7 +171,9 @@ from <path>: changed bitrate_mbps=20->60, ...`.
 Tray menu -> **Settings...** edits the same file (the `%APPDATA%` copy if it exists, else the one next to the tray app;
 the path is shown at the top of the window): recording (hotkey with a "Press a key..." button, codec, bitrate, max fps,
 output folder, audio), 3D (projection, fill, symmetric fov, swap eyes, roll lock, head-smoothing slider, output fov scale),
-the in-headset indicator, what happens after a recording, and the log level (`require_tray` is a config.ini-only key: the tray is required anyway). **Save** rewrites only the lines
+the in-headset indicator, what happens after a recording, and an Advanced group with the log level and the **Start with Windows** checkbox
+(`require_tray` is a config.ini-only key: the tray is required anyway). **Start with Windows** is a registry entry for your
+Windows account (one `Run` value, see Install), not a config.ini key; it is off by default and applied on **Save**. **Save** rewrites only the lines
 whose value changed, in place: comments, blank lines, section headers and keys the window does not know stay as they are
 (a missing key is added at the end of its section). A value the parser would reject is refused with a message and nothing
 is written. After a save the tray tooltip says "settings saved" for 5 s and `logs\tray.log` lists the changed keys. The
@@ -319,13 +359,49 @@ thread or GPU queue.
 See [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md). Short version: Visual Studio 2022, then
 `powershell -ExecutionPolicy Bypass -File scripts\package.ps1`.
 
-## License
+## Reporting a problem (what to upload)
 
-[PolyForm Noncommercial License 1.0.0](LICENSE.md), Copyright (c) 2026 JRDevo (same license as the ETS2 / ATS DLAA + DLSS injector mod).
+If something goes wrong, [open an issue](../../issues/new/choose) on this GitHub page and attach the files below.
+Without the logs I usually can't tell what happened.
+
+**Files to attach** — from the tool's folder (next to `eye_capture.dll`):
+
+- **`logs\eye_capture.log`** — **required, always.**
+- **`logs\tray.log`** — **required.**
+- **`config.ini`** — **required** (your settings).
+
+**Write in the issue:**
+
+- Game, and whether it was started with `-openxr`.
+- Headset and runtime (e.g. Quest 3 via Virtual Desktop / VDXR, SteamVR).
+- GPU and driver version.
+- Windows version.
+- Tool version (the name of the zip you downloaded).
+- What you pressed and what happened (beeps heard, tray icon colour).
+- Other OpenXR layers or mods in use (the DLAA injector, OpenXR Toolkit, etc.).
+
+**Privacy:** the logs contain folder paths with your Windows user name. Open them and check (or edit them) before uploading.
+
+## License and credits
+
+**This tool** — [PolyForm Noncommercial License 1.0.0](LICENSE.md), Copyright (c) 2026 JRDevo (same license as the ETS2 / ATS DLAA + DLSS injector mod).
 
 - Free to use, copy, change and share for **noncommercial** purposes.
 - **No commercial use** (no selling, no paid bundles) without written permission.
 - If you share it, include the license and the copyright notice.
 - No warranty: you use it at your own risk.
 
-Third-party parts have their own terms, see [`THIRD_PARTY.md`](THIRD_PARTY.md).
+**How it was made** -- the ideas, the direction, every test round in the headset and the verdicts are JRDevo's. The code and docs were written by Claude (Anthropic): Claude Fable 5.1 as
+the lead, with Claude Opus 5.5, Opus 4.8 and Sonnet 5.5 agents doing the building.
+JRDevo gains nothing from this tool except a fixed problem and a shared solution: no money, no donations,
+no paid versions. Made with love.
+
+**Third-party parts** — each has its own terms, see [`THIRD_PARTY.md`](THIRD_PARTY.md):
+
+| Part | License | Shipped with this tool? |
+|------|---------|-------------------------|
+| OpenXR SDK headers (Khronos) | Apache-2.0 | Compiled into `eye_capture.dll` (headers only; the OpenXR loader is not shipped) |
+| Windows SDK components (Direct3D 11 / 12, DXGI, Media Foundation, WASAPI) | Part of Windows | Used through the operating system, not redistributed |
+| ffmpeg | — | **Not shipped.** You install it yourself (`winget install Gyan.FFmpeg.Essentials`) and the tray app calls it |
+
+Unofficial fan project: not affiliated with, or endorsed by, SCS Software, The Khronos Group, Meta, Valve or Virtual Desktop Inc.

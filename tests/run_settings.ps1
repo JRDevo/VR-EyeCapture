@@ -26,7 +26,7 @@ $s = Join-Path $root 'build\settings_scratch'
 if (Test-Path $s) { Remove-Item -Recurse -Force $s }
 New-Item -ItemType Directory $s | Out-Null
 # the live config.ini may have any projection: the scratch copies always start at vr180 so the expected diff is fixed
-$scratchIni = (Get-Content (Join-Path $root 'config.ini') -Raw) -replace '(?m)^projection = \S+', 'projection = vr180'
+$scratchIni = (Get-Content (Join-Path $root 'config.ini') -Raw) -replace '(?m)^projection = \S+', 'projection = vr180' -replace '(?m)^hotkey = \S+', 'hotkey = ScrollLock'
 $scratchIni | Set-Content (Join-Path $s 'config.ini') -NoNewline -Encoding utf8; $scratchIni | Set-Content (Join-Path $s 'before.ini') -NoNewline -Encoding utf8
 & $test save (Join-Path $s 'config.ini'); Step 'save' ($LASTEXITCODE -eq 0)
 $b = Get-Content (Join-Path $s 'before.ini'); $a = Get-Content (Join-Path $s 'config.ini')
@@ -42,7 +42,7 @@ if (Test-Path $t) { Remove-Item -Recurse -Force $t }
 New-Item -ItemType Directory (Join-Path $t 'appdata\OpenXR-EyeCapture') | Out-Null
 Copy-Item (Join-Path $bin 'EyeCaptureTray.exe') $t
 $ini = Join-Path $t 'appdata\OpenXR-EyeCapture\config.ini'
-(Get-Content (Join-Path $root 'config.ini') -Raw) -replace '(?m)^head_smoothing = [\d.]+', 'head_smoothing = 0.57' -replace '(?m)^projection = \S+', 'projection = vr180' -replace '(?m)^post_mkv = \S+', 'post_mkv = 1' -replace '(?m)^post_yt8k = \S+', 'post_yt8k = 0' | Set-Content $ini -NoNewline -Encoding utf8
+(Get-Content (Join-Path $root 'config.ini') -Raw) -replace '(?m)^head_smoothing = [\d.]+', 'head_smoothing = 0.57' -replace '(?m)^projection = \S+', 'projection = vr180' -replace '(?m)^hotkey = \S+', 'hotkey = ScrollLock' -replace '(?m)^post_mkv = \S+', 'post_mkv = 1' -replace '(?m)^post_yt8k = \S+', 'post_yt8k = 0' | Set-Content $ini -NoNewline -Encoding utf8
 Copy-Item $ini (Join-Path $t 'before.ini')
 $oldAppdata = $env:APPDATA
 try {
@@ -56,7 +56,7 @@ try {
     Write-Host '--- tray.log (settings lines):'
     $log -split "`r?`n" | Where-Object { $_ -match 'settings|tooltip' -or $_ -match '^\s*line \d+' } | ForEach-Object { Write-Host "  $_" }
     Step 'bad value went through the reporter (not a real message box)' ($log -match "settings message box \[Settings -- not saved\][\s\S]*bad value '7' for output_fov_scale")
-    Step 'tray.log lists the changed keys' ($log -match 'settings saved to .*changed hotkey ScrollLock->F7, bitrate_mbps 0->20, swap_eyes 0->1, output_fov_scale 0\.9->0\.85, projection vr180->flat, post_yt8k 0->1')
+    Step 'tray.log lists the changed keys' ($log -match 'settings saved to .*changed hotkey ScrollLock->F7, bitrate_mbps 0->20, swap_eyes 0->1, output_fov_scale 0\.9->0\.85, projection vr180->flat, post_yt8k 0->1, start_with_windows 0->1')
     Step 'tooltip says settings saved' ($log -match "tooltip now: settings saved \S+ applies to the next recording")
     Step 'tooltip restored after 5 s' ($log -match 'tooltip restored: OpenXR-EyeCapture: no OpenXR game running')
 } finally {

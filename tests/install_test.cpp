@@ -261,6 +261,29 @@ int RunAll() {
         Check(false, "could not create the read-only key");
     }
 
+    printf("10. Start with Windows (Run key redirected to a test subkey)\n");
+    install::SetAutostartTestKey(L"Software\\OpenXR-EyeCapture-Test\\Run");
+    {
+        std::wstring stored = L"junk";
+        const std::wstring dirA = L"C:\\A", dirB = L"C:\\B";
+        Check(!install::AutostartEnabled(&stored) && stored.empty(), "not enabled at first (stored command empty)");
+        Check(!install::SyncAutostart(dirA), "SyncAutostart when not enabled: no-op");
+        Check(!install::AutostartEnabled(), "SyncAutostart did not turn it on");
+        Check(install::SetAutostart(true, dirA, err), "SetAutostart(true) succeeds");
+        Check(install::AutostartEnabled(&stored), "enabled");
+        Check(stored == install::AutostartCommand(dirA), "stored command == AutostartCommand(C:\\A)");
+        Check(install::AutostartCommand(dirA) == L"\"C:\\A\\EyeCaptureTray.exe\"", "command is quoted, no arguments");
+        Check(!install::SyncAutostart(dirA), "SyncAutostart with the same folder: false (nothing rewritten)");
+        Check(install::SyncAutostart(dirB), "SyncAutostart with another folder: true (rewritten)");
+        Check(install::AutostartEnabled(&stored) && stored == install::AutostartCommand(dirB) && stored.find(L"C:\\B") != std::wstring::npos,
+              "stored command now names C:\\B");
+        Check(!install::SyncAutostart(L"c:\\b"), "SyncAutostart: case-insensitive compare");
+        Check(install::SetAutostart(false, dirA, err), "SetAutostart(false) succeeds");
+        Check(!install::AutostartEnabled(&stored) && stored.empty(), "not enabled again");
+        Check(install::SetAutostart(false, dirA, err), "SetAutostart(false) again: still success");
+    }
+    install::SetAutostartTestKey(L"");
+
     install::SetTestRoots(L"", L"");
     Cleanup();
     for (const std::wstring& d : {a, missing, jsonOnly}) {
