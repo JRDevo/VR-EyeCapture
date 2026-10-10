@@ -128,6 +128,8 @@ from <path>: changed bitrate_mbps=20->60, ...`.
 
 ### Settings window
 
+![The Settings window](docs/images/settings.png)
+
 Tray menu -> **Settings...** edits the same file (the `%APPDATA%` copy if it exists, else the one next to the tray app;
 the path is shown at the top of the window): recording (hotkey with a "Press a key..." button, codec, bitrate, max fps,
 output folder, audio), 3D (projection, fill, symmetric fov, swap eyes, roll lock, head-smoothing slider, output fov scale),
@@ -316,3 +318,14 @@ thread or GPU queue.
 
 See [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md). Short version: Visual Studio 2022, then
 `powershell -ExecutionPolicy Bypass -File scripts\package.ps1`.
+
+## License
+
+[PolyForm Noncommercial License 1.0.0](LICENSE.md), Copyright (c) 2026 JRDevo (same license as the ETS2 / ATS DLAA + DLSS injector mod).
+
+- Free to use, copy, change and share for **noncommercial** purposes.
+- **No commercial use** (no selling, no paid bundles) without written permission.
+- If you share it, include the license and the copyright notice.
+- No warranty: you use it at your own risk.
+
+Third-party parts have their own terms, see [`THIRD_PARTY.md`](THIRD_PARTY.md).

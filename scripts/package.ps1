@@ -56,6 +56,7 @@ $files = @(
     @{ src = (Join-Path $root 'config.ini'); name = 'config.ini' },
     @{ src = (Join-Path $root 'README.md'); name = 'README.md' },
     @{ src = (Join-Path $root 'THIRD_PARTY.md'); name = 'THIRD_PARTY.md' },
+    @{ src = (Join-Path $root 'LICENSE.md'); name = 'LICENSE.md' },
     @{ src = (Join-Path $root 'scripts\make_mkv.ps1'); name = 'scripts\make_mkv.ps1' }
 )
 foreach ($f in $files) {
