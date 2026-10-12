@@ -664,7 +664,10 @@ void CollectOverlays(SessionData* sd, const XrFrameEndInfo* info, uint32_t projI
             QuatMul(head.q, vq, sq);
             QuatRotate(head.q, vsp->second.p, sp);
             sp[0] += head.p[0]; sp[1] += head.p[1]; sp[2] += head.p[2];
-            spaceHow = "VIEW space: on the head of the submitted views";
+            // head smoothing turns the recorded camera away from this head: the recorder moves the layer with it
+            // (OverlayHeadLock), so it stays fixed in the video like a HUD instead of shaking with the residual jitter
+            L.headLocked = true;
+            spaceHow = "VIEW space: on the head of the submitted views, head-locked";
         } else if (h->space != proj->space) {   // any other space: located at the frame's display time (cached per space)
             Located* lc = nullptr;
             for (uint32_t k = 0; k < nCache; ++k) if (cache[k].space == h->space) lc = &cache[k];

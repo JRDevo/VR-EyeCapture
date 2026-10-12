@@ -4,7 +4,7 @@
 // XR_EYE_CAPTURE_AUTORECORD (starts at the first frame, stops after N s) into XR_EYE_CAPTURE_OUTPUT_DIR.
 //
 //   layer_e2e [--api d3d11|d3d12] [--layout two|array|wide|msaa] [--eye 1920x1080] [--seconds 6] [--record 4]
-//             [--out-dir dir] [--expect-dormant] [--jitter] [--overlays] [--stale-pose] [--opaque-projection]
+//             [--out-dir dir] [--expect-dormant] [--jitter] [--hud] [--overlays] [--stale-pose] [--opaque-projection]
 // --overlays (record_overlays test; tests/run_e2e.ps1 has the expected pixel positions): every frame also submits, AFTER
 // the projection layer, four overlay layers drawn with clears into their own R8G8B8A8_UNORM_SRGB swapchains:
 //   A quad, projection (LOCAL) space, pose (0, 1.45, -2), 0.5 x 0.5 m, opaque green (alpha 255, SOURCE_ALPHA flag)
@@ -32,6 +32,10 @@
 // --jitter (D3D11, layout two): the mock runtime reports the head motion of tests/test_motion.h through xrLocateViews
 // and every frame renders a world-locked grid + marker for the located pose / fov and submits that pose / fov, like a
 // game. Prints E2E_T0_NS=<first predictedDisplayTime> (t = 0 of the motion). Default eye size 1408x1440.
+// --hud (with --jitter; the hud cases of tests/run_jitter.ps1): two opaque quads after the projection layer, each from its
+// own 64x32 R8G8B8A8_UNORM_SRGB swapchain cleared every frame: V green (40, 200, 40) in a VIEW space at (0.12, -0.10, -1),
+// 0.10 x 0.06 m (head-locked, like the DLAA injector's panel), W magenta (200, 40, 200) in the projection (LOCAL) space
+// at (-0.25, 1.75, -2), 0.12 x 0.08 m (world-locked).
 // Prints the path of the produced MP4 ("E2E_OUTPUT=<path>"). Exit code 0 = a new MP4 appeared
 // (--expect-dormant: the layer must NOT record, e.g. no tray running; exit 0 = loop completed and no MP4 appeared).
 #include <windows.h>
@@ -97,7 +101,7 @@ int main(int argc, char** argv) {
     std::string api = "d3d11", layout = "two";
     unsigned eyeW = 1920, eyeH = 1080;
     double seconds = 6, record = 4;
-    bool expectDormant = false, jitter = false, eyeSet = false, overlays = false, stalePose = false, opaqueProj = false;
+    bool expectDormant = false, jitter = false, eyeSet = false, overlays = false, stalePose = false, opaqueProj = false, hud = false;
     std::wstring outDir = ExeDir() + L"\\e2e_out";
     for (int i = 1; i < argc; ++i) {
         std::string k = argv[i];
@@ -106,6 +110,7 @@ int main(int argc, char** argv) {
         else if (k == "--layout") layout = next();
         else if (k == "--eye") { std::string v = next(); sscanf_s(v.c_str(), "%ux%u", &eyeW, &eyeH); eyeSet = true; }
         else if (k == "--jitter") jitter = true;
+        else if (k == "--hud") hud = true;
         else if (k == "--overlays") overlays = true;
         else if (k == "--stale-pose") stalePose = overlays = true;
         else if (k == "--opaque-projection") opaqueProj = true;
@@ -119,6 +124,7 @@ int main(int argc, char** argv) {
     const bool arr = layout == "array", wide = layout == "wide", msaa = layout == "msaa";
     if (jitter && (d3d12 || layout != "two")) { printf("--jitter needs --api d3d11 --layout two\n"); return 2; }
     if (jitter && !eyeSet) { eyeW = 1408; eyeH = 1440; }
+    if (hud && (!jitter || overlays)) { printf("--hud needs --jitter (and no --overlays)\n"); return 2; }
     SetEnvironmentVariableW(L"EYECAP_MOCK_MOTION", (jitter || stalePose) ? L"jitter" : nullptr);
     CreateDirectoryW(outDir.c_str(), nullptr);
     SetEnvironmentVariableW(L"XR_RUNTIME_JSON", (ExeDir() + L"\\mock_runtime.json").c_str());
@@ -126,8 +132,8 @@ int main(int argc, char** argv) {
     wchar_t rec[32];
     swprintf_s(rec, L"%.2f", record);
     SetEnvironmentVariableW(L"XR_EYE_CAPTURE_AUTORECORD", record > 0 ? rec : nullptr);   // --record 0: no autorecord (hotkey / tray test)
-    printf("layer_e2e: api=%s layout=%s eye=%ux%u seconds=%.1f record=%.1f%s%s\n", api.c_str(), layout.c_str(), eyeW, eyeH,
-           seconds, record, jitter ? " jitter" : "", overlays ? " overlays" : "");
+    printf("layer_e2e: api=%s layout=%s eye=%ux%u seconds=%.1f record=%.1f%s%s%s\n", api.c_str(), layout.c_str(), eyeW, eyeH,
+           seconds, record, jitter ? " jitter" : "", hud ? " hud" : "", overlays ? " overlays" : "");
     const ULONGLONG startTime = GetTickCount64();
     FILETIME ftStart;
     GetSystemTimeAsFileTime(&ftStart);
@@ -376,6 +382,36 @@ int main(int argc, char** argv) {
                "equirect2, equirect, 4x MSAA quad, FP16 quad, 10-bit quad, colour scale / bias quad)\n",
                opaqueProj ? " (projection opaque: hidden)" : " (projection with source alpha)");
     }
+    // ---- --hud: V (VIEW space, green) and W (LOCAL, magenta) quads, D3D11 ----
+    std::vector<Sc> huds(hud ? 2 : 0);
+    const float kHudColour[2][4] = {{40 * k255, 200 * k255, 40 * k255, 1}, {200 * k255, 40 * k255, 200 * k255, 1}};
+    if (hud) {
+        XrReferenceSpaceCreateInfo vsi{XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
+        vsi.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
+        vsi.poseInReferenceSpace.orientation.w = 1;
+        CHECK(xrCreateReferenceSpace(session, &vsi, &viewSpace));
+        for (Sc& s : huds) {
+            XrSwapchainCreateInfo sc{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+            sc.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
+            sc.format = kS;
+            sc.sampleCount = 1; sc.width = 64; sc.height = 32; sc.faceCount = 1; sc.arraySize = 1; sc.mipCount = 1;
+            CHECK(xrCreateSwapchain(session, &sc, &s.h));
+            s.w = sc.width; s.hgt = sc.height;
+            uint32_t n = 0;
+            CHECK(xrEnumerateSwapchainImages(s.h, 0, &n, nullptr));
+            std::vector<XrSwapchainImageD3D11KHR> imgs(n, {XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR});
+            CHECK(xrEnumerateSwapchainImages(s.h, n, &n, (XrSwapchainImageBaseHeader*)imgs.data()));
+            for (auto& im : imgs) {
+                D3D11_RENDER_TARGET_VIEW_DESC rd{};
+                rd.Format = kU;
+                rd.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+                ComPtr<ID3D11RenderTargetView> v;
+                if (FAILED(dev11->CreateRenderTargetView(im.texture, &rd, &v))) { printf("hud RTV failed\n"); return 1; }
+                s.rtv11.push_back(v);
+            }
+        }
+        printf("E2E_HUD=1 (quad V VIEW space green, quad W LOCAL magenta)\n");
+    }
 
     // ---- frame loop ----
     const uint32_t frames = (uint32_t)(seconds * 90);
@@ -438,6 +474,17 @@ int main(int argc, char** argv) {
                     if (c1) list->ClearRenderTargetView(ovs[k].rtv12[rv], c1, 1, &part);
                 }
             }
+        }
+        for (size_t k = 0; k < huds.size(); ++k) {
+            uint32_t hi = 0;
+            XrSwapchainImageAcquireInfo ai{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+            CHECK(xrAcquireSwapchainImage(huds[k].h, &ai, &hi));
+            XrSwapchainImageWaitInfo wi{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+            wi.timeout = XR_INFINITE_DURATION;
+            CHECK(xrWaitSwapchainImage(huds[k].h, &wi));
+            ctx11->ClearRenderTargetView(huds[k].rtv11[hi].Get(), kHudColour[k]);
+            XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+            CHECK(xrReleaseSwapchainImage(huds[k].h, &ri));
         }
         XrCompositionLayerProjectionView views[2] = {{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}, {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}};
         for (int e = 0; e < 2; ++e) {
@@ -610,6 +657,20 @@ int main(int argc, char** argv) {
             qs.next = &csb;
             quad(qs, 13, 1.02f, 2.057f);
         }
+        XrCompositionLayerQuad hv{XR_TYPE_COMPOSITION_LAYER_QUAD}, hw{XR_TYPE_COMPOSITION_LAYER_QUAD};
+        if (hud) {
+            for (int k = 0; k < 2; ++k) {
+                XrCompositionLayerQuad& q = k == 0 ? hv : hw;
+                q.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+                q.space = k == 0 ? viewSpace : space;
+                q.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+                q.subImage.swapchain = huds[k].h;
+                q.subImage.imageRect = {{0, 0}, {64, 32}};
+                layers[nLayers++] = (const XrCompositionLayerBaseHeader*)&q;
+            }
+            hv.pose = {{0, 0, 0, 1}, {0.12f, -0.10f, -1.0f}}; hv.size = {0.10f, 0.06f};
+            hw.pose = {{0, 0, 0, 1}, {-0.25f, 1.75f, -2.0f}}; hw.size = {0.12f, 0.08f};
+        }
         XrFrameEndInfo fei{XR_TYPE_FRAME_END_INFO};
         fei.displayTime = fs.predictedDisplayTime;
         fei.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
@@ -623,6 +684,7 @@ int main(int argc, char** argv) {
     CHECK(xrEndSession(session));
     for (auto& s : scs) CHECK(xrDestroySwapchain(s.h));
     for (auto& s : ovs) CHECK(xrDestroySwapchain(s.h));
+    for (auto& s : huds) CHECK(xrDestroySwapchain(s.h));
     if (viewSpace) xrDestroySpace(viewSpace);
     xrDestroySpace(space);
     CHECK(xrDestroySession(session));

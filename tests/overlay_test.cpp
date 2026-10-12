@@ -2,11 +2,16 @@
 // pixel box, the winding that decides which side is visible, format families. No GPU.
 // Setup = tests/layer_e2e --overlays on the mock runtime: eyes at (-+0.032, 1.6, 0), identity orientation, fov +-0.8
 // rad, 1920 x 1080 per eye, right eye at x0 = 1920 of the side-by-side frame.
+// Head smoothing + a head-locked (VIEW-space) quad: tests/test_motion.h jitter + turn, asymmetric fovs, flat and
+// symmetric output, eyes parallel or canted: the quad's corner must stay at one output pixel (OverlayHeadLock).
 #include <windows.h>
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include "head_smoothing.h"
 #include "overlay.h"
+#include "test_motion.h"
 
 namespace {
 int g_fail = 0;
@@ -37,6 +42,77 @@ double Winding(const OverlayVertex* v, const OverlayEye& E) {
     double x0, y0, x1, y1, x2, y2;
     Screen(v[0], E, x0, y0); Screen(v[1], E, x1, y1); Screen(v[2], E, x2, y2);
     return (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
+}
+// Head smoothing + a head-locked quad, the recorder's path on the CPU: the layer is placed on the submitted head like
+// CollectOverlays does (head = nlerp of the eye orientations, midpoint of the eye positions; pose T in the VIEW space),
+// moved by OverlayHeadLock with the frame's headCorr, projected into each ACTUAL eye (OverlayClipVertices), and that
+// source ray is taken through the re-projection (output ray d = C^T a) to the output camera's tangent. Returns the
+// largest drift of the quad's corner over 6 s of jitter + a 30 degree turn, in output pixels (~700 px per unit tan,
+// the mock's density), with (lock = true) and without the correction.
+double HeadLockDrift(bool sym, double cantDeg, bool lock) {
+    using namespace test_motion;
+    HeadSmoothingSettings hs;
+    hs.smoothing = 0.6f; hs.fovScale = 0.9f;
+    HeadSmoother sm(hs);
+    if (sym) {
+        const SymmetricFov f = ComputeSymmetricFov(kFovLeft, kFovRight, 1408, 1440, 1408, 1440);
+        sm.SetSymmetricOutput(f.tanH, f.tanV);
+    }
+    const double kPxPerTan = 700.0;
+    double ref[2][2] = {}, worst = 0;
+    for (int f = 0; f < 540; ++f) {
+        const double t = f / 90.0;
+        const Quat H = Head(t);
+        float m[9];
+        Matrix(H, m);
+        OverlayEye E[2];
+        SmoothEyeIn in[2];
+        for (int e = 0; e < 2; ++e) {
+            const Quat q = Mul(H, Axis(0, 1, 0, (e == 0 ? cantDeg : -cantDeg) * kDeg));   // canted outwards
+            const double ipd = e == 0 ? -0.032 : 0.032;
+            E[e].valid = true;
+            E[e].q[0] = (float)q.x; E[e].q[1] = (float)q.y; E[e].q[2] = (float)q.z; E[e].q[3] = (float)q.w;
+            E[e].p[0] = (float)(m[0] * ipd); E[e].p[1] = (float)(1.6 + m[3] * ipd); E[e].p[2] = (float)(m[6] * ipd);
+            for (int i = 0; i < 4; ++i) E[e].fov[i] = e == 0 ? kFovLeft[i] : kFovRight[i];
+            E[e].x0 = e == 0 ? 0 : 1408; E[e].w = 1408; E[e].h = 1440;
+            in[e].valid = true;
+            in[e].q.x = q.x; in[e].q.y = q.y; in[e].q.z = q.z; in[e].q.w = q.w;
+            in[e].tanL = std::tan((double)E[e].fov[0]); in[e].tanR = std::tan((double)E[e].fov[1]);
+            in[e].tanU = std::tan((double)E[e].fov[2]); in[e].tanD = std::tan((double)E[e].fov[3]);
+        }
+        // the layer on the submitted head (as CollectOverlays places it): VIEW pose T = (0.12, -0.10, -1), 0.10 x 0.06 m
+        double hq[4], n = 0;
+        for (int i = 0; i < 4; ++i) { hq[i] = (double)E[0].q[i] + E[1].q[i]; n += hq[i] * hq[i]; }
+        n = std::sqrt(n);
+        for (double& c : hq) c /= n;
+        float hm[9];
+        Matrix({hq[0], hq[1], hq[2], hq[3]}, hm);
+        const double T[3] = {0.12, -0.10, -1.0};
+        OverlayLayer l;
+        l.headLocked = true;
+        l.width = 0.10f; l.height = 0.06f;
+        for (int i = 0; i < 4; ++i) l.q[i] = (float)hq[i];
+        for (int r = 0; r < 3; ++r)
+            l.p[r] = (float)(0.5 * (E[0].p[r] + E[1].p[r]) + hm[3 * r] * T[0] + hm[3 * r + 1] * T[1] + hm[3 * r + 2] * T[2]);
+        SmoothFrame sf;
+        sm.Update((int64_t)f * 11111111, in, sf);
+        const float corr[4] = {(float)sf.headCorr.x, (float)sf.headCorr.y, (float)sf.headCorr.z, (float)sf.headCorr.w};
+        for (int e = 0; e < 2; ++e) {
+            OverlayLayer le = l;
+            if (lock) OverlayHeadLock(le, E[e], corr);
+            OverlayVertex v[kOverlayMaxVertices];
+            if (OverlayClipVertices(le, E[e], v, kOverlayMaxVertices) != 4 || v[0].w <= 0) return 1e9;
+            const double tl = in[e].tanL, tr = in[e].tanR, tu = in[e].tanU, td = in[e].tanD;
+            const double a[3] = {((v[0].x / v[0].w) * (tr - tl) + tr + tl) / 2, ((v[0].y / v[0].w) * (tu - td) + tu + td) / 2, -1.0};
+            const float* C = sf.eye[e].m;   // actual-eye ray a = C * output ray
+            double d[3];
+            for (int i = 0; i < 3; ++i) d[i] = C[i] * a[0] + C[3 + i] * a[1] + C[6 + i] * a[2];
+            const double ox = d[0] / -d[2] * kPxPerTan, oy = d[1] / -d[2] * kPxPerTan;
+            if (f == 0) { ref[e][0] = ox; ref[e][1] = oy; }   // first frame: filter reset, O = H = no smoothing
+            worst = std::max(worst, std::max(std::fabs(ox - ref[e][0]), std::fabs(oy - ref[e][1])));
+        }
+    }
+    return worst;
 }
 } // namespace
 
@@ -188,6 +264,16 @@ int main() {
               TypelessForDxgi(DXGI_FORMAT_R16G16B16A16_FLOAT) == DXGI_FORMAT_R16G16B16A16_TYPELESS &&
               TypelessForDxgi(DXGI_FORMAT_D32_FLOAT) == DXGI_FORMAT_UNKNOWN,
           "format families");
+    printf("head smoothing 0.6 (fov scale 0.9) + a head-locked (VIEW-space) quad, 6 s of jitter + a 30 degree turn\n");
+    for (int sym = 0; sym < 2; ++sym) {
+        for (double cant : {0.0, 2.0}) {   // (5 deg cant + symmetric output: never covered, the edge guard pins O = H)
+            const double on = HeadLockDrift(sym != 0, cant, true), off = HeadLockDrift(sym != 0, cant, false);
+            char what[220];
+            snprintf(what, sizeof(what), "%s output, eyes canted %.0f deg: corner drift %.4f px with OverlayHeadLock (< 0.05), "
+                     "%.1f px without (> 5: the shake it removes)", sym ? "symmetric" : "flat", cant, on, off);
+            Check(on < 0.05 && off > 5, what);
+        }
+    }
     printf("=== overlay_test %s\n", g_fail ? "FAIL" : "PASS");
     return g_fail ? 1 : 0;
 }

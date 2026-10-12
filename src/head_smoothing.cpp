@@ -242,4 +242,5 @@ void HeadSmoother::Update(int64_t ns, const SmoothEyeIn in[2], SmoothFrame& out)
         if (in[e].valid) for (int i = 0; i < 9; ++i) out.eye[e].m[i] = (float)cm[e][i];
     out.uncovered = !all;
     out.correctionDeg = AngleBetween(O, H) / kDeg;
+    out.headCorr = Normalize(Mul(O, Hinv));
 }

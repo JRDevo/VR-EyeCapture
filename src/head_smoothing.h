@@ -20,6 +20,7 @@
 //   per eye e (actual orientation q_e): smoothed eye = O * H^-1 * q_e (keeps the eye's own offset from the head,
 //        e.g. canted displays); GPU matrix C_e = q_e^-1 * O * H^-1 * q_e maps a ray of the smoothed (output) camera
 //        into the actual eye camera. Output fov = source fov with each tan scaled by output_fov_scale.
+//   headCorr = O * H^-1 (SmoothFrame; the same for the symmetric output below): head-locked overlay correction.
 // Translation is ignored on purpose (needs depth; negligible at scene distances).
 //
 // Symmetric output (symmetric_fov = 1, default): headsets render each eye with an asymmetric fov (outer angle larger
@@ -88,6 +89,10 @@ struct SmoothFrame {
     bool   uncovered = false;   // some output pixels have no source (black)
     bool   catchUp = false;     // follow / catch-up active
     bool   noPose = false;      // no usable pose on this frame -> pass-through mapping
+    // O * H^-1 (projection space): actual head -> output head (identity without a pose). A point P moved to
+    // p_e + headCorr (P - p_e) (p_e = an eye's position) lands, after the re-projection, on the output pixel where P is
+    // without smoothing -- record_overlays uses it to keep head-locked (VIEW-space) layers fixed to the output camera.
+    SmoothQuat headCorr;
 };
 
 class HeadSmoother {

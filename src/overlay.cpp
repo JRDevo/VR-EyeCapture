@@ -251,6 +251,16 @@ bool OverlayPixelBox(const OverlayVertex* v, int n, const OverlayEye& e, UINT& x
     return x1 > x0 && y1 > y0;
 }
 
+void OverlayHeadLock(OverlayLayer& l, const OverlayEye& e, const float c[4]) {
+    const V3 d = Rotate(c, {(double)l.p[0] - e.p[0], (double)l.p[1] - e.p[1], (double)l.p[2] - e.p[2]}, false);
+    l.p[0] = (float)(e.p[0] + d.x); l.p[1] = (float)(e.p[1] + d.y); l.p[2] = (float)(e.p[2] + d.z);
+    const double ax = c[0], ay = c[1], az = c[2], aw = c[3], bx = l.q[0], by = l.q[1], bz = l.q[2], bw = l.q[3];
+    double q[4] = {aw * bx + ax * bw + ay * bz - az * by, aw * by - ax * bz + ay * bw + az * bx,
+                   aw * bz + ax * by - ay * bx + az * bw, aw * bw - ax * bx - ay * by - az * bz};   // corr * q
+    const double n = std::sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
+    if (n > 1e-9) for (int i = 0; i < 4; ++i) l.q[i] = (float)(q[i] / n);
+}
+
 bool OverlayRayFor(const OverlayLayer& l, const OverlayEye& e, OverlayRay& out) {
     if (!e.valid || !OverlayKindIsRay(l.kind)) return false;
     // column j = eye basis vector j, rotated into the projection space by the eye, then into the layer frame
@@ -497,9 +507,16 @@ void EyeCb(OverlayCb& c, const OverlayEye& E) {
 } // namespace
 
 // One layer into one eye. Returns 1 if drawn.
-bool OverlayCompositor::DrawLayer(ID3D11DeviceContext* ctx, UINT slot, const OverlayEye& E, int e, const OverlayDraw& dr, uint32_t k) {
-    const OverlayLayer& l = dr.l;
-    if (!(l.eyeMask & (1u << e)) || !HasFamily(l.family)) return false;
+bool OverlayCompositor::DrawLayer(ID3D11DeviceContext* ctx, UINT slot, const OverlayEye& E, int e, const OverlayDraw& dr, uint32_t k,
+                                  const float* headCorr) {
+    if (!(dr.l.eyeMask & (1u << e)) || !HasFamily(dr.l.family)) return false;
+    // head smoothing: a head-locked layer moves with the output (smoothed) camera instead of the actual head
+    OverlayLayer locked;
+    if (headCorr && dr.l.headLocked) {
+        locked = dr.l;
+        OverlayHeadLock(locked, E, headCorr);
+    }
+    const OverlayLayer& l = headCorr && dr.l.headLocked ? locked : dr.l;
     OverlayVertex v[kOverlayMaxVertices];
     OverlayCb c{};
     EyeCb(c, E);
@@ -564,7 +581,7 @@ bool OverlayCompositor::DrawLayer(ID3D11DeviceContext* ctx, UINT slot, const Ove
 }
 
 int OverlayCompositor::Draw(ID3D11DeviceContext* ctx, UINT slot, const OverlayEye eyes[2], const OverlayDraw* d, uint32_t n,
-                            uint32_t nBehind, bool projUnpremul) {
+                            uint32_t nBehind, bool projUnpremul, const float* headCorr) {
     if (!ready_ || !ctx || slot >= ring_.size() || !d || !n) return 0;
     if (nBehind > n) nBehind = n;
     bound_ = false;
@@ -589,7 +606,7 @@ int OverlayCompositor::Draw(ID3D11DeviceContext* ctx, UINT slot, const OverlayEy
             const float black[4] = {0, 0, 0, 1};
             const D3D11_RECT rc{(LONG)E.x0, 0, (LONG)(E.x0 + E.w), (LONG)E.h};
             ctx1->ClearView(ringRtv_[slot].Get(), black, &rc, 1);
-            for (uint32_t k = 0; k < nBehind; ++k) draws += DrawLayer(ctx, slot, E, e, d[k], k) ? 1 : 0;
+            for (uint32_t k = 0; k < nBehind; ++k) draws += DrawLayer(ctx, slot, E, e, d[k], k, headCorr) ? 1 : 0;
             // projection OVER the behind layers
             ctx->OMSetRenderTargets(0, nullptr, nullptr);
             ctx->PSSetShaderResources(0, 3, nullSrv);
@@ -611,7 +628,7 @@ int OverlayCompositor::Draw(ID3D11DeviceContext* ctx, UINT slot, const OverlayEy
                 ctx->Draw(4, 0);
             }
         }
-        for (uint32_t k = nBehind; k < n; ++k) draws += DrawLayer(ctx, slot, E, e, d[k], k) ? 1 : 0;
+        for (uint32_t k = nBehind; k < n; ++k) draws += DrawLayer(ctx, slot, E, e, d[k], k, headCorr) ? 1 : 0;
     }
     if (bound_) {
         ID3D11Buffer* nullVb = nullptr;

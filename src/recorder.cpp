@@ -1440,6 +1440,8 @@ void Recorder::Impl::Process(const Item& it) {
     // head smoothing, CPU part: filter + per-eye re-projection constants (before taking the device lock)
     RpConstants rc{};
     DomeConstants dc{};
+    float headCorr[4] = {0, 0, 0, 1};   // O * H^-1 of this frame: head-locked overlays follow the smoothed head
+    bool haveHeadCorr = false;
     int64_t cpuTicks = 0;   // our own CPU time on the worker (filter + constants + draw submission), not lock / pool waits
     if (stage && dome.valid) {
         const int64_t c0 = QpcNow100ns();
@@ -1466,6 +1468,11 @@ void Recorder::Impl::Process(const Item& it) {
         if (sf.reset) ++smResets;
         smCorrSum += sf.correctionDeg;
         if (sf.correctionDeg > smCorrMax) smCorrMax = sf.correctionDeg;
+        if (s.head.Enabled() && !sf.noPose) {   // smoothing off: overlays exactly as before (no correction at all)
+            headCorr[0] = (float)sf.headCorr.x; headCorr[1] = (float)sf.headCorr.y;
+            headCorr[2] = (float)sf.headCorr.z; headCorr[3] = (float)sf.headCorr.w;
+            haveHeadCorr = true;
+        }
         for (int e = 0; e < 2; ++e) {
             const SmoothEyeOut& eo = sf.eye[e];
             RpEye& re = rc.eye[e];
@@ -1506,7 +1513,8 @@ void Recorder::Impl::Process(const Item& it) {
             memcpy(oe[e].fov, ie.fov, sizeof(oe[e].fov));
             oe[e].x0 = ie.x0; oe[e].w = ie.w; oe[e].h = ie.h;
         }
-        const int nd = ovComp.Draw(encCtx.Get(), it.slot, oe, it.ov, it.nOv, it.nBehind, it.projUnpremul);
+        const int nd = ovComp.Draw(encCtx.Get(), it.slot, oe, it.ov, it.nOv, it.nBehind, it.projUnpremul,
+                                   haveHeadCorr ? headCorr : nullptr);
         if (nd) {
             ++ovFrames;
             ovDraws += (uint64_t)nd;

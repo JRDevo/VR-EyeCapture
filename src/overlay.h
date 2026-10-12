@@ -15,6 +15,8 @@
 //     pass), per output eye: [layers behind the projection: the eye is saved, cleared to black, those layers drawn, then
 //     the saved projection is blended over them with its own alpha] then the layers after it. Quad / cylinder: their mesh
 //     projected with that eye's submitted pose + fov (hardware clipping, perspective-correct uv, back faces culled).
+//     Head smoothing: a head-locked (VIEW-space) layer is first rotated about the eye by headCorr = O * H^-1, so after
+//     the re-projection it sits where it would be without smoothing: fixed to the output camera (a steady HUD).
 //     Equirect / cube: one full-eye draw, a ray per pixel from the eye's pose + fov into the layer's frame, then the
 //     equirect (sphere of `radius`, 0 / inf = infinitely far) or cube-face lookup. Everything is blended in LINEAR light:
 //     the destination region is copied to a scratch texture first and the pixel shader decodes / encodes sRGB itself
@@ -42,6 +44,7 @@ struct OverlayLayer {
     bool     unpremultiplied = false;     // XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT (else premultiplied colour)
     bool     srgb = false;                // the swapchain format is *_SRGB: its texels are sRGB-decoded before filtering
     bool     behind = false;              // submitted BEFORE the projection layer (seen through its transparent pixels)
+    bool     headLocked = false;          // VIEW space (placed on the submitted head): follows the smoothed head (Draw headCorr)
     int      family = -1;                 // OverlayFamily() of the swapchain format: which atlas
     // XrCompositionLayerColorScaleBiasKHR (identity when absent): colour = colour * scale + bias (linear, after sampling)
     float    colorScale[4] = {1, 1, 1, 1};
@@ -104,6 +107,12 @@ int OverlayClipVertices(const OverlayLayer& l, const OverlayEye& e, OverlayVerte
 // plane). false = empty (entirely outside).
 bool OverlayPixelBox(const OverlayVertex* v, int n, const OverlayEye& e, UINT& x0, UINT& y0, UINT& x1, UINT& y1);
 
+// Head smoothing (headLocked layers): the layer rotated about the eye's position by corr (x, y, z, w; = O * H^-1 of the
+// frame): q' = corr * q, p' = p_e + corr (p - p_e). The re-projection maps the actual eye camera to the output camera,
+// which is the actual one turned by corr about the eye (symmetric output: the head turned by corr; the same point
+// mapping), so the layer lands on the output pixel it has without smoothing.
+void OverlayHeadLock(OverlayLayer& l, const OverlayEye& e, const float corr[4]);
+
 // Equirect / cube layers: the eye-camera -> layer-frame rotation (rows) and the eye position in the layer frame.
 struct OverlayRay { float r[3][3]; float o[3]; };
 bool OverlayRayFor(const OverlayLayer& l, const OverlayEye& e, OverlayRay& out);
@@ -121,10 +130,11 @@ public:
     // atlas: one per slot, typed (UNORM / float) atlasFmt, atlasW x atlasH, for format family `family`.
     bool AddAtlas(int family, const std::vector<ComPtr<ID3D11Texture2D>>& atlas, DXGI_FORMAT atlasFmt);
     // Inside the encoder device lock, after the ring slot's ready fence was waited for. d[0 .. nBehind) are behind the
-    // projection layer (projUnpremul = its UNPREMULTIPLIED_ALPHA flag). Returns the number of (layer, eye) draws made.
-    // Leaves no state bound that the later passes rely on.
+    // projection layer (projUnpremul = its UNPREMULTIPLIED_ALPHA flag). headCorr (x, y, z, w) = head smoothing's O * H^-1
+    // of this frame (nullptr = no smoothing): headLocked layers are drawn through OverlayHeadLock. Returns the number of
+    // (layer, eye) draws made. Leaves no state bound that the later passes rely on.
     int Draw(ID3D11DeviceContext* ctx, UINT slot, const OverlayEye eyes[2], const OverlayDraw* d, uint32_t n,
-             uint32_t nBehind = 0, bool projUnpremul = false);
+             uint32_t nBehind = 0, bool projUnpremul = false, const float* headCorr = nullptr);
     void Release();
     bool Ready() const { return ready_; }
     bool HasFamily(int f) const { return f >= 0 && f < kOverlayFamilies && !atlasSrv_[f].empty(); }
@@ -133,7 +143,8 @@ public:
 private:
     bool EnsureTex(ComPtr<ID3D11Texture2D>& t, ComPtr<ID3D11ShaderResourceView>& v, UINT& tw, UINT& th, UINT w, UINT h, const char* what);
     bool Bind(ID3D11DeviceContext* ctx);
-    bool DrawLayer(ID3D11DeviceContext* ctx, UINT slot, const OverlayEye& E, int e, const OverlayDraw& dr, uint32_t k);
+    bool DrawLayer(ID3D11DeviceContext* ctx, UINT slot, const OverlayEye& E, int e, const OverlayDraw& dr, uint32_t k,
+                   const float* headCorr);
     ComPtr<ID3D11Device> dev_;
     std::vector<ComPtr<ID3D11RenderTargetView>> ringRtv_;
     std::vector<ComPtr<ID3D11Texture2D>> ring_;

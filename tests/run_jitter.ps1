@@ -5,10 +5,13 @@
     headset: left -50/+40, right -40/+50, +-45 deg). layer_e2e --jitter renders a world-locked grid with a white marker
     (a direction, i.e. at infinity) for the located pose every frame, like a game.
 
-    Four recordings:   raw      head_smoothing = 0  (symmetric_fov = 1, the default: output +-40 x +-45 deg per eye)
+    Six recordings:    raw      head_smoothing = 0  (symmetric_fov = 1, the default: output +-40 x +-45 deg per eye)
                        rawasym  head_smoothing = 0, symmetric_fov = 0      (stage bypassed: the raw eye images)
                        smooth   head_smoothing = 0.6, output_fov_scale = 0.9    (edge_guard = 1, the default)
                        noguard  same with edge_guard = 0                         (pure filter + follow)
+                       hudraw   as raw, plus layer_e2e --hud: a green quad in a VIEW space (head-locked, like the DLAA
+                                injector's panel) and a magenta quad in the LOCAL space (world-locked)
+                       hudsmooth as smooth, plus --hud
     Each video is decoded (ffmpeg, Y plane), the marker is located in each eye per frame (weighted centroid of
     Y > 150) and converted to camera angles with the left eye's output fov (symmetric x scale, or the raw left fov). Video time -> motion time through the
     layer's "first video frame ... displayTime" log line and layer_e2e's E2E_T0_NS.
@@ -23,15 +26,33 @@
       edges   raw, rawasym, smooth: no black pixels (Y < 30) in a 3 px border of either eye, in the jitter phase AND over
               the whole recording (turn and catch-up included); smooth: the layer's summary reports 0 uncovered frames
               and the edge guard acted (> 0 frames). noguard (edge_guard = 0) is info only: black edges are expected.
+      hud     (RGB decode; per eye: green / magenta / white centroids) hudraw and hudsmooth: the VIEW-space quad is in
+              every frame of both eyes and its centroid stays within 1 px of its median over the WHOLE recording (jitter,
+              turn, catch-up) -- with smoothing it follows the smoothed camera (OverlayHeadLock), a steady HUD; the
+              world-locked quad keeps its angular distance to the world marker (std-dev <= 0.05 deg, jitter phase, both
+              eyes), i.e. it moves with the world exactly like the rendered scene.
     The recording cases set XR_EYE_CAPTURE_REQUIRE_TRAY=0 and XR_EYE_CAPTURE_CONFIG (test-only overrides; projection=flat
     pins the flat path whatever config.ini says).
-      powershell -ExecutionPolicy Bypass -File tests\run_jitter.ps1
+      powershell -ExecutionPolicy Bypass -File tests\run_jitter.ps1 [-BuildLayer] [-OnlyHud]
+      -BuildLayer: test build\Release\eye_capture.dll instead of the installed (registered) copy, as in run_e2e.ps1.
+      -OnlyHud: run only the hud cases.
 #>
-param([string]$FfmpegDir = '')
+param([string]$FfmpegDir = '', [switch]$BuildLayer, [switch]$OnlyHud)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $bin = Join-Path $root 'build\Release'
 $exe = Join-Path $bin 'layer_e2e.exe'
+if ($BuildLayer) {   # the same mechanism as run_e2e.ps1 -BuildLayer: nothing is copied or registered
+    $env:DISABLE_XR_APILAYER_JRDEVO_eye_capture = '1'
+    $lp = Join-Path $root 'build\e2e_layer'
+    New-Item -ItemType Directory -Force $lp | Out-Null
+    $m = Get-Content (Join-Path $bin 'XR_APILAYER_JRDEVO_eye_capture.json') -Raw | ConvertFrom-Json
+    $m.api_layer.library_path = (Join-Path $bin 'eye_capture.dll')
+    $m | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $lp 'XR_APILAYER_JRDEVO_eye_capture.json') -Encoding ascii
+    $env:XR_API_LAYER_PATH = $lp
+    $env:XR_ENABLE_API_LAYERS = 'XR_APILAYER_JRDEVO_eye_capture'
+    Write-Host "-BuildLayer: testing $bin\eye_capture.dll (registered copy disabled for these processes)" -ForegroundColor Yellow
+}
 if (-not (Test-Path $exe)) { throw "build first: $exe" }
 if (-not $FfmpegDir) {
     $cand = Get-ChildItem "$env:LOCALAPPDATA\Microsoft\WinGet\Packages" -Filter ffprobe.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -84,6 +105,47 @@ public static class JitterAnalysis {
         p.WaitForExit();
         return res.ToArray();
     }
+    // hud cases (RGB): per frame, per eye e (x relative to the eye): [6e + 0..1] green (VIEW quad) centroid, [6e + 2..3]
+    // magenta (world quad) centroid, [6e + 4..5] white (marker) centroid; NaN when absent. Weighted by the distance
+    // past the colour threshold, so edge pixels of the 4:2:0 chroma count less.
+    public static double[][] ScanHud(string ffmpeg, string file, int W, int H, int eyeW) {
+        ProcessStartInfo psi = new ProcessStartInfo(ffmpeg,
+            "-v error -i \"" + file + "\" -map 0:v:0 -fps_mode passthrough " +
+            "-vf scale=in_color_matrix=bt709:in_range=limited:out_range=full,format=rgb24 -f rawvideo -pix_fmt rgb24 -");
+        psi.UseShellExecute = false; psi.RedirectStandardOutput = true; psi.CreateNoWindow = true;
+        Process p = Process.Start(psi);
+        Stream s = p.StandardOutput.BaseStream;
+        byte[] f = new byte[W * H * 3];
+        System.Collections.Generic.List<double[]> res = new System.Collections.Generic.List<double[]>();
+        while (true) {
+            int got = 0;
+            while (got < f.Length) { int n = s.Read(f, got, f.Length - got); if (n <= 0) break; got += n; }
+            if (got < f.Length) break;
+            double[] r = new double[12];
+            for (int e = 0; e < 2; e++) {
+                double[] sw = new double[3], sx = new double[3], sy = new double[3];
+                for (int y = 0; y < H; y++) {
+                    int o = (y * W + e * eyeW) * 3;
+                    for (int x = 0; x < eyeW; x++, o += 3) {
+                        int R = f[o], G = f[o + 1], B = f[o + 2];
+                        int k = -1; double w = 0;
+                        if (G > 150 && R < 100 && B < 100) { k = 0; w = G - 150; }
+                        else if (R > 150 && B > 150 && G < 100) { k = 1; w = Math.Min(R, B) - 150; }
+                        else if (R > 200 && G > 200 && B > 200) { k = 2; w = Math.Min(R, Math.Min(G, B)) - 200; }
+                        if (k < 0) continue;
+                        sw[k] += w; sx[k] += w * x; sy[k] += w * y;
+                    }
+                }
+                for (int k = 0; k < 3; k++) {
+                    r[6 * e + 2 * k] = sw[k] > 0 ? sx[k] / sw[k] : double.NaN;
+                    r[6 * e + 2 * k + 1] = sw[k] > 0 ? sy[k] / sw[k] : double.NaN;
+                }
+            }
+            res.Add(r);
+        }
+        p.WaitForExit();
+        return res.ToArray();
+    }
     // tests/test_motion.h: the marker (world -Z) as seen by the head camera at motion time t -> (atan x_tan, atan y_tan) deg
     public static double[] Expected(double t) {
         double D = Math.PI / 180;
@@ -108,8 +170,12 @@ $cases = @(
     @{ name = 'raw';     cfg = 'projection=flat;head_smoothing=0';                                     k = 1.0; tans = $symTans },
     @{ name = 'rawasym'; cfg = 'projection=flat;head_smoothing=0;symmetric_fov=0';                     k = 1.0; tans = $rawTans },
     @{ name = 'smooth';  cfg = 'projection=flat;head_smoothing=0.6;output_fov_scale=0.9';              k = 0.9; tans = $symTans },
-    @{ name = 'noguard'; cfg = 'projection=flat;head_smoothing=0.6;output_fov_scale=0.9;edge_guard=0'; k = 0.9; tans = $symTans }
+    @{ name = 'noguard'; cfg = 'projection=flat;head_smoothing=0.6;output_fov_scale=0.9;edge_guard=0'; k = 0.9; tans = $symTans },
+    @{ name = 'hudraw';    cfg = 'projection=flat;head_smoothing=0';                        k = 1.0; tans = $symTans; hud = $true },
+    @{ name = 'hudsmooth'; cfg = 'projection=flat;head_smoothing=0.6;output_fov_scale=0.9'; k = 0.9; tans = $symTans; hud = $true }
 )
+if ($OnlyHud) { $cases = @($cases | Where-Object { $_.hud }) }
+$hudData = @{}
 $prevTray = $env:XR_EYE_CAPTURE_REQUIRE_TRAY; $prevCfg = $env:XR_EYE_CAPTURE_CONFIG; $prevIpc = $env:XR_EYE_CAPTURE_TRAY_IPC
 $env:XR_EYE_CAPTURE_REQUIRE_TRAY = '0'
 $env:XR_EYE_CAPTURE_TRAY_IPC = '0'   # a running tray must not post-process (and delete) the test recordings
@@ -124,7 +190,8 @@ foreach ($c in $cases) {
     if (Test-Path $out) { Remove-Item -Recurse -Force $out }
     $env:XR_EYE_CAPTURE_CONFIG = $c.cfg
     Write-Host "`n=== jitter / $($c.name): $($c.cfg)" -ForegroundColor Cyan
-    $o = & $exe --jitter --seconds 9 --record 8.5 --out-dir $out 2>&1 | Out-String
+    $extra = @(); if ($c.hud) { $extra = @('--hud') }
+    $o = & $exe --jitter @extra --seconds 9 --record 8.5 --out-dir $out 2>&1 | Out-String
     $mOut = [regex]::Match($o, 'E2E_OUTPUT=(.+)'); $mT0 = [regex]::Match($o, 'E2E_T0_NS=(\d+)')
     if ($LASTEXITCODE -ne 0 -or -not $mOut.Success -or -not $mT0.Success) { Write-Host $o; Check $false "$($c.name): e2e run"; continue }
     $file = $mOut.Groups[1].Value.Trim()
@@ -146,11 +213,42 @@ foreach ($c in $cases) {
     $W = [int]$v.width; $H = [int]$v.height; $eyeW = [int]($W / 2)
     $pts = & $ffprobe -v error -select_streams v:0 -show_entries packet=pts_time -of csv=p=0 $file | Where-Object { $_ -match '\d' } |
         ForEach-Object { [double]($_.Trim().TrimEnd(',')) } | Sort-Object
+    $k = $c.k
+    $tanL = $c.tans[0]; $tanR = $c.tans[1]; $tanU = $c.tans[2]; $tanD = $c.tans[3]
+    if ($c.hud) {
+        $hs = [JitterAnalysis]::ScanHud($ffmpeg, $file, $W, $H, $eyeW)
+        $n = [math]::Min($hs.Length, $pts.Count)
+        Write-Host ("  {0} frames {1}x{2} (RGB scan), motion t of frame 0 = {3:N3} s" -f $n, $W, $H, $offset)
+        # pixel centroid -> unit camera ray of the output camera (left or right eye: same symmetric tans)
+        $ray = {
+            param($px, $py)
+            $xt = $k * ($tanL + ($px + 0.5) / $eyeW * ($tanR - $tanL)); $yt = $k * ($tanU + ($py + 0.5) / $H * ($tanD - $tanU))
+            $l = [math]::Sqrt($xt * $xt + $yt * $yt + 1); return @(($xt / $l), ($yt / $l), (-1 / $l))
+        }
+        $rows = New-Object System.Collections.Generic.List[object]
+        for ($i = 0; $i -lt $n; $i++) {
+            $r = $hs[$i]
+            $sep = @([double]::NaN, [double]::NaN); $sepV = @([double]::NaN, [double]::NaN)
+            foreach ($e in 0, 1) {
+                $b = 6 * $e
+                if ([double]::IsNaN($r[$b + 4])) { continue }
+                $mk = & $ray $r[$b + 4] $r[$b + 5]
+                foreach ($pair in @(@(2, 'w'), @(0, 'v'))) {
+                    if ([double]::IsNaN($r[$b + $pair[0]])) { continue }
+                    $q = & $ray $r[$b + $pair[0]] $r[$b + $pair[0] + 1]
+                    $dot = [math]::Min(1.0, $mk[0] * $q[0] + $mk[1] * $q[1] + $mk[2] * $q[2])
+                    $ang = [math]::Acos($dot) * 180 / [math]::PI
+                    if ($pair[1] -eq 'w') { $sep[$e] = $ang } else { $sepV[$e] = $ang }
+                }
+            }
+            $rows.Add([pscustomobject]@{ t = $pts[$i] + $offset; r = $r; sepW = $sep; sepV = $sepV })
+        }
+        $hudData[$c.name] = $rows
+        continue
+    }
     $scan = [JitterAnalysis]::Scan($ffmpeg, $file, $W, $H, $eyeW)
     $n = [math]::Min($scan.Length, $pts.Count)
     Write-Host ("  {0} frames {1}x{2}, motion t of frame 0 = {3:N3} s" -f $n, $W, $H, $offset)
-    $k = $c.k
-    $tanL = $c.tans[0]; $tanR = $c.tans[1]; $tanU = $c.tans[2]; $tanD = $c.tans[3]
     $rows = New-Object System.Collections.Generic.List[object]
     for ($i = 0; $i -lt $n; $i++) {
         $t = $pts[$i] + $offset
@@ -244,8 +342,35 @@ if ($summ.ContainsKey('smooth')) {
     $sm = $summ['smooth']
     Check ($sm.uncovered -eq 0) ("smooth: layer summary reports 0 frames with uncovered output (got {0})" -f $sm.uncovered)
     Check ($sm.guarded -gt 0) ("smooth: the edge guard acted ({0} frames)" -f $sm.guarded)
-} else { Check $false 'smooth: re-projection summary line in the log' }
+} elseif (-not $OnlyHud) { Check $false 'smooth: re-projection summary line in the log' }
 if ($summ.ContainsKey('noguard')) { Write-Host ("  info noguard: layer summary {0} frames uncovered, guard {1}" -f $summ['noguard'].uncovered, $summ['noguard'].guarded) }
+function Median($v) { $s = @($v | Sort-Object); if ($s.Count -eq 0) { return [double]::NaN }; return $s[[int][math]::Floor($s.Count / 2)] }
+function StdDev($v) {
+    $a = @($v | Where-Object { -not [double]::IsNaN($_) }); if ($a.Count -lt 2) { return [double]::NaN }
+    $m = ($a | Measure-Object -Average).Average; $q = 0; foreach ($x in $a) { $q += ($x - $m) * ($x - $m) }; return [math]::Sqrt($q / $a.Count)
+}
+foreach ($name in @('hudraw', 'hudsmooth')) {
+    if (-not $hudData.ContainsKey($name)) { Check $false "${name}: recording"; continue }
+    $rows = $hudData[$name].ToArray()
+    foreach ($e in 0, 1) {
+        $b = 6 * $e; $eye = @('left', 'right')[$e]
+        # the first frames of a recording have no overlays: the worker creates the overlay atlas at the first frame
+        # that has a layer of its format ("before their atlas existed" in the overlay summary)
+        $miss = 0; $early = 0
+        for ($i = 0; $i -lt $rows.Count; $i++) { if ([double]::IsNaN($rows[$i].r[$b])) { if ($i -lt 5) { $early++ } else { $miss++ } } }
+        $xs = @($rows | Where-Object { -not [double]::IsNaN($_.r[$b]) } | ForEach-Object { $_.r[$b] })
+        $ys = @($rows | Where-Object { -not [double]::IsNaN($_.r[$b]) } | ForEach-Object { $_.r[$b + 1] })
+        $mx = Median $xs; $my = Median $ys
+        $dev = 0.0; foreach ($i in 0..($xs.Count - 1)) { $dev = [math]::Max($dev, [math]::Max([math]::Abs($xs[$i] - $mx), [math]::Abs($ys[$i] - $my))) }
+        Check ($miss -eq 0 -and $dev -le 1.0) ("{0}: VIEW-space quad, {1} eye: at ({2:N2}, {3:N2}) px, max deviation {4:N3} px over {5} frames (<= 1 px; missing in {6} + {7} first frames before the atlas existed) -> fixed in the video" -f $name, $eye, $mx, $my, $dev, $xs.Count, $miss, $early)
+        $j = @($rows | Where-Object { $_.t -ge 1.0 -and $_.t -le 3.9 })
+        $sw = StdDev @($j | ForEach-Object { $_.sepW[$e] })
+        $sv = StdDev @($j | ForEach-Object { $_.sepV[$e] })
+        $wx = StdDev @($j | ForEach-Object { $_.r[$b + 2] }); $wy = StdDev @($j | ForEach-Object { $_.r[$b + 3] })
+        $wMiss = @($j | Where-Object { [double]::IsNaN($_.sepW[$e]) }).Count
+        Check ($wMiss -eq 0 -and $sw -le 0.05) ("{0}: world-locked quad, {1} eye: angle to the world marker std-dev {2:N4} deg (<= 0.05; jitter phase, {3} frames, missing {4}); it moves with the world: position std-dev {5:N2} / {6:N2} px; VIEW quad vs marker {7:N3} deg" -f $name, $eye, $sw, $j.Count, $wMiss, $wx, $wy, $sv)
+    }
+}
 if ($fails.Count -eq 0) { Write-Host "`nPASS head smoothing" -ForegroundColor Green; exit 0 }
 Write-Host "`nFAIL head smoothing ($($fails.Count) checks)" -ForegroundColor Red
 exit 1
