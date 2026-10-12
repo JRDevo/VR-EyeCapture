@@ -1,0 +1,102 @@
+name: CI
+
+# Builds Release with warnings-as-errors and runs every test that needs no GPU encoder, game or headset.
+# What runs and what does not (and why): docs/DEVELOPMENT.md, section "CI".
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master, 'ci-*']
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    runs-on: windows-2022
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      # pinned ffmpeg for tests\run_yt8k.ps1 (libx265, CPU only); the script reads EYECAP_FFMPEG_DIR
+      FFMPEG_VERSION: '8.1.1'
+    steps:
+      - uses: actions/checkout@v4
+
+      # The layer, the tray and the unit tests all link Media Foundation (mfplat.dll). Windows Server images may not
+      # ship it; install the feature if it is missing (the tests never encode with it, they only need the DLLs to load).
+      - name: Media Foundation present
+        run: |
+          $dll = Join-Path $env:SystemRoot 'System32\mfplat.dll'
+          if (-not (Test-Path $dll)) {
+            Write-Host 'mfplat.dll missing -> installing Server-Media-Foundation'
+            Install-WindowsFeature Server-Media-Foundation | Format-List
+          }
+          if (-not (Test-Path $dll)) { throw 'mfplat.dll still missing after Server-Media-Foundation (a reboot may be needed)' }
+          Get-Item $dll | Select-Object FullName, Length
+
+      - name: Configure (Visual Studio 17 2022, x64, warnings are errors)
+        run: cmake -B build -S . -G "Visual Studio 17 2022" -A x64 -DEYE_WERROR=ON
+
+      - name: Build Release
+        run: cmake --build build --config Release --parallel
+
+      - name: Unit tests (CPU only)
+        run: |
+          New-Item -ItemType Directory -Force build\ci_unit | Out-Null
+          Push-Location build\ci_unit
+          $failed = @()
+          foreach ($t in 'overlay_test', 'head_smoothing_test', 'indicator_test', 'install_test', 'control_final_test') {
+            Write-Host "=== $t"
+            & "..\Release\$t.exe" 2>&1 | Tee-Object -FilePath "$t.log"
+            if ($LASTEXITCODE -ne 0) { Write-Host "$t FAILED (exit $LASTEXITCODE)"; $failed += $t }
+          }
+          Pop-Location
+          if ($failed) { throw "failed: $($failed -join ', ')" }
+
+      - name: run_hold (tray post_when hold, fake ffmpeg)
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tests\run_hold.ps1
+
+      - name: run_settings (Settings window)
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tests\run_settings.ps1
+
+      # Test keys under HKCU only (EYECAP_TRAY_TEST_REG_ROOTS / _RUN_KEY); the script also checks that the real HKLM / HKCU
+      # OpenXR keys are unchanged. The runner is an admin account, hence -AllowElevated (see docs/DEVELOPMENT.md, "CI").
+      - name: run_install (registration on test keys)
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tests\run_install.ps1 -AllowElevated
+
+      - name: Install ffmpeg ${{ env.FFMPEG_VERSION }} (gyan.dev essentials build)
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP 'ffmpeg.zip'
+          $url = "https://github.com/GyanD/codexffmpeg/releases/download/$env:FFMPEG_VERSION/ffmpeg-$env:FFMPEG_VERSION-essentials_build.zip"
+          Invoke-WebRequest -Uri $url -OutFile $zip -MaximumRetryCount 3 -RetryIntervalSec 5
+          $dir = Join-Path $env:RUNNER_TEMP 'ffmpeg'
+          Expand-Archive $zip -DestinationPath $dir
+          $bin = (Get-ChildItem $dir -Recurse -Filter ffmpeg.exe | Select-Object -First 1).DirectoryName
+          if (-not (Test-Path (Join-Path $bin 'ffprobe.exe'))) { throw "ffprobe.exe not next to ffmpeg.exe in $bin" }
+          "EYECAP_FFMPEG_DIR=$bin" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          & (Join-Path $bin 'ffmpeg.exe') -hide_banner -version | Select-Object -First 1
+          & (Join-Path $bin 'ffmpeg.exe') -hide_banner -encoders | Select-String 'libx265|libx264'
+
+      - name: run_yt8k (tray 8K step, CPU libx265)
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tests\run_yt8k.ps1 -FfmpegDir $env:EYECAP_FFMPEG_DIR
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs
+          if-no-files-found: ignore
+          retention-days: 14
+          path: |
+            logs/*.log
+            build/ci_unit/*.log
+            build/tt*/logs/*.log
+            build/tt*/**/*.log
+            build/settings_scratch/**

@@ -1,7 +1,7 @@
 <#
     run_yt8k.ps1 -- the tray's "8K copy for YouTube" step (post_yt8k) and the layout_3d handling of the MKV step
     (post_mkv), tray/postprocess.cpp, end to end, CPU only.
-      powershell -ExecutionPolicy Bypass -File tests\run_yt8k.ps1 [-FfmpegDir <dir>]
+      powershell -ExecutionPolicy Bypass -File tests\run_yt8k.ps1 [-FfmpegDir <dir>]   (default: $env:EYECAP_FFMPEG_DIR, else WinGet packages, else PATH)
     A scratch tray (copy of EyeCaptureTray.exe in build\tt4, EYECAP_TRAY_TEST_SHM, scratch APPDATA config) converts
     synthetic recordings that status_sim announces as "saved <file>". The tray runs with EYECAP_TRAY_TEST_NO_NVENC=1
     (libx265, the GPU is never used) and EYECAP_TRAY_TEST_YT8K_SHORT=432 (short side instead of
@@ -32,6 +32,7 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $bin = Join-Path $root 'build\Release'
 foreach ($f in @('EyeCaptureTray.exe', 'status_sim.exe')) { if (-not (Test-Path (Join-Path $bin $f))) { throw "build first: $f" } }
+if (-not $FfmpegDir -and $env:EYECAP_FFMPEG_DIR) { $FfmpegDir = $env:EYECAP_FFMPEG_DIR }   # CI: dir with ffmpeg.exe + ffprobe.exe
 if (-not $FfmpegDir) {
     $cand = Get-ChildItem "$env:LOCALAPPDATA\Microsoft\WinGet\Packages" -Filter ffprobe.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($cand) { $FfmpegDir = $cand.DirectoryName } else {

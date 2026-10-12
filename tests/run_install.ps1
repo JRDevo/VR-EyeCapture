@@ -16,8 +16,11 @@
                           "Not registered for VR games" tooltip; a stale value gives the "registered from another folder"
                           question; a --register from outside is picked up by the 10 s re-query (tooltip back to normal).
     4. build\Release\EyeCaptureTray.exe --status on the REAL keys (read-only): registered=stale|no; the real keys unchanged.
-    Refuses to run elevated (an elevated --register could write the real HKLM if the test roots were ignored).
+    Refuses to run elevated (an elevated --register could write the real HKLM if the test roots were ignored) unless
+    -AllowElevated is passed (CI: the GitHub runner is always an admin and is thrown away; the "real keys unchanged"
+    and "real HKLM says no" guards still run).
 #>
+param([switch]$AllowElevated)   # CI only (throw-away GitHub runner, always elevated): see docs/DEVELOPMENT.md "CI"
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $bin = Join-Path $root 'build\Release'
@@ -25,7 +28,7 @@ $unit = Join-Path $bin 'install_test.exe'
 $trayBin = Join-Path $bin 'EyeCaptureTray.exe'
 foreach ($f in @($unit, $trayBin)) { if (-not (Test-Path $f)) { throw "build first: $f" } }
 $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-if ($admin) { throw 'run this test from a NON-elevated prompt' }
+if ($admin -and -not $AllowElevated) { throw 'run this test from a NON-elevated prompt (or pass -AllowElevated on a throw-away CI runner)' }
 $fail = 0
 function Step($name, $ok) { Write-Host ("{0}: {1}" -f $name, $(if ($ok) { 'PASS' } else { 'FAIL' })) -ForegroundColor $(if ($ok) { 'Green' } else { 'Red' }); if (-not $ok) { $script:fail++ } }
 $jsonName = 'XR_APILAYER_JRDEVO_eye_capture.json'

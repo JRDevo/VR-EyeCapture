@@ -24,6 +24,11 @@ FetchContent_Declare(openxr_sdk
 FetchContent_MakeAvailable(openxr_sdk)
 
 set(EYE_WARN_FLAGS /W3 /permissive- /Zc:__cplusplus /utf-8)
+# CI sets EYE_WERROR=ON: any compiler warning in OUR sources fails the build (the OpenXR SDK targets are not affected).
+option(EYE_WERROR "Treat compiler warnings in our sources as errors (/WX)" OFF)
+if (EYE_WERROR)
+    list(APPEND EYE_WARN_FLAGS /WX)
+endif()
 
 # --- core: everything the layer and the encoder self-test share (recorder, audio, copy, st3d, log, config) ---
 add_library(eye_capture_core STATIC

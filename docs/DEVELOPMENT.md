@@ -432,6 +432,44 @@ each logged as `config override:`; `run_jitter.ps1` uses it for the smoothing se
 settings, and `run_e2e.ps1` / `run_jitter.ps1` pin `projection=flat` so they test the flat path whatever `config.ini` says) and `XR_EYE_CAPTURE_TEST_SHM=<name>` (private status block + `<name>-Command` event; used by `control_final_test`), `XR_EYE_CAPTURE_OUTPUT_DIR=<dir>`, `XR_EYE_CAPTURE_REQUIRE_TRAY=0|1` (overrides `require_tray`; `run_e2e.ps1` sets 0 for the
 recording cases).
 
+## CI (GitHub Actions)
+
+`.github/workflows/ci.yml`, one job on `windows-2022`. Triggers: pull requests to `master`, pushes to `master` and to
+branches named `ci-*`, and manual runs (`workflow_dispatch`). A new push cancels the older run of the same ref.
+
+**What runs**
+
+1. Configure with `-G "Visual Studio 17 2022" -A x64 -DEYE_WERROR=ON` and build Release. `EYE_WERROR` (default OFF, so local
+   builds are unchanged) adds `/WX` to `EYE_WARN_FLAGS`: any compiler warning in our sources fails the build. The OpenXR SDK
+   targets are not affected. To check locally: `cmake -B build -S . -DEYE_WERROR=ON`, build, then set it back to OFF.
+2. Unit exes: `overlay_test`, `head_smoothing_test`, `indicator_test`, `install_test`, `control_final_test`.
+3. `tests\run_hold.ps1` (fake ffmpeg), `tests\run_settings.ps1` (includes the real Settings dialog driven by `settings_test`),
+   `tests\run_install.ps1 -AllowElevated`, `tests\run_yt8k.ps1 -FfmpegDir <dir>` (libx265 on the CPU).
+4. On failure the logs (`logs\*.log`, `build\ci_unit`, `build\tt*\**\*.log`, `build\settings_scratch`) are uploaded as the
+   artifact `test-logs`.
+
+**Notes**
+
+- No test touches HKLM or the real HKCU `Run` key: registration tests redirect to `HKCU\Software\OpenXR-EyeCapture-Test`
+  (`EYECAP_TRAY_TEST_REG_ROOTS`, `EYECAP_TRAY_TEST_RUN_KEY`), and `run_install.ps1` compares the real OpenXR keys before and after.
+- `run_install.ps1` normally refuses to run elevated, so that an elevated `--register` could never write the real HKLM if
+  the test redirection failed. GitHub runners are always an admin and are thrown away, so CI passes `-AllowElevated`;
+  everything else in the script (the "registered=no" guard before any `--register`, the real-keys-unchanged check) still
+  runs. Locally keep running it from a normal, non-elevated prompt.
+- ffmpeg: `run_yt8k.ps1` takes `-FfmpegDir`, else `%EYECAP_FFMPEG_DIR%`, else the WinGet packages folder, else PATH. CI
+  downloads the pinned `ffmpeg-<version>-essentials_build.zip` (gyan.dev build, via the GitHub release mirror) and sets
+  `EYECAP_FFMPEG_DIR`. Bump `FFMPEG_VERSION` in the workflow to update it (the tray's own lookup is unchanged).
+- The layer, the tray and the unit tests link Media Foundation (`mfplat.dll`); the first workflow step installs
+  `Server-Media-Foundation` if the image does not have it.
+
+**What does not run in CI, and why**
+
+| Test | Why not |
+|---|---|
+| `run_e2e.ps1`, `run_selftests.ps1`, `run_jitter.ps1`, `run_dome.ps1`, `run_reload.ps1` | They record through the real `Recorder`, which needs hardware HEVC (and H.264) encoding through a Media Foundation hardware MFT on a D3D11 device. Hosted runners have no GPU, and Windows ships no software HEVC encoder MFT, so there is no software MFT / WARP route that exercises the same code. They also need the layer installed at the repo root and registered. They are not weakened to fit; run them locally before a release. |
+| `layer_loadtest.exe` | Needs a real OpenXR runtime (VDXR here). |
+| Anything with a real game or headset | See "Not verified without a headset". |
+
 ## Not verified without a headset
 
 - A real game on a real runtime (VDXR / SteamVR / Oculus): swapchain images owned by those runtimes (keyed-mutex

@@ -11,6 +11,8 @@
 
 # OpenXR-EyeCapture — stereo recorder for any OpenXR game
 
+[![CI](https://github.com/JRDevo/OpenXR-EyeCapture/actions/workflows/ci.yml/badge.svg)](https://github.com/JRDevo/OpenXR-EyeCapture/actions/workflows/ci.yml)
+
 Records **both eye images** of an OpenXR game, at exactly the resolution and quality the headset receives, into a
 **side-by-side (left | right) 3D MP4** with the game's audio. Press a hotkey (or use the tray icon) to start and stop.
 The MP4 carries the standard stereo flag (`st3d`, left-right) for 3D players; for YouTube the tray app also converts every
