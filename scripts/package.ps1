@@ -63,6 +63,14 @@ foreach ($f in $files) {
     if (-not (Test-Path $f.src)) { Fail "missing: $($f.src)" }
     Copy-Item -LiteralPath $f.src -Destination (Join-Path $stage $f.name) -Force
 }
+# config.ini: ship the committed defaults, never the developer's local edits (hotkey, post_* choices)
+$git = Get-Command git -ErrorAction SilentlyContinue
+if ($git) {
+    $committed = & $git.Source -C $root show HEAD:config.ini
+    if ($LASTEXITCODE -ne 0) { Fail 'git show HEAD:config.ini failed' }
+    [System.IO.File]::WriteAllText((Join-Path $stage 'config.ini'), (($committed -join "`r`n") + "`r`n"), (New-Object System.Text.UTF8Encoding $false))
+    Write-Host 'config.ini: committed version (HEAD), not the working copy'
+} else { Write-Host 'WARNING: git not found -- config.ini copied from the working tree' -ForegroundColor Yellow }
 Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip -Force
 Write-Host "`nCreated $zip" -ForegroundColor Green
 Add-Type -AssemblyName System.IO.Compression.FileSystem
