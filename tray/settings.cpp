@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
+#include "input.h"
 #include "install.h"
 #include "log.h"
 
@@ -36,11 +37,14 @@ const Field kFields[] = {
     {L"max_fps",           L"capture",         Kind::Edit,  ID_MAXFPS,     nullptr},
     {L"require_tray",      L"capture",         Kind::Check, ID_REQTRAY,    nullptr},
     {L"swap_eyes",         L"capture",         Kind::Check, ID_SWAP,       nullptr},
+    {L"record_overlays",   L"capture",         Kind::Check, ID_OVERLAYS,   nullptr},
     {L"symmetric_fov",     L"head_smoothing",  Kind::Check, ID_SYMFOV,     nullptr},
     {L"head_smoothing",    L"head_smoothing",  Kind::Track, ID_SMOOTH,     nullptr},
     {L"roll_lock",         L"head_smoothing",  Kind::Check, ID_ROLL,       nullptr},
     {L"output_fov_scale",  L"head_smoothing",  Kind::Edit,  ID_FOVSCALE,   nullptr},
     {L"projection",        L"dome",            Kind::Combo, ID_PROJECTION, L"flat|vr180|vr360", L"flat (side-by-side 3D)|vr180 (experimental)|vr360 (experimental)"},
+    {L"layout_3d",         L"dome",            Kind::Combo, ID_LAYOUT3D,   L"tb_half|sbs_half|sbs_full|tb_full",
+     L"Top / bottom, half (YouTube)|Side by side, half|Side by side, full|Top / bottom, full"},
     {L"fill",              L"dome",            Kind::Combo, ID_FILL,       L"black|last_seen", L"black (live view only)|last_seen (keep older view)"},
     {L"fill_fade_s",       L"dome",            Kind::Edit,  ID_FILLFADE,   nullptr},
     {L"vr_indicator",      L"indicator",       Kind::Check, ID_INDICATOR,  nullptr},
@@ -55,6 +59,10 @@ const Field kFields[] = {
     {L"keep_mp4",          L"post_processing", Kind::Check, ID_KEEPMP4,    nullptr},
     {L"post_flat",         L"post_processing", Kind::Check, ID_POSTFLAT,   nullptr},
     {L"post_yt8k",         L"post_processing", Kind::Check, ID_POSTYT8K,   nullptr},
+    {L"post_when",         L"post_processing", Kind::Combo, ID_POSTWHEN,   L"now|session_end|game_exit",
+     L"Right away|When VR stops|When the game closes"},
+    {L"eye_crop",          L"post_processing", Kind::Combo, ID_EYECROP,    L"16:9|4:3|none",
+     L"16:9 (wide, plays on Quest, YouTube 8K)|4:3 (taller view)|None (full view, tall video: Quest YouTube may crash)"},
     {L"log_level",         L"debug",           Kind::Combo, ID_LOGLEVEL,   L"none|error|warn|info|debug", L"none (no logging)|error|warn|info|debug"},
 };
 
@@ -112,8 +120,10 @@ std::wstring Norm(const std::wstring& key, const std::wstring& raw) {
         const std::wstring l = Lower(v);
         return l == L"warning" ? L"warn" : (l == L"off" ? L"none" : l);
     }
-    if (key == L"projection" || key == L"fill") return Lower(v);
+    if (key == L"projection" || key == L"fill" || key == L"layout_3d" || key == L"post_when" || key == L"eye_crop") return Lower(v);
     if (key == L"hotkey") {
+        Hotkey h;
+        if (ParseHotkey(v, h)) return Lower(h.text);   // canonical list (device names keep their inner spaces)
         std::wstring r;
         for (wchar_t c : v) if (!iswspace(c)) r += (wchar_t)towlower(c);
         size_t p;
@@ -250,11 +260,14 @@ KeyValues FromConfig(const Config& c) {
     kv.emplace_back(L"max_fps", std::to_wstring(c.maxFps));
     kv.emplace_back(L"require_tray", B(c.requireTray));
     kv.emplace_back(L"swap_eyes", B(c.swapEyes));
+    kv.emplace_back(L"record_overlays", B(c.recordOverlays));
     kv.emplace_back(L"symmetric_fov", B(c.head.symmetricFov));
     kv.emplace_back(L"head_smoothing", FloatText(c.head.smoothing));
     kv.emplace_back(L"roll_lock", B(c.head.rollLock));
     kv.emplace_back(L"output_fov_scale", FloatText(c.head.fovScale));
     kv.emplace_back(L"projection", FromUtf8(DomeProjectionName(c.dome.projection)));
+    static const wchar_t* yl[] = {L"tb_half", L"sbs_half", L"sbs_full", L"tb_full"};
+    kv.emplace_back(L"layout_3d", yl[(int)c.layout3d >= 0 && (int)c.layout3d < 4 ? (int)c.layout3d : 0]);
     kv.emplace_back(L"fill", c.dome.fill == DomeFill::LastSeen ? L"last_seen" : L"black");
     kv.emplace_back(L"fill_fade_s", FloatText(c.dome.fadeS));
     kv.emplace_back(L"vr_indicator", B(c.indicator.enabled));
@@ -269,6 +282,10 @@ KeyValues FromConfig(const Config& c) {
     kv.emplace_back(L"keep_mp4", B(c.keepMp4));
     kv.emplace_back(L"post_flat", B(c.postFlat));
     kv.emplace_back(L"post_yt8k", B(c.postYt8k));
+    static const wchar_t* pw[] = {L"now", L"session_end", L"game_exit"};
+    kv.emplace_back(L"post_when", pw[(int)c.postWhen >= 0 && (int)c.postWhen < 3 ? (int)c.postWhen : 2]);
+    static const wchar_t* ec[] = {L"16:9", L"4:3", L"none"};
+    kv.emplace_back(L"eye_crop", ec[(int)c.eyeCrop >= 0 && (int)c.eyeCrop < 3 ? (int)c.eyeCrop : 0]);
     static const wchar_t* lv[] = {L"none", L"error", L"warn", L"info", L"debug"};   // index = (int)LogLevel + 1
     kv.emplace_back(L"log_level", lv[(int)c.logLevel >= -1 && (int)c.logLevel < 4 ? (int)c.logLevel + 1 : 3]);
     return kv;
@@ -282,7 +299,9 @@ bool SaveKeyValuesToFile(const std::wstring& path, const KeyValues& kv, SaveResu
         if (e.first == L"hotkey") {
             Hotkey h;
             if (!ParseHotkey(v, h))
-                r.problems.push_back(L"hotkey: '" + v + L"' is not a valid hotkey (examples: Ctrl+Shift+F10, F9, Alt+R, Ctrl+Numpad5, none)");
+                r.problems.push_back(L"hotkey: '" + v + L"' is not a valid hotkey (examples: Ctrl+Shift+F10, ScrollLock, MouseX1, "
+                                     L"Pad:A, Pad:Back+Start, Joy:*:Button3, Joy:T300RS:Button5+Button6, none; "
+                                     L"several separated by commas)");
         }
         if (v.find(L" ;") != std::wstring::npos || v.find(L" #") != std::wstring::npos ||
             v.find(L"\t;") != std::wstring::npos || v.find(L"\t#") != std::wstring::npos ||
@@ -394,28 +413,7 @@ bool SaveSettingsToFile(const std::wstring& path, const Config& c, SaveResult& r
 }
 
 bool HotkeyText(unsigned vk, bool ctrl, bool shift, bool alt, std::wstring& out) {
-    std::wstring key;
-    if ((vk >= 'A' && vk <= 'Z') || (vk >= '0' && vk <= '9')) key = std::wstring(1, (wchar_t)vk);
-    else if (vk >= VK_F1 && vk <= VK_F24) key = L"F" + std::to_wstring(vk - VK_F1 + 1);
-    else if (vk >= VK_NUMPAD0 && vk <= VK_NUMPAD9) key = L"Numpad" + std::to_wstring(vk - VK_NUMPAD0);
-    else {
-        static const struct { unsigned vk; const wchar_t* name; } kNames[] = {
-            {VK_SPACE, L"Space"}, {VK_RETURN, L"Enter"}, {VK_TAB, L"Tab"}, {VK_BACK, L"Backspace"},
-            {VK_INSERT, L"Insert"}, {VK_DELETE, L"Delete"}, {VK_HOME, L"Home"}, {VK_END, L"End"},
-            {VK_PRIOR, L"PageUp"}, {VK_NEXT, L"PageDown"}, {VK_UP, L"Up"}, {VK_DOWN, L"Down"}, {VK_LEFT, L"Left"},
-            {VK_RIGHT, L"Right"}, {VK_PAUSE, L"Pause"}, {VK_SCROLL, L"ScrollLock"}, {VK_SNAPSHOT, L"PrintScreen"},
-            {VK_MULTIPLY, L"NumpadMultiply"}, {VK_ADD, L"NumpadAdd"}, {VK_SUBTRACT, L"NumpadSubtract"},
-            {VK_DIVIDE, L"NumpadDivide"}, {VK_DECIMAL, L"NumpadDecimal"},
-        };
-        for (const auto& k : kNames) if (k.vk == vk) key = k.name;
-    }
-    if (key.empty()) return false;
-    out.clear();
-    if (ctrl) out += L"Ctrl+";
-    if (shift) out += L"Shift+";
-    if (alt) out += L"Alt+";
-    out += key;
-    return true;
+    return KeyBindingText(vk, ctrl, shift, alt, out);   // one naming table: src/hotkey.cpp
 }
 
 // ================================================================================================ the window
@@ -428,7 +426,7 @@ HWND                g_hover = nullptr;          // the control the help panel la
 const wchar_t*      g_shown = nullptr;          // the text now in the help panel (pointer compare: no flicker)
 std::wstring        g_path;
 bool                g_done = false;
-bool                g_capturing = false;
+int                 g_capturing = 0;           // "Press a key": 0 = off, 1 = replace the field (ID_HOTKEY_PICK), 2 = add (ID_HOTKEY_ADD)
 int                 g_smoothPos = -1;       // trackbar position / text as loaded: an untouched slider keeps the exact file value
 std::wstring        g_smoothText;
 std::function<void(const std::vector<std::wstring>&)> g_onSaved;
@@ -443,9 +441,17 @@ const wchar_t* const kOverview =
 
 struct Help { int id; const wchar_t* text; };
 const Help kHelp[] = {
-    {ID_HOTKEY, L"The key that starts and stops a recording while the game runs. Press it once to start, press it again to stop. "
-                L"Pick a key the game does not use (ScrollLock works well). Read when the game starts: restart the game after you change it."},
-    {ID_HOTKEY_PICK, L"Click this, then press the key or key combination you want. Escape cancels."},
+    {ID_HOTKEY, L"What starts and stops a recording while the game runs. Press it once to start, press it again to stop. "
+                L"Pick something the game does not use (ScrollLock works well). Several are allowed, separated by commas; any of them works.\r\n"
+                L"Keyboard keys and mouse buttons (MouseMiddle, MouseX1, MouseX2) are read when the game starts: restart the game after a change.\r\n"
+                L"Xbox controller: Pad:A, Pad:Back+Start (hold both), Pad2:LB (2nd pad only). "
+                L"Wheel / joystick: Joy:*:Button3 (any device) or Joy:T300RS:Button5+Button6 (device name contains T300RS), POVUp/Down/Left/Right for the hat. "
+                L"Controller and wheel buttons apply at once.\r\n"
+                L"Run EyeCaptureTray.exe --inputs in a command prompt to list your wheel's button names."},
+    {ID_HOTKEY_PICK, L"Click, then press a key, a mouse side button, an Xbox controller button (hold several for a combination) or a "
+                     L"wheel / joystick button. Escape cancels. Replaces what is in the field."},
+    {ID_HOTKEY_ADD, L"Click, then press a key, a mouse side button, an Xbox controller button (hold several for a combination) or a "
+                    L"wheel / joystick button. Escape cancels. Adds it to the list, so the old ones keep working."},
     {ID_CODEC, L"Video compression. hevc (H.265) gives the best picture per megabyte and is what YouTube wants for big 3D video. "
                L"h264 is older and plays in more programs, but files get bigger or softer."},
     {ID_BITRATE, L"Megabits per second of video. Higher = sharper picture and bigger files. 0 = the recorder's default: 120 for hevc, 80 for h264."},
@@ -454,6 +460,11 @@ const Help kHelp[] = {
     {ID_OUTDIR, L"Where recordings are saved. Empty = the 'captures' folder next to eye_capture.dll."},
     {ID_BROWSE, L"Pick the output folder."},
     {ID_AUDIO, L"Records what you hear (the Windows playback device) into the video."},
+    {ID_OVERLAYS, L"Also records the panels the game or other mods show as separate layers in the headset: menus, the DLAA "
+                  L"injector's VR panel and fps box. They are placed and blended into the video the way the headset shows them. "
+                  L"Off = only the game's 3D view is recorded.\r\n"
+                  L"The Virtual Desktop / Quest system menus (and the guardian) are added by the headset itself and can never be "
+                  L"recorded. The red recording dot is never recorded. Applies to the next recording."},
     {ID_AUDIODEV, L"Part of the playback device name to record, for example 'Virtual Desktop Audio'. Empty = the Windows default playback device."},
     {ID_PROJECTION, L"flat = normal side-by-side 3D video. The viewer sees exactly what you saw, in 3D. Recommended; plays everywhere.\r\n"
                     L"vr180 / vr360 are EXPERIMENTAL. The video becomes a dome you can look around in with a VR player. "
@@ -484,14 +495,38 @@ const Help kHelp[] = {
                  L"0.002 = a few pixels. Below about 0.001 it is smaller than one headset pixel and disappears. Smallest allowed 0.0005."},
     {ID_INDOPACITY, L"How solid the red dot is. 1 = fully visible, 0.3 = faint."},
     {ID_YTMODE, L"What the tray makes after each recording, for uploading to YouTube.\r\n"
-                L"3D .mkv: a copy of the recording with the 3D tags YouTube reads. Takes seconds, same quality as the recording. "
-                L"YouTube shows it in its 4K tier.\r\n"
-                L"8K 3D .mkv (<name>_YT8K.mkv): each eye scaled into a 3840x4320 box, frame 7680x4320, 60 fps. "
+                L"3D .mkv: the recording in the chosen 3D layout with the 3D tags YouTube reads. Side by side, full is a copy that takes "
+                L"seconds; the other layouts re-encode it. YouTube shows it in its 4K tier.\r\n"
+                L"8K 3D .mkv (<name>_YT8K.mkv): 3D in the 3D layout chosen above (default half top-bottom, short side 4320), 60 fps. "
+                L"YouTube reads 3D as half-format, so it is not stretched. "
                 L"YouTube then keeps its 8K tier and a much higher bitrate, so the 3D is far sharper on the headset. "
                 L"Re-encodes on the GPU, about twice the clip length. Flat 3D recordings only.\r\n"
                 L"Upload the .mkv file the balloon names."},
+    {ID_LAYOUT3D, L"How the two eyes are arranged in the files the tray makes from a flat recording (the 3D .mkv and the 8K copy). "
+                  L"The recording itself always stays full side by side. Greyed for VR180 / VR360, which have fixed layouts.\r\n"
+                  L"Top / bottom, half: the layout YouTube needs. The frame has one eye's shape, each eye is squeezed to half height, "
+                  L"left eye on top. The .mkv is re-encoded (slower than a plain copy).\r\n"
+                  L"Side by side, half: same idea, each eye squeezed to half width. The .mkv is re-encoded.\r\n"
+                  L"Side by side, full: the recording as it is, left eye left, each eye at its own shape. The .mkv is a fast copy "
+                  L"without re-encoding. YouTube shows it stretched; use it for headset players and 3D TVs.\r\n"
+                  L"Top / bottom, full: each eye keeps its own shape, left eye on top. The .mkv is re-encoded."},
+    {ID_EYECROP, L"Flat recordings often have eyes that are taller than wide. A tall top / bottom video crashes the YouTube player on "
+                 L"Quest and YouTube caps it at 2160p. This cuts the top and bottom off each eye (same cut for both, centred) before "
+                 L"the .mkv / 8K copy is made; nothing is stretched.\r\n"
+                 L"16:9 (default): wide view. The 8K copy is 7680x4320, which plays on Quest and gets YouTube's 8K tier.\r\n"
+                 L"4:3: a taller view, 5760x4320 for 8K.\r\n"
+                 L"None: the full eye is kept, so the video is tall. The Quest YouTube player may crash on it and YouTube stays at 2160p.\r\n"
+                 L"An eye that is already wider than the chosen shape is not cropped. Flat 3D recordings only; the .mkv is re-encoded "
+                 L"(not a plain copy) whenever it is cropped."},
     {ID_KEEPMP4, L"Keep the original .mp4 next to the .mkv files. Off = the .mp4 is deleted once the 3D .mkv is made and checked. "
                  L"The .mp4 is always kept when no 3D .mkv is made."},
+    {ID_POSTWHEN, L"When the tray converts a finished recording (the .mkv / 8K / flat files). Converting uses the CPU and GPU, "
+                  L"so doing it during a game can cost frame rate.\r\n"
+                  L"Right away: as soon as the recording is saved.\r\n"
+                  L"When VR stops: once no game has a VR session open (for example you left VR or the game closed). "
+                  L"If VR starts again while a conversion runs, it is paused and continues afterwards.\r\n"
+                  L"When the game closes (default): once the game that made the recording has exited and no VR game is running.\r\n"
+                  L"\"Convert last recording now\" in the tray menu always starts at once."},
     {ID_POSTFLAT, L"Also makes a normal 2D video from the left eye (<name>_FLAT.mp4) for viewers without a headset. "
                   L"Re-encodes with ffmpeg and takes a while."},
     {ID_LOGLEVEL, L"How much logs\\eye_capture.log and logs\\tray.log write. none = nothing at all. info is normal. debug is for bug reports."},
@@ -553,6 +588,13 @@ std::wstring GetText(int id) {
 
 // "Make for YouTube" drop-down <-> the two hidden checks bound to post_mkv / post_yt8k.
 // 0 = 3D .mkv (mkv 1, 8k 0), 1 = 8K 3D .mkv (0, 1), 2 = both files (1, 1), 3 = nothing (0, 0)
+HWND g_layoutLabel = nullptr;   // label of the 3D layout drop-down (greyed together with it)
+// The 3D layout only applies to flat recordings: VR180 / VR360 (projection items 1 and 2) have fixed layouts.
+void UpdateLayoutEnabled() {
+    const bool flat = (int)SendMessageW(Ctl(ID_PROJECTION), CB_GETCURSEL, 0, 0) <= 0;
+    EnableWindow(Ctl(ID_LAYOUT3D), flat);
+    if (g_layoutLabel) EnableWindow(g_layoutLabel, flat);
+}
 void YtModeFromChecks() {
     const bool mkv = SendMessageW(Ctl(ID_POSTMKV), BM_GETCHECK, 0, 0) == BST_CHECKED;
     const bool k8 = SendMessageW(Ctl(ID_POSTYT8K), BM_GETCHECK, 0, 0) == BST_CHECKED;
@@ -603,6 +645,7 @@ void SetControls(const KeyValues& kv) {
         }
     }
     YtModeFromChecks();
+    UpdateLayoutEnabled();
 }
 
 KeyValues CollectControls() {
@@ -653,9 +696,33 @@ void LoadFromFile() {
     }
 }
 
-void ArmCapture(bool on) {
-    g_capturing = on;
-    SetWindowTextW(Ctl(ID_HOTKEY_PICK), on ? L"Press the key... (Esc = cancel)" : L"Press a key...");
+const UINT_PTR kCaptureTimer = 2;   // 30 ms while "Press a key" is armed: polls input::TakeCaptured (pads / wheels)
+
+// mode 0 = off, 1 = replace the field, 2 = add to the list. Pad / joystick capture (tray/input.h) follows the armed state.
+void ArmCapture(int mode) {
+    g_capturing = mode;
+    SetWindowTextW(Ctl(ID_HOTKEY_PICK), mode == 1 ? L"Press the key... (Esc = cancel)" : L"Press a key...");
+    SetWindowTextW(Ctl(ID_HOTKEY_ADD), mode == 2 ? L"Press to add... (Esc = cancel)" : L"Add another...");
+    input::SetCapture(mode != 0);
+    if (mode) SetTimer(g_dlg, kCaptureTimer, 30, nullptr);
+    else KillTimer(g_dlg, kCaptureTimer);
+}
+
+// A captured binding text: replaces the field (mode 1) or is appended to the list (mode 2; replaces an empty / "none"
+// field; nothing happens when the list already has it). Disarms.
+void ApplyCaptured(const std::wstring& t) {
+    std::wstring v = t;
+    if (g_capturing == 2) {
+        const std::wstring cur = Trim(GetText(ID_HOTKEY));
+        Hotkey h;
+        if (!cur.empty() && Lower(cur) != L"none") {
+            bool have = false;
+            if (ParseHotkey(cur, h)) for (const auto& b : h.bindings) if (b.text == t) have = true;
+            v = have ? cur : cur + L", " + t;
+        }
+    }
+    SetWindowTextW(Ctl(ID_HOTKEY), v.c_str());
+    ArmCapture(0);
 }
 
 void DoSave() {
@@ -700,7 +767,8 @@ void CommandHandler(int id, int code) {
         if (id != ID_HELPTEXT) { ShowHelp(HelpText(id)); g_hover = Ctl(id); }
         return;
     }
-    if ((id == ID_PROJECTION || id == ID_YTMODE) && code == CBN_SELCHANGE) { ShowHelp(HelpText(id)); return; }
+    if (id == ID_PROJECTION && code == CBN_SELCHANGE) UpdateLayoutEnabled();
+    if ((id == ID_PROJECTION || id == ID_YTMODE || id == ID_LAYOUT3D || id == ID_POSTWHEN || id == ID_EYECROP) && code == CBN_SELCHANGE) { ShowHelp(HelpText(id)); return; }
     if ((id == ID_SAVE || id == ID_CANCEL || id == ID_OPENINI || id == ID_DEFAULTS || id == ID_BROWSE) && code != BN_CLICKED) return;
     switch (id) {
     case ID_SAVE: DoSave(); break;
@@ -715,29 +783,50 @@ void CommandHandler(int id, int code) {
     }
     case ID_BROWSE: DoBrowse(); break;
     case ID_HOTKEY_PICK:
-        if (code == BN_CLICKED) { ArmCapture(!g_capturing); if (g_capturing) SetFocus(Ctl(ID_HOTKEY_PICK)); }
+    case ID_HOTKEY_ADD:
+        if (code == BN_CLICKED) {
+            const int mode = id == ID_HOTKEY_PICK ? 1 : 2;
+            ArmCapture(g_capturing == mode ? 0 : mode);   // clicking the armed button again cancels
+            if (g_capturing) SetFocus(Ctl(id));
+        }
         break;
     default: break;
     }
 }
 
-// Called from the message loop for key messages while "Press a key" is armed. True = message consumed.
+// Called from the message loop while "Press a key" is armed: key messages, and the middle / side mouse buttons (never
+// left / right: they drive the window). True = message consumed. Pad / wheel buttons arrive through kCaptureTimer.
 bool CaptureKey(const MSG& m) {
-    if (!g_capturing || (m.message != WM_KEYDOWN && m.message != WM_SYSKEYDOWN)) return false;
-    const unsigned vk = (unsigned)m.wParam;
+    if (!g_capturing) return false;
+    const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0, shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0,
+               alt = (GetKeyState(VK_MENU) & 0x8000) != 0;
+    unsigned vk = 0;
+    if (m.message == WM_KEYDOWN || m.message == WM_SYSKEYDOWN) {
+        vk = (unsigned)m.wParam;
+        if (vk == VK_SNAPSHOT) return true;   // PrintScreen: Windows sends only its key-up (handled below)
+    } else if (m.message == WM_KEYUP || m.message == WM_SYSKEYUP) {
+        if ((unsigned)m.wParam != VK_SNAPSHOT) return false;
+        vk = VK_SNAPSHOT;
+    } else if (m.message == WM_MBUTTONDOWN || m.message == WM_NCMBUTTONDOWN) {
+        vk = VK_MBUTTON;
+    } else if (m.message == WM_XBUTTONDOWN || m.message == WM_NCXBUTTONDOWN) {
+        vk = HIWORD(m.wParam) == XBUTTON2 ? VK_XBUTTON2 : VK_XBUTTON1;
+    } else if (m.message == WM_MBUTTONUP || m.message == WM_XBUTTONUP || m.message == WM_NCMBUTTONUP ||
+               m.message == WM_NCXBUTTONUP) {
+        return true;   // the release of a captured button (no "Back" app command in the window)
+    } else {
+        return false;
+    }
     if (vk == VK_CONTROL || vk == VK_SHIFT || vk == VK_MENU || vk == VK_LWIN || vk == VK_RWIN ||
         vk == VK_LCONTROL || vk == VK_RCONTROL || vk == VK_LSHIFT || vk == VK_RSHIFT || vk == VK_LMENU || vk == VK_RMENU)
         return true;   // wait for the main key
-    const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0, shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0,
-               alt = (GetKeyState(VK_MENU) & 0x8000) != 0;
-    if (vk == VK_ESCAPE && !ctrl && !shift && !alt) { ArmCapture(false); return true; }
+    if (vk == VK_ESCAPE && !ctrl && !shift && !alt) { ArmCapture(0); return true; }
     std::wstring t;
     if (!HotkeyText(vk, ctrl, shift, alt, t)) {
         MessageBeep(MB_ICONEXCLAMATION);
-        return true;   // keep waiting for a key the config can name
+        return true;   // keep waiting for a key the config can name (only Escape with modifiers gets here)
     }
-    SetWindowTextW(Ctl(ID_HOTKEY), t.c_str());
-    ArmCapture(false);
+    ApplyCaptured(t);
     return true;
 }
 
@@ -756,13 +845,18 @@ LRESULT CALLBACK DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     case WM_ACTIVATE:
-        if (LOWORD(wp) == WA_INACTIVE && g_capturing) ArmCapture(false);
+        if (LOWORD(wp) == WA_INACTIVE && g_capturing) ArmCapture(0);
         return 0;
     case WM_SETCURSOR:
         // standard controls forward this to the parent: wp = the child under the mouse (or the dialog itself)
         Hover((HWND)wp);
         return DefWindowProcW(h, msg, wp, lp);
     case WM_TIMER:
+        if (wp == kCaptureTimer) {   // a pad / wheel chord was pressed and released (tray/input.h)
+            std::wstring t;
+            if (g_capturing && input::TakeCaptured(t)) ApplyCaptured(t);
+            return 0;
+        }
         // some controls (edit, trackbar) may keep WM_SETCURSOR to themselves: also look at what is under the mouse
         if (wp == kHoverTimer) {
             POINT pt;
@@ -785,6 +879,9 @@ LRESULT CALLBACK DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_DESTROY:
         KillTimer(h, kHoverTimer);
+        KillTimer(h, kCaptureTimer);
+        g_capturing = 0;
+        input::SetCapture(false);
         g_done = true;
         g_dlg = nullptr;
         g_tip = nullptr;
@@ -806,12 +903,13 @@ struct Builder {
         return c;
     }
     // helpId != 0: hovering the label shows the help of that control (the label keeps the id in GWLP_USERDATA)
-    void Label(int x, int y, int w, const wchar_t* t, int helpId = 0) {
+    HWND Label(int x, int y, int w, const wchar_t* t, int helpId = 0) {
         HWND c = Make(L"STATIC", t, SS_LEFT | (helpId ? SS_NOTIFY : 0), x, y + 3, w, 18, -1);
         if (helpId) {
             SetWindowLongPtrW(c, GWLP_USERDATA, helpId);
             AddTip(c, HelpText(helpId));
         }
+        return c;
     }
     void Edit(int id, int x, int y, int w) {
         AddTip(Make(L"EDIT", L"", WS_TABSTOP | ES_AUTOHSCROLL, x, y, w, 22, id, WS_EX_CLIENTEDGE), HelpText(id));
@@ -868,11 +966,12 @@ int BuildControls(HWND dlg) {
     y += 24;
 
     // ---- Recording
-    b.Group(gx, y, gw, 22 + 4 * row + 6, L"Recording");
+    b.Group(gx, y, gw, 22 + 5 * row + 6, L"Recording");
     int r = y + 20;
     b.Label(ix, r, 60, L"Hotkey", ID_HOTKEY);
-    b.Edit(ID_HOTKEY, ix + 65, r, 190);
-    b.Button(ID_HOTKEY_PICK, ix + 265, r - 1, 190, L"Press a key...");
+    b.Edit(ID_HOTKEY, ix + 65, r, 230);
+    b.Button(ID_HOTKEY_PICK, ix + 300, r - 1, 125, L"Press a key...");
+    b.Button(ID_HOTKEY_ADD, ix + 430, r - 1, 125, L"Add another...");
     r += row;
     b.Label(ix, r, 50, L"Codec", ID_CODEC);
     b.Combo(ID_CODEC, ix + 55, r, 100);
@@ -888,10 +987,12 @@ int BuildControls(HWND dlg) {
     b.Check(ID_AUDIO, ix, r, 120, L"Record audio");
     b.Label(ix + 135, r, 110, L"Device name has", ID_AUDIODEV);
     b.Edit(ID_AUDIODEV, ix + 250, r, 280);
-    y += 22 + 4 * row + 6 + 6;
+    r += row;
+    b.Check(ID_OVERLAYS, ix, r, 400, L"Record overlays (mod menus, in-game panels)");
+    y += 22 + 5 * row + 6 + 6;
 
     // ---- 3D
-    b.Group(gx, y, gw, 22 + 4 * row + 6, L"3D");
+    b.Group(gx, y, gw, 22 + 5 * row + 6, L"3D");
     r = y + 20;
     b.Label(ix, r, 65, L"Projection", ID_PROJECTION);
     b.Combo(ID_PROJECTION, ix + 68, r, 135);
@@ -899,6 +1000,9 @@ int BuildControls(HWND dlg) {
     b.Combo(ID_FILL, ix + 242, r, 165);
     b.Label(ix + 420, r, 50, L"Fade (s)", ID_FILLFADE);
     b.Edit(ID_FILLFADE, ix + 472, r, 55);
+    r += row;
+    g_layoutLabel = b.Label(ix, r, 65, L"3D layout", ID_LAYOUT3D);
+    b.Combo(ID_LAYOUT3D, ix + 68, r, 230);
     r += row;
     b.Check(ID_SYMFOV, ix, r, 170, L"Symmetric field of view");
     b.Check(ID_SWAP, ix + 190, r, 100, L"Swap eyes");
@@ -915,7 +1019,7 @@ int BuildControls(HWND dlg) {
     r += row;
     b.Label(ix, r, 190, L"Output FOV scale (0.5 .. 1)", ID_FOVSCALE);
     b.Edit(ID_FOVSCALE, ix + 195, r, 55);
-    y += 22 + 4 * row + 6 + 6;
+    y += 22 + 5 * row + 6 + 6;
 
     // ---- indicator
     b.Group(gx, y, gw, 22 + 2 * row + 6, L"In-headset indicator");
@@ -935,17 +1039,23 @@ int BuildControls(HWND dlg) {
     y += 22 + 2 * row + 6 + 6;
 
     // ---- after recording
-    b.Group(gx, y, gw, 22 + 2 * row + 6, L"After recording");
+    b.Group(gx, y, gw, 22 + 4 * row + 6, L"After recording");
     r = y + 20;
     b.Label(ix, r, 105, L"Make for YouTube", ID_YTMODE);
     b.Combo(ID_YTMODE, ix + 110, r, 290,
-            L"3D .mkv (fast, no re-encode)|8K 3D .mkv (sharper on YouTube, slow)|both files|nothing");
+            L"3D .mkv|8K 3D .mkv (sharper on YouTube, slow)|both files|nothing");
     b.Check(ID_KEEPMP4, ix + 410, r, 140, L"Keep the original .mp4");
+    r += row;
+    b.Label(ix, r, 105, L"Convert recordings", ID_POSTWHEN);
+    b.Combo(ID_POSTWHEN, ix + 110, r, 200);
+    r += row;
+    b.Label(ix, r, 105, L"Crop each eye", ID_EYECROP);
+    b.Combo(ID_EYECROP, ix + 110, r, 400);
     r += row;
     b.Check(ID_POSTFLAT, ix, r, 420, L"Also make a flat 2D copy (for people without a headset)");
     b.HiddenCheck(ID_POSTMKV);     // bound to post_mkv / post_yt8k, set from / read into the drop-down
     b.HiddenCheck(ID_POSTYT8K);
-    y += 22 + 2 * row + 6 + 6;
+    y += 22 + 4 * row + 6 + 6;
 
     // ---- advanced
     b.Group(gx, y, gw, 22 + row + 6, L"Advanced");
@@ -963,7 +1073,8 @@ int BuildControls(HWND dlg) {
     g_shown = kOverview;
     y += 20 + helpH + 8 + 6;
 
-    b.Make(L"STATIC", L"Saving applies to the NEXT recording. The hotkey and the indicator are read when the game starts: restart the game for those.",
+    b.Make(L"STATIC", L"Saving applies to the NEXT recording. Keyboard / mouse hotkeys and the indicator are read when the game starts: "
+                      L"restart the game for those. Controller and wheel buttons apply at once.",
            SS_LEFT, gx, y, gw, 32, -1);
     y += 38;
     b.Button(ID_OPENINI, gx, y, 110, L"Open config.ini");
@@ -989,7 +1100,7 @@ void ShowDialog(const std::wstring& configPath, std::function<void(const std::ve
     g_path = configPath;
     g_onSaved = onSaved;
     g_done = false;
-    g_capturing = false;
+    g_capturing = 0;
 
     NONCLIENTMETRICSW ncm{sizeof(ncm)};
     if (SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0)) g_font = CreateFontIndirectW(&ncm.lfMessageFont);

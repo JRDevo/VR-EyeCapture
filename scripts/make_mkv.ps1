@@ -1,7 +1,8 @@
 ﻿<#
     make_mkv.ps1 -- fallback if YouTube does not pick up the 3D flag of an MP4: remux (no re-encode) into MKV with the
     Matroska stereo_mode = left_right tag, which YouTube also reads (top_bottom for a VR360 recording, from its <file>.json
-    sidecar; VR180 / VR360 projection metadata is carried over from the MP4).
+    sidecar; VR180 / VR360 projection metadata is carried over from the MP4). Always a plain remux of the full
+    side-by-side recording: it ignores config.ini's layout_3d (the tray's .mkv re-encodes to that layout unless it is sbs_full).
 
       powershell -ExecutionPolicy Bypass -File scripts\make_mkv.ps1 <file.mp4> [more.mp4 ...]
     Writes <file>.mkv next to each input. Needs ffmpeg (winget install Gyan.FFmpeg.Essentials, or pass -Ffmpeg).

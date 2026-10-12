@@ -29,6 +29,7 @@ set(EYE_WARN_FLAGS /W3 /permissive- /Zc:__cplusplus /utf-8)
 add_library(eye_capture_core STATIC
     src/log.cpp
     src/config.cpp
+    src/hotkey.cpp
     src/frame_source.cpp
     src/source_d3d11.cpp
     src/source_d3d12.cpp
@@ -37,6 +38,7 @@ add_library(eye_capture_core STATIC
     src/head_smoothing.cpp
     src/dome.cpp
     src/indicator.cpp
+    src/overlay.cpp
     src/audio_capture.cpp
     src/st3d.cpp)
 target_include_directories(eye_capture_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -65,9 +67,9 @@ add_custom_command(TARGET eye_capture POST_BUILD
             $<TARGET_FILE_DIR:eye_capture>/${EYE_LAYER_NAME}.json)
 
 # --- tray control app (required: the layer is dormant without it; it also registers the layer, tray/install.cpp) ---
-add_executable(EyeCaptureTray WIN32 tray/tray.cpp tray/postprocess.cpp tray/settings.cpp tray/install.cpp)
+add_executable(EyeCaptureTray WIN32 tray/tray.cpp tray/postprocess.cpp tray/settings.cpp tray/install.cpp tray/input.cpp)
 target_compile_options(EyeCaptureTray PRIVATE ${EYE_WARN_FLAGS})
-target_link_libraries(EyeCaptureTray PRIVATE eye_capture_core comctl32)
+target_link_libraries(EyeCaptureTray PRIVATE eye_capture_core comctl32 dinput8 dxguid)
 target_include_directories(EyeCaptureTray PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tray)
 
 # --- tests ---
@@ -85,15 +87,20 @@ if (EYE_BUILD_TESTS)
     target_compile_definitions(status_sim PRIVATE UNICODE _UNICODE NOMINMAX)
     target_include_directories(status_sim PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
+    # Stand-in for ffmpeg.exe (sleeps in ticks, copies -i to the output): the tray's post_when hold test, no encoder needed.
+    add_executable(fake_ffmpeg tests/fake_ffmpeg.cpp)
+    target_compile_options(fake_ffmpeg PRIVATE ${EYE_WARN_FLAGS})
+    target_compile_definitions(fake_ffmpeg PRIVATE UNICODE _UNICODE NOMINMAX)
+
     # Control thread + ControlPublishFinal on a private status block (no GPU / game): the "saved <file>" shutdown race.
     add_executable(control_final_test tests/control_final_test.cpp src/control.cpp)
     target_compile_options(control_final_test PRIVATE ${EYE_WARN_FLAGS})
     target_link_libraries(control_final_test PRIVATE eye_capture_core)
 
     # Settings window: config.ini writer (in-place edit, validation, hotkey names) + driver for the real dialog (no GPU).
-    add_executable(settings_test tests/settings_test.cpp tray/settings.cpp tray/install.cpp)
+    add_executable(settings_test tests/settings_test.cpp tray/settings.cpp tray/install.cpp tray/input.cpp)
     target_compile_options(settings_test PRIVATE ${EYE_WARN_FLAGS})
-    target_link_libraries(settings_test PRIVATE eye_capture_core comctl32 advapi32)
+    target_link_libraries(settings_test PRIVATE eye_capture_core comctl32 advapi32 dinput8 dxguid)
     target_include_directories(settings_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tray)
 
     # Layer registration (tray/install.cpp) on test keys under HKCU (no admin, never the real OpenXR keys).
@@ -112,6 +119,11 @@ if (EYE_BUILD_TESTS)
     add_executable(indicator_test tests/indicator_test.cpp)
     target_compile_options(indicator_test PRIVATE ${EYE_WARN_FLAGS})
     target_link_libraries(indicator_test PRIVATE eye_capture_core)
+
+    # record_overlays geometry unit test (CPU only): projection, winding / culling side, pixel box, format families.
+    add_executable(overlay_test tests/overlay_test.cpp)
+    target_compile_options(overlay_test PRIVATE ${EYE_WARN_FLAGS})
+    target_link_libraries(overlay_test PRIVATE eye_capture_core)
 
     # Loader test: the real OpenXR loader + whatever runtime is active (VDXR here) + our installed layer.
     add_executable(layer_loadtest tests/layer_loadtest.cpp)

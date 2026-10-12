@@ -47,57 +47,7 @@ bool ParseBool(const std::wstring& v, bool& out) {
     return false;
 }
 
-struct KeyName { const wchar_t* name; unsigned vk; };
-const KeyName kKeys[] = {
-    {L"space", VK_SPACE}, {L"enter", VK_RETURN}, {L"tab", VK_TAB}, {L"backspace", VK_BACK},
-    {L"insert", VK_INSERT}, {L"ins", VK_INSERT}, {L"delete", VK_DELETE}, {L"del", VK_DELETE},
-    {L"home", VK_HOME}, {L"end", VK_END}, {L"pageup", VK_PRIOR}, {L"pgup", VK_PRIOR},
-    {L"pagedown", VK_NEXT}, {L"pgdn", VK_NEXT}, {L"up", VK_UP}, {L"down", VK_DOWN}, {L"left", VK_LEFT},
-    {L"right", VK_RIGHT}, {L"pause", VK_PAUSE}, {L"scrolllock", VK_SCROLL}, {L"printscreen", VK_SNAPSHOT},
-    {L"numpadmultiply", VK_MULTIPLY}, {L"numpadadd", VK_ADD}, {L"numpadsubtract", VK_SUBTRACT},
-    {L"numpaddivide", VK_DIVIDE}, {L"numpaddecimal", VK_DECIMAL},
-};
 } // namespace
-
-bool ParseHotkey(const std::wstring& s, Hotkey& out) {
-    Hotkey h;
-    if (Lower(Trim(s)) == L"none") { h.text = L"none"; out = h; return true; }
-    std::wstring rest = s;
-    std::vector<std::wstring> parts;
-    size_t pos;
-    while ((pos = rest.find(L'+')) != std::wstring::npos) {
-        parts.push_back(Trim(rest.substr(0, pos)));
-        rest = rest.substr(pos + 1);
-    }
-    parts.push_back(Trim(rest));
-    for (size_t i = 0; i + 1 < parts.size(); ++i) {
-        const std::wstring m = Lower(parts[i]);
-        if (m == L"ctrl" || m == L"control") h.ctrl = true;
-        else if (m == L"shift") h.shift = true;
-        else if (m == L"alt") h.alt = true;
-        else return false;
-    }
-    const std::wstring key = Lower(parts.back());
-    unsigned vk = 0;
-    if (key.size() == 1 && ((key[0] >= L'a' && key[0] <= L'z') || (key[0] >= L'0' && key[0] <= L'9'))) {
-        vk = (unsigned)towupper(key[0]);
-    } else if (key.size() >= 2 && key.size() <= 3 && key[0] == L'f') {
-        unsigned n = 0;
-        if (ParseUInt(key.substr(1), n) && n >= 1 && n <= 24) vk = VK_F1 + (n - 1);
-    } else if (key.size() == 7 && key.compare(0, 6, L"numpad") == 0 && key[6] >= L'0' && key[6] <= L'9') {
-        vk = VK_NUMPAD0 + (unsigned)(key[6] - L'0');
-    } else {
-        for (const auto& k : kKeys) if (key == k.name) { vk = k.vk; break; }
-    }
-    if (!vk) return false;
-    h.vk = vk;
-    if (h.ctrl) h.text += L"Ctrl+";
-    if (h.shift) h.text += L"Shift+";
-    if (h.alt) h.text += L"Alt+";
-    h.text += parts.back();
-    out = h;
-    return true;
-}
 
 namespace {
 enum class KeyResult { Ok, Bad, Unknown };
@@ -233,6 +183,8 @@ KeyResult ApplyKey(Config& c, const std::wstring& key, std::wstring val) {
         if (ParseBool(val, b)) c.requireTray = b; else ok = false;
     } else if (key == L"swap_eyes") {
         if (ParseBool(val, b)) c.swapEyes = b; else ok = false;
+    } else if (key == L"record_overlays") {
+        if (ParseBool(val, b)) c.recordOverlays = b; else ok = false;
     } else if (key == L"post_mkv") {
         if (ParseBool(val, b)) c.postMkv = b; else ok = false;
     } else if (key == L"keep_mp4") {
@@ -241,6 +193,25 @@ KeyResult ApplyKey(Config& c, const std::wstring& key, std::wstring val) {
         if (ParseBool(val, b)) c.postFlat = b; else ok = false;
     } else if (key == L"post_yt8k") {
         if (ParseBool(val, b)) c.postYt8k = b; else ok = false;
+    } else if (key == L"post_when") {
+        const std::wstring l = Lower(val);
+        if (l == L"now") c.postWhen = PostWhen::Now;
+        else if (l == L"session_end") c.postWhen = PostWhen::SessionEnd;
+        else if (l == L"game_exit") c.postWhen = PostWhen::GameExit;
+        else ok = false;
+    } else if (key == L"layout_3d") {
+        const std::wstring l = Lower(val);
+        if (l == L"tb_half") c.layout3d = Layout3d::TbHalf;
+        else if (l == L"sbs_half") c.layout3d = Layout3d::SbsHalf;
+        else if (l == L"sbs_full") c.layout3d = Layout3d::SbsFull;
+        else if (l == L"tb_full") c.layout3d = Layout3d::TbFull;
+        else { c.layout3d = Layout3d::TbHalf; ok = false; }   // unknown: tb_half (the bad-value message names the key)
+    } else if (key == L"eye_crop") {
+        const std::wstring l = Lower(val);
+        if (l == L"16:9") c.eyeCrop = EyeCrop::Wide169;
+        else if (l == L"4:3") c.eyeCrop = EyeCrop::Std43;
+        else if (l == L"none") c.eyeCrop = EyeCrop::None;
+        else { c.eyeCrop = EyeCrop::Wide169; ok = false; }   // unknown: 16:9 (the bad-value message names the key)
     } else if (key == L"ffmpeg_path") {
         c.ffmpegPath = val;
     } else if (key == L"head_smoothing") {

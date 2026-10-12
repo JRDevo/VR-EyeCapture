@@ -1,14 +1,19 @@
 <#
     run_settings.ps1 -- tests for the tray's Settings window (no GPU, no game, does not touch the installed tray or config.ini).
       powershell -ExecutionPolicy Bypass -File tests\run_settings.ps1
-    1. settings_test hotkeys : every key name the window can produce parses back through ParseHotkey.
+    1. settings_test hotkeys : every key name the window can produce parses back through ParseHotkey; Pad: / Joy: bindings,
+                               binding lists and refused inputs (src/hotkey.h).
     2. settings_test save    : the Save code path on a scratch copy of config.ini (bad values refused, three keys changed in
                                place, a missing section appended) -- the before / after diff must show ONLY those lines.
     3. settings_test drive   : a scratch tray (copy of EyeCaptureTray.exe in build\tt2, EYECAP_TRAY_TEST_SHM, scratch APPDATA)
-                               opens the REAL Settings window; the test sets controls with SendMessage and clicks Save: a bad
+                               opens the REAL Settings window; "Press a key" F7, "Add another..." + mouse X1 -> "F7, MouseX1",
+                               "Press a key" F7 again -> "F7"; the test sets controls with SendMessage and clicks Save: a bad
                                value is refused (the tray logs what the message box would show), good values are written,
                                an untouched head_smoothing slider keeps its exact file text (0.57), the tooltip says
-                               "settings saved" and is restored after 5 s. Only the scratch tray is stopped.
+                               "settings saved" and is restored after 5 s; the "Convert recordings" drop-down (post_when)
+                               loads game_exit and saves "Right away" = now, which the tray picks up without a restart.
+                               The "Record overlays" check loads record_overlays = 1 and saves 0 when unticked.
+                               Only the scratch tray is stopped.
 #>
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
@@ -26,7 +31,7 @@ $s = Join-Path $root 'build\settings_scratch'
 if (Test-Path $s) { Remove-Item -Recurse -Force $s }
 New-Item -ItemType Directory $s | Out-Null
 # the live config.ini may have any projection: the scratch copies always start at vr180 so the expected diff is fixed
-$scratchIni = (Get-Content (Join-Path $root 'config.ini') -Raw) -replace '(?m)^projection = \S+', 'projection = vr180' -replace '(?m)^hotkey = \S+', 'hotkey = ScrollLock'
+$scratchIni = (Get-Content (Join-Path $root 'config.ini') -Raw) -replace '(?m)^projection = \S+', 'projection = vr180' -replace '(?m)^hotkey = [^\r\n]*', 'hotkey = ScrollLock' -replace '(?m)^record_overlays = \S+', 'record_overlays = 1'
 $scratchIni | Set-Content (Join-Path $s 'config.ini') -NoNewline -Encoding utf8; $scratchIni | Set-Content (Join-Path $s 'before.ini') -NoNewline -Encoding utf8
 & $test save (Join-Path $s 'config.ini'); Step 'save' ($LASTEXITCODE -eq 0)
 $b = Get-Content (Join-Path $s 'before.ini'); $a = Get-Content (Join-Path $s 'config.ini')
@@ -42,7 +47,7 @@ if (Test-Path $t) { Remove-Item -Recurse -Force $t }
 New-Item -ItemType Directory (Join-Path $t 'appdata\OpenXR-EyeCapture') | Out-Null
 Copy-Item (Join-Path $bin 'EyeCaptureTray.exe') $t
 $ini = Join-Path $t 'appdata\OpenXR-EyeCapture\config.ini'
-(Get-Content (Join-Path $root 'config.ini') -Raw) -replace '(?m)^head_smoothing = [\d.]+', 'head_smoothing = 0.57' -replace '(?m)^projection = \S+', 'projection = vr180' -replace '(?m)^hotkey = \S+', 'hotkey = ScrollLock' -replace '(?m)^post_mkv = \S+', 'post_mkv = 1' -replace '(?m)^post_yt8k = \S+', 'post_yt8k = 0' | Set-Content $ini -NoNewline -Encoding utf8
+(Get-Content (Join-Path $root 'config.ini') -Raw) -replace '(?m)^head_smoothing = [\d.]+', 'head_smoothing = 0.57' -replace '(?m)^projection = \S+', 'projection = vr180' -replace '(?m)^hotkey = [^\r\n]*', 'hotkey = ScrollLock' -replace '(?m)^post_mkv = \S+', 'post_mkv = 1' -replace '(?m)^post_yt8k = \S+', 'post_yt8k = 0' -replace '(?m)^post_when = \S+', 'post_when = game_exit' -replace '(?m)^record_overlays = \S+', 'record_overlays = 1' | Set-Content $ini -NoNewline -Encoding utf8
 Copy-Item $ini (Join-Path $t 'before.ini')
 $oldAppdata = $env:APPDATA
 try {
@@ -56,7 +61,7 @@ try {
     Write-Host '--- tray.log (settings lines):'
     $log -split "`r?`n" | Where-Object { $_ -match 'settings|tooltip' -or $_ -match '^\s*line \d+' } | ForEach-Object { Write-Host "  $_" }
     Step 'bad value went through the reporter (not a real message box)' ($log -match "settings message box \[Settings -- not saved\][\s\S]*bad value '7' for output_fov_scale")
-    Step 'tray.log lists the changed keys' ($log -match 'settings saved to .*changed hotkey ScrollLock->F7, bitrate_mbps 0->20, swap_eyes 0->1, output_fov_scale 0\.9->0\.85, projection vr180->flat, post_yt8k 0->1, start_with_windows 0->1')
+    Step 'tray.log lists the changed keys' ($log -match 'settings saved to .*changed hotkey ScrollLock->F7, bitrate_mbps 0->20, swap_eyes 0->1, record_overlays 1->0, output_fov_scale 0\.9->0\.85, projection vr180->flat, layout_3d tb_half->sbs_half, post_yt8k 0->1, post_when game_exit->now, eye_crop 16:9->4:3, start_with_windows 0->1')
     Step 'tooltip says settings saved' ($log -match "tooltip now: settings saved \S+ applies to the next recording")
     Step 'tooltip restored after 5 s' ($log -match 'tooltip restored: OpenXR-EyeCapture: no OpenXR game running')
 } finally {
@@ -66,7 +71,12 @@ try {
 $b = Get-Content (Join-Path $t 'before.ini'); $a = Get-Content $ini
 $d = @(Compare-Object $b $a)
 Write-Host 'diff of the scratch tray config (before => after):'; $d | ForEach-Object { Write-Host ("  {0} {1}" -f $_.SideIndicator, $_.InputObject) }
-Step 'window diff is exactly the 6 changed lines (slider untouched: head_smoothing 0.57 kept)' ($d.Count -eq 12)
+Step 'window diff is exactly the 10 changed lines (slider untouched: head_smoothing 0.57 kept)' ($d.Count -eq 20)
 $aText = Get-Content $ini -Raw
 Step 'combo "both files": saved file has post_mkv = 1 and post_yt8k = 1' (($aText -match '(?m)^post_yt8k = 1\s*$') -and ($aText -match '(?m)^post_mkv = 1\s*$'))
+Step 'layout combo "Side by side, half": saved file has layout_3d = sbs_half' ($aText -match '(?m)^layout_3d = sbs_half\s*$')
+Step 'convert combo "Right away": saved file has post_when = now' ($aText -match '(?m)^post_when = now\s*$')
+Step 'crop combo "4:3": saved file has eye_crop = 4:3' ($aText -match '(?m)^eye_crop = 4:3\s*$')
+Step 'Record overlays unticked: saved file has record_overlays = 0' ($aText -match '(?m)^record_overlays = 0\s*$')
+Step 'tray re-read post_when = now after the save' ($log -match 'tray: post_when = now')
 if ($fail) { exit 1 } else { exit 0 }

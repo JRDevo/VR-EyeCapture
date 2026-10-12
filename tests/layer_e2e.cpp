@@ -4,7 +4,31 @@
 // XR_EYE_CAPTURE_AUTORECORD (starts at the first frame, stops after N s) into XR_EYE_CAPTURE_OUTPUT_DIR.
 //
 //   layer_e2e [--api d3d11|d3d12] [--layout two|array|wide|msaa] [--eye 1920x1080] [--seconds 6] [--record 4]
-//             [--out-dir dir] [--expect-dormant] [--jitter]
+//             [--out-dir dir] [--expect-dormant] [--jitter] [--overlays] [--stale-pose] [--opaque-projection]
+// --overlays (record_overlays test; tests/run_e2e.ps1 has the expected pixel positions): every frame also submits, AFTER
+// the projection layer, four overlay layers drawn with clears into their own R8G8B8A8_UNORM_SRGB swapchains:
+//   A quad, projection (LOCAL) space, pose (0, 1.45, -2), 0.5 x 0.5 m, opaque green (alpha 255, SOURCE_ALPHA flag)
+//   B quad, VIEW space, pose (-0.30, -0.128, -1), 0.2 x 0.08 m, white with alpha 128, SOURCE_ALPHA | UNPREMULTIPLIED
+//   C cylinder, VIEW space, pose (0.5, 0.9, 0), radius 1.5 m, central angle 0.4 rad, aspect 4, orange with alpha 0 and
+//     NO blend flag (must be opaque: the texture alpha is ignored)
+//   D quad, LOCAL space, pose (0.7, 1.41, -1.5) turned 180 degrees about +Y (its back faces the viewer), magenta:
+//     must NOT be drawn (quads are one-sided)
+//   G quad, LOCAL (projection) space, a NEW pose every frame: x = 0.4 sin(2 pi 0.1 tau), y = 0.228, z = -2 (tau = seconds
+//     since the first predictedDisplayTime), 0.2 x 0.1 m, opaque yellow (like the DLAA injector's cab-fixed fps box: a
+//     layer in the projection layer's space whose pose is rebuilt at every xrEndFrame)
+//   BEFORE the projection layer (which then has BLEND_TEXTURE_SOURCE_ALPHA; the pattern's band A is alpha 0):
+//   P an XrCompositionLayerPassthroughFB stub (no swapchain: must be skipped by name), K an opaque cube (6 faces in
+//     distinct colours, -Z with a second colour for u < 0.25) turned +45 degrees about +Y, H an opaque purple quad at
+//     (-1.864, 2.734, -2), 0.3 x 1.0 m (top under the alpha-0 black grey step, bottom under the opaque red block)
+//   after it, also: I equirect2 (infinite, yaw -0.64, 0.12 rad wide, elevation -0.39..-0.27, two coloured halves),
+//     J equirect v1 (10 m sphere around the head, scale / bias window around azimuth 0, elevation -0.5, two halves),
+//     M 4x MSAA teal quad, F R16G16B16A16_FLOAT quad, T R10G10B10A2_UNORM quad, S white quad with an
+//     XrCompositionLayerColorScaleBiasKHR (scale 0.5, 0.25, 0, 1; bias 0, 0, 0.2, 0) -- run_e2e.ps1 has the expected pixels
+// --opaque-projection (with --overlays): the projection layer has no blend flag, so P / K / H must be hidden (skipped)
+// --stale-pose (implies --overlays): the mock reports the tests/test_motion.h head motion and the app submits the views
+// located 33 ms before displayTime (asymmetric mock fovs), while drawing the same clear pattern. VIEW-space layers must
+// stay at one pixel position in every frame (they follow the submitted head, not the head at displayTime).
+//   E quad, LOCAL space, pose (-1.094, 1.4284, -1.5), 0.2 x 0.06 m, opaque cyan, eyeVisibility LEFT: left eye only
 // --jitter (D3D11, layout two): the mock runtime reports the head motion of tests/test_motion.h through xrLocateViews
 // and every frame renders a world-locked grid + marker for the located pose / fov and submits that pose / fov, like a
 // game. Prints E2E_T0_NS=<first predictedDisplayTime> (t = 0 of the motion). Default eye size 1408x1440.
@@ -73,7 +97,7 @@ int main(int argc, char** argv) {
     std::string api = "d3d11", layout = "two";
     unsigned eyeW = 1920, eyeH = 1080;
     double seconds = 6, record = 4;
-    bool expectDormant = false, jitter = false, eyeSet = false;
+    bool expectDormant = false, jitter = false, eyeSet = false, overlays = false, stalePose = false, opaqueProj = false;
     std::wstring outDir = ExeDir() + L"\\e2e_out";
     for (int i = 1; i < argc; ++i) {
         std::string k = argv[i];
@@ -82,6 +106,9 @@ int main(int argc, char** argv) {
         else if (k == "--layout") layout = next();
         else if (k == "--eye") { std::string v = next(); sscanf_s(v.c_str(), "%ux%u", &eyeW, &eyeH); eyeSet = true; }
         else if (k == "--jitter") jitter = true;
+        else if (k == "--overlays") overlays = true;
+        else if (k == "--stale-pose") stalePose = overlays = true;
+        else if (k == "--opaque-projection") opaqueProj = true;
         else if (k == "--seconds") seconds = atof(next().c_str());
         else if (k == "--record") record = atof(next().c_str());
         else if (k == "--out-dir") outDir = Widen(next());
@@ -92,15 +119,15 @@ int main(int argc, char** argv) {
     const bool arr = layout == "array", wide = layout == "wide", msaa = layout == "msaa";
     if (jitter && (d3d12 || layout != "two")) { printf("--jitter needs --api d3d11 --layout two\n"); return 2; }
     if (jitter && !eyeSet) { eyeW = 1408; eyeH = 1440; }
-    SetEnvironmentVariableW(L"EYECAP_MOCK_MOTION", jitter ? L"jitter" : nullptr);
+    SetEnvironmentVariableW(L"EYECAP_MOCK_MOTION", (jitter || stalePose) ? L"jitter" : nullptr);
     CreateDirectoryW(outDir.c_str(), nullptr);
     SetEnvironmentVariableW(L"XR_RUNTIME_JSON", (ExeDir() + L"\\mock_runtime.json").c_str());
     SetEnvironmentVariableW(L"XR_EYE_CAPTURE_OUTPUT_DIR", outDir.c_str());
     wchar_t rec[32];
     swprintf_s(rec, L"%.2f", record);
     SetEnvironmentVariableW(L"XR_EYE_CAPTURE_AUTORECORD", record > 0 ? rec : nullptr);   // --record 0: no autorecord (hotkey / tray test)
-    printf("layer_e2e: api=%s layout=%s eye=%ux%u seconds=%.1f record=%.1f%s\n", api.c_str(), layout.c_str(), eyeW, eyeH,
-           seconds, record, jitter ? " jitter" : "");
+    printf("layer_e2e: api=%s layout=%s eye=%ux%u seconds=%.1f record=%.1f%s%s\n", api.c_str(), layout.c_str(), eyeW, eyeH,
+           seconds, record, jitter ? " jitter" : "", overlays ? " overlays" : "");
     const ULONGLONG startTime = GetTickCount64();
     FILETIME ftStart;
     GetSystemTimeAsFileTime(&ftStart);
@@ -173,7 +200,7 @@ int main(int argc, char** argv) {
         list->Close();
         D3D12_DESCRIPTOR_HEAP_DESC hd{};
         hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-        hd.NumDescriptors = 32;
+        hd.NumDescriptors = 160;
         dev12->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&heap));
         b12.device = dev12.Get();
         b12.queue = queue.Get();
@@ -266,19 +293,106 @@ int main(int argc, char** argv) {
         }
     }
 
+    // ---- overlay swapchains (--overlays) ----
+    // 0 A green, 1 B white alpha 128, 2 C orange alpha 0, 3 D magenta, 4 E cyan, 5 G yellow (all R8G8B8A8_UNORM_SRGB),
+    // 6 H behind-projection quad purple, 7 K cube (6 faces, colours kCubeFace, face 5 has a second colour for u < 0.25),
+    // 8 I equirect2 (left half / right half), 9 J equirect v1 (halves), 10 M 4x MSAA teal, 11 F R16G16B16A16_FLOAT
+    // linear (0.2, 0.6, 0.2), 12 T R10G10B10A2_UNORM linear (0.8, 0.3, 0.5), 13 S white + XrCompositionLayerColorScaleBiasKHR.
+    // Clear colours of the sRGB swapchains are the stored (sRGB-encoded) bytes (UNORM RTV); FP16 / 10-bit are linear.
+    struct OvSpec { uint32_t w, h, samples, faces; DXGI_FORMAT fmt, rtv; int split; float c[4], c2[4]; };
+    const DXGI_FORMAT kS = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, kU = DXGI_FORMAT_R8G8B8A8_UNORM;
+    const float k255 = 1.0f / 255.0f;
+    const OvSpec ovSpec[] = {
+        {64, 64, 1, 1, kS, kU, 0, {0, 1, 0, 1}, {}},
+        {64, 32, 1, 1, kS, kU, 0, {1, 1, 1, 128 * k255}, {}},
+        {128, 32, 1, 1, kS, kU, 0, {1, 128 * k255, 0, 0}, {}},
+        {64, 32, 1, 1, kS, kU, 0, {1, 0, 1, 1}, {}},
+        {64, 32, 1, 1, kS, kU, 0, {0, 1, 1, 1}, {}},
+        {64, 32, 1, 1, kS, kU, 0, {1, 1, 0, 1}, {}},
+        {64, 64, 1, 1, kS, kU, 0, {128 * k255, 0, 1, 1}, {}},
+        {64, 64, 1, 6, kS, kU, 2, {}, {90 * k255, 0, 200 * k255, 1}},
+        {128, 64, 1, 1, kS, kU, 1, {1, 0, 128 * k255, 1}, {0, 64 * k255, 1, 1}},
+        {128, 64, 1, 1, kS, kU, 1, {0, 200 * k255, 200 * k255, 1}, {200 * k255, 0, 200 * k255, 1}},
+        {64, 32, 4, 1, kS, kU, 0, {0, 128 * k255, 128 * k255, 1}, {}},
+        {64, 32, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_R16G16B16A16_FLOAT, 0, {0.2f, 0.6f, 0.2f, 1}, {}},
+        {64, 32, 1, 1, DXGI_FORMAT_R10G10B10A2_UNORM, DXGI_FORMAT_R10G10B10A2_UNORM, 0, {0.8f, 0.3f, 0.5f, 1}, {}},
+        {64, 32, 1, 1, kS, kU, 0, {1, 1, 1, 1}, {}},
+    };
+    // cube faces +X -X +Y -Y +Z -Z (sRGB bytes)
+    const float kCubeFace[6][4] = {{0, 0, 160 * k255, 1}, {160 * k255, 160 * k255, 0, 1}, {160 * k255, 0, 160 * k255, 1},
+                                   {0, 160 * k255, 160 * k255, 1}, {100 * k255, 100 * k255, 100 * k255, 1}, {0, 160 * k255, 0, 1}};
+    const int kOv = (int)(sizeof(ovSpec) / sizeof(ovSpec[0]));
+    std::vector<Sc> ovs(overlays ? kOv : 0);
+    XrSpace viewSpace = XR_NULL_HANDLE;
+    if (overlays) {
+        XrReferenceSpaceCreateInfo vsi{XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
+        vsi.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
+        vsi.poseInReferenceSpace.orientation.w = 1;
+        CHECK(xrCreateReferenceSpace(session, &vsi, &viewSpace));
+        for (int k = 0; k < kOv; ++k) {
+            Sc& s = ovs[k];
+            const OvSpec& o = ovSpec[k];
+            XrSwapchainCreateInfo sc{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+            sc.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
+            sc.format = o.fmt;
+            sc.sampleCount = o.samples; sc.width = o.w; sc.height = o.h; sc.faceCount = o.faces; sc.arraySize = 1; sc.mipCount = 1;
+            CHECK(xrCreateSwapchain(session, &sc, &s.h));
+            s.w = sc.width; s.hgt = sc.height; s.arr = o.faces;   // RTVs per image: one per face slice
+            uint32_t n = 0;
+            CHECK(xrEnumerateSwapchainImages(s.h, 0, &n, nullptr));
+            if (!d3d12) {
+                std::vector<XrSwapchainImageD3D11KHR> imgs(n, {XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR});
+                CHECK(xrEnumerateSwapchainImages(s.h, n, &n, (XrSwapchainImageBaseHeader*)imgs.data()));
+                for (auto& im : imgs) {
+                    for (uint32_t sl = 0; sl < o.faces; ++sl) {
+                        D3D11_RENDER_TARGET_VIEW_DESC rd{};
+                        rd.Format = o.rtv;
+                        if (o.samples > 1) rd.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DMS;
+                        else { rd.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DARRAY; rd.Texture2DArray.FirstArraySlice = sl; rd.Texture2DArray.ArraySize = 1; }
+                        ComPtr<ID3D11RenderTargetView> v;
+                        if (FAILED(dev11->CreateRenderTargetView(im.texture, &rd, &v))) { printf("overlay RTV %d failed\n", k); return 1; }
+                        s.rtv11.push_back(v);
+                    }
+                }
+            } else {
+                std::vector<XrSwapchainImageD3D12KHR> imgs(n, {XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR});
+                CHECK(xrEnumerateSwapchainImages(s.h, n, &n, (XrSwapchainImageBaseHeader*)imgs.data()));
+                for (auto& im : imgs) {
+                    s.img12.push_back(im.texture);
+                    for (uint32_t sl = 0; sl < o.faces; ++sl) {
+                        D3D12_RENDER_TARGET_VIEW_DESC v{};
+                        v.Format = o.rtv;
+                        if (o.samples > 1) v.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DMS;
+                        else { v.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DARRAY; v.Texture2DArray.FirstArraySlice = sl; v.Texture2DArray.ArraySize = 1; }
+                        dev12->CreateRenderTargetView(im.texture, &v, hnd);
+                        s.rtv12.push_back(hnd);
+                        hnd.ptr += inc;
+                    }
+                }
+            }
+        }
+        printf("E2E_OVERLAYS=1 (quad LOCAL opaque, quad VIEW alpha 128 unpremultiplied, cylinder VIEW opaque, back-facing quad, "
+               "left-eye-only quad, per-frame-pose quad, passthrough FB stub + cube + quad BEFORE the projection layer%s, "
+               "equirect2, equirect, 4x MSAA quad, FP16 quad, 10-bit quad, colour scale / bias quad)\n",
+               opaqueProj ? " (projection opaque: hidden)" : " (projection with source alpha)");
+    }
+
     // ---- frame loop ----
     const uint32_t frames = (uint32_t)(seconds * 90);
+    XrTime t0ns = 0;
     std::vector<PatRect> pat;
     for (uint32_t f = 0; f < frames; ++f) {
         XrFrameState fs{XR_TYPE_FRAME_STATE};
         XrFrameWaitInfo fwi{XR_TYPE_FRAME_WAIT_INFO};
         CHECK(xrWaitFrame(session, &fwi, &fs));
-        if (f == 0) printf("E2E_T0_NS=%lld\n", (long long)fs.predictedDisplayTime);
+        if (f == 0) { printf("E2E_T0_NS=%lld\n", (long long)fs.predictedDisplayTime); t0ns = fs.predictedDisplayTime; }
         XrView located[2] = {{XR_TYPE_VIEW}, {XR_TYPE_VIEW}};
-        if (jitter) {
+        if (jitter || stalePose) {
             XrViewLocateInfo li{XR_TYPE_VIEW_LOCATE_INFO};
             li.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
-            li.displayTime = fs.predictedDisplayTime;
+            // --stale-pose: the views of 33 ms EARLIER are submitted (a game rendering with an old pose, like ETS2's
+            // submitted poses that match no located one): the VIEW space located at displayTime is then a different head
+            li.displayTime = fs.predictedDisplayTime - (stalePose ? 33333333 : 0);
             li.space = space;
             XrViewState vs{XR_TYPE_VIEW_STATE};
             uint32_t nv = 0;
@@ -299,6 +413,31 @@ int main(int argc, char** argv) {
             if (fence->GetCompletedValue() < allocVal[k]) { fence->SetEventOnCompletion(allocVal[k], evt); WaitForSingleObject(evt, 5000); }
             allocs[k]->Reset();
             list->Reset(allocs[k].Get(), nullptr);
+        }
+        uint32_t ovIdx[32] = {};
+        for (size_t k = 0; k < ovs.size(); ++k) {
+            XrSwapchainImageAcquireInfo ai{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+            CHECK(xrAcquireSwapchainImage(ovs[k].h, &ai, &ovIdx[k]));
+            XrSwapchainImageWaitInfo wi{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+            wi.timeout = XR_INFINITE_DURATION;
+            CHECK(xrWaitSwapchainImage(ovs[k].h, &wi));
+            const OvSpec& o = ovSpec[k];
+            for (uint32_t sl = 0; sl < o.faces; ++sl) {
+                const size_t rv = (size_t)ovIdx[k] * o.faces + sl;
+                // (colour, rectangle) clears: whole image, then the split part
+                const float* c0 = o.split == 2 ? kCubeFace[sl] : o.c;
+                D3D12_RECT part{0, 0, 0, 0};
+                const float* c1 = nullptr;
+                if (o.split == 1) { part = {(LONG)o.w / 2, 0, (LONG)o.w, (LONG)o.h}; c1 = o.c2; }    // right half
+                if (o.split == 2 && sl == 5) { part = {0, 0, (LONG)o.w / 4, (LONG)o.h}; c1 = o.c2; }  // -Z face, u < 0.25
+                if (!d3d12) {
+                    ctx11->ClearRenderTargetView(ovs[k].rtv11[rv].Get(), c0);
+                    if (c1) ctx11_1->ClearView(ovs[k].rtv11[rv].Get(), c1, &part, 1);
+                } else {
+                    list->ClearRenderTargetView(ovs[k].rtv12[rv], c0, 0, nullptr);
+                    if (c1) list->ClearRenderTargetView(ovs[k].rtv12[rv], c1, 1, &part);
+                }
+            }
         }
         XrCompositionLayerProjectionView views[2] = {{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}, {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}};
         for (int e = 0; e < 2; ++e) {
@@ -336,7 +475,11 @@ int main(int argc, char** argv) {
                     else list->ClearRenderTargetView(sc.rtv12[rv], p.c, 1, &p.r);
                 }
                 views[e].pose.orientation.w = 1;
+                // --overlays: the real eye positions (the mock's head at (0, 1.6, 0), +-32 mm), so world-locked and
+                // VIEW-space layers line up with the views the way a runtime sees them
+                if (overlays) views[e].pose.position = {e == 0 ? -0.032f : 0.032f, 1.6f, 0.0f};
                 views[e].fov = {-0.8f, 0.8f, 0.8f, -0.8f};
+                if (stalePose) { views[e].pose = located[e].pose; views[e].fov = located[e].fov; }
             }
             views[e].subImage.swapchain = sc.h;
             views[e].subImage.imageRect.offset = {ox, 0};
@@ -354,15 +497,123 @@ int main(int argc, char** argv) {
             XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
             CHECK(xrReleaseSwapchainImage(scs[s].h, &ri));
         }
+        for (size_t k = 0; k < ovs.size(); ++k) {
+            XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+            CHECK(xrReleaseSwapchainImage(ovs[k].h, &ri));
+        }
         XrCompositionLayerProjection proj{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
         proj.space = space;
         proj.viewCount = 2;
         proj.views = views;
-        const XrCompositionLayerBaseHeader* layers[] = {(const XrCompositionLayerBaseHeader*)&proj};
+        // --overlays: the projection layer has source alpha (band A of the pattern is alpha 0), so the layers before it
+        // show through there; --opaque-projection: no flag, they are hidden
+        if (overlays && !opaqueProj) proj.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+        // overlay layers after the projection layer (back to front)
+        XrCompositionLayerQuad qa{XR_TYPE_COMPOSITION_LAYER_QUAD}, qb{XR_TYPE_COMPOSITION_LAYER_QUAD}, qd{XR_TYPE_COMPOSITION_LAYER_QUAD},
+            qe{XR_TYPE_COMPOSITION_LAYER_QUAD}, qg{XR_TYPE_COMPOSITION_LAYER_QUAD};
+        XrCompositionLayerCylinderKHR cy{XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR};
+        auto sub = [&](XrSwapchainSubImage& si, int k) {
+            si.swapchain = ovs[k].h;
+            si.imageRect.offset = {0, 0};
+            si.imageRect.extent = {(int32_t)ovSpec[k].w, (int32_t)ovSpec[k].h};
+            si.imageArrayIndex = 0;
+        };
+        const XrCompositionLayerBaseHeader* layers[32] = {};
+        uint32_t nLayers = 0;
+        // before the projection layer: P a passthrough layer stub (no swapchain: must be skipped by name), K cube, H quad
+        XrCompositionLayerPassthroughFB pt{XR_TYPE_COMPOSITION_LAYER_PASSTHROUGH_FB};
+        XrCompositionLayerCubeKHR cube{XR_TYPE_COMPOSITION_LAYER_CUBE_KHR};
+        XrCompositionLayerQuad qh{XR_TYPE_COMPOSITION_LAYER_QUAD};
+        if (overlays) {
+            pt.flags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+            pt.space = space;
+            pt.layerHandle = (XrPassthroughLayerFB)(uintptr_t)0x5eed;   // never dereferenced by the layer / the mock
+            layers[nLayers++] = (const XrCompositionLayerBaseHeader*)&pt;
+            // K: cube, LOCAL space, turned +45 degrees about +Y (the left half of the view sees its -Z face, the right half
+            // its +X face, the top its +Y face), opaque
+            cube.layerFlags = 0;
+            cube.space = space; cube.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+            cube.swapchain = ovs[7].h; cube.imageArrayIndex = 0;
+            cube.orientation = {0, 0.38268343f, 0, 0.92387953f};
+            layers[nLayers++] = (const XrCompositionLayerBaseHeader*)&cube;
+            // H: opaque purple quad, LOCAL, centre (-1.864, 2.734, -2), 0.3 x 1.0 m: its top part is under the pattern's
+            // alpha-0 black grey step (visible), its lower part under the opaque red block (hidden)
+            qh.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+            qh.space = space; qh.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+            qh.subImage.swapchain = ovs[6].h; qh.subImage.imageRect = {{0, 0}, {(int32_t)ovSpec[6].w, (int32_t)ovSpec[6].h}};
+            qh.pose = {{0, 0, 0, 1}, {-1.864f, 2.734f, -2.0f}}; qh.size = {0.3f, 1.0f};
+            layers[nLayers++] = (const XrCompositionLayerBaseHeader*)&qh;
+        }
+        layers[nLayers++] = (const XrCompositionLayerBaseHeader*)&proj;
+        XrCompositionLayerEquirect2KHR eq2{XR_TYPE_COMPOSITION_LAYER_EQUIRECT2_KHR};
+        XrCompositionLayerEquirectKHR eq1{XR_TYPE_COMPOSITION_LAYER_EQUIRECT_KHR};
+        XrCompositionLayerQuad qm{XR_TYPE_COMPOSITION_LAYER_QUAD}, qf{XR_TYPE_COMPOSITION_LAYER_QUAD}, qt{XR_TYPE_COMPOSITION_LAYER_QUAD},
+            qs{XR_TYPE_COMPOSITION_LAYER_QUAD};
+        XrCompositionLayerColorScaleBiasKHR csb{XR_TYPE_COMPOSITION_LAYER_COLOR_SCALE_BIAS_KHR};
+        if (overlays) {
+            qa.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+            qa.space = space; qa.eyeVisibility = XR_EYE_VISIBILITY_BOTH; sub(qa.subImage, 0);
+            qa.pose = {{0, 0, 0, 1}, {0.0f, 1.45f, -2.0f}}; qa.size = {0.5f, 0.5f};
+            qb.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT | XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
+            qb.space = viewSpace; qb.eyeVisibility = XR_EYE_VISIBILITY_BOTH; sub(qb.subImage, 1);
+            qb.pose = {{0, 0, 0, 1}, {-0.30f, -0.128f, -1.0f}}; qb.size = {0.2f, 0.08f};
+            cy.layerFlags = 0;
+            cy.space = viewSpace; cy.eyeVisibility = XR_EYE_VISIBILITY_BOTH; sub(cy.subImage, 2);
+            cy.pose = {{0, 0, 0, 1}, {0.5f, 0.9f, 0.0f}}; cy.radius = 1.5f; cy.centralAngle = 0.4f; cy.aspectRatio = 4.0f;
+            qd.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+            qd.space = space; qd.eyeVisibility = XR_EYE_VISIBILITY_BOTH; sub(qd.subImage, 3);
+            qd.pose = {{0, 1, 0, 0}, {0.7f, 1.41f, -1.5f}}; qd.size = {0.2f, 0.08f};   // 180 deg about +Y: back side to us
+            layers[nLayers++] = (const XrCompositionLayerBaseHeader*)&qa;
+            layers[nLayers++] = (const XrCompositionLayerBaseHeader*)&qb;
+            layers[nLayers++] = (const XrCompositionLayerBaseHeader*)&cy;
+            qe.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+            qe.space = space; qe.eyeVisibility = XR_EYE_VISIBILITY_LEFT; sub(qe.subImage, 4);
+            qe.pose = {{0, 0, 0, 1}, {-1.094f, 1.4284f, -1.5f}}; qe.size = {0.2f, 0.06f};
+            layers[nLayers++] = (const XrCompositionLayerBaseHeader*)&qd;
+            layers[nLayers++] = (const XrCompositionLayerBaseHeader*)&qe;
+            const double tau = (double)(fs.predictedDisplayTime - t0ns) * 1e-9;
+            qg.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+            qg.space = space; qg.eyeVisibility = XR_EYE_VISIBILITY_BOTH; sub(qg.subImage, 5);
+            qg.pose = {{0, 0, 0, 1}, {(float)(0.4 * std::sin(2.0 * 3.14159265358979 * 0.1 * tau)), 0.228f, -2.0f}};
+            qg.size = {0.2f, 0.1f};
+            layers[nLayers++] = (const XrCompositionLayerBaseHeader*)&qg;
+            // I: equirect2, infinitely far (radius 0), LOCAL, turned -0.64 rad about +Y (towards +X): 0.12 rad wide,
+            // elevation -0.39 .. -0.27 rad; left half / right half colours
+            const XrQuaternionf yawR = {0, std::sin(-0.32f), 0, std::cos(-0.32f)};
+            eq2.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+            eq2.space = space; eq2.eyeVisibility = XR_EYE_VISIBILITY_BOTH; sub(eq2.subImage, 8);
+            eq2.pose = {yawR, {0, 1.6f, 0}}; eq2.radius = 0.0f;
+            eq2.centralHorizontalAngle = 0.12f; eq2.upperVerticalAngle = -0.27f; eq2.lowerVerticalAngle = -0.39f;
+            layers[nLayers++] = (const XrCompositionLayerBaseHeader*)&eq2;
+            // J: equirect v1 on a sphere of radius 10 m centred on the head (0, 1.6, 0), same yaw; scale / bias map a window
+            // 0.12 rad wide x 0.10 rad high around (azimuth 0, elevation -0.5) onto the image
+            const float dH = 0.12f, dV = 0.10f, el0 = -0.5f, kPi = 3.14159265f;
+            eq1.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+            eq1.space = space; eq1.eyeVisibility = XR_EYE_VISIBILITY_BOTH; sub(eq1.subImage, 9);
+            eq1.pose = {yawR, {0, 1.6f, 0}}; eq1.radius = 10.0f;
+            eq1.scale = {2 * kPi / dH, kPi / dV};
+            eq1.bias = {0.5f - 0.5f * eq1.scale.x, 0.5f + el0 / dV - 0.5f * eq1.scale.y};
+            layers[nLayers++] = (const XrCompositionLayerBaseHeader*)&eq1;
+            // M (4x MSAA), F (FP16), T (10-bit), S (colour scale / bias): opaque 0.2 x 0.1 m quads, LOCAL, z = -2
+            auto quad = [&](XrCompositionLayerQuad& q, int k, float x, float y) {
+                q.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+                q.space = space; q.eyeVisibility = XR_EYE_VISIBILITY_BOTH; sub(q.subImage, k);
+                q.pose = {{0, 0, 0, 1}, {x, y, -2.0f}}; q.size = {0.2f, 0.1f};
+                layers[nLayers++] = (const XrCompositionLayerBaseHeader*)&q;
+            };
+            quad(qm, 10, 1.45f, 2.40f);
+            quad(qf, 11, 1.45f, 2.057f);
+            quad(qt, 12, 1.45f, 1.714f);
+            // S: white, colour = white * (0.5, 0.25, 0, 1) + (0, 0, 0.2, 0) in linear light
+            csb.colorScale = {0.5f, 0.25f, 0.0f, 1.0f};
+            csb.colorBias = {0.0f, 0.0f, 0.2f, 0.0f};
+            qs.next = &csb;
+            quad(qs, 13, 1.02f, 2.057f);
+        }
         XrFrameEndInfo fei{XR_TYPE_FRAME_END_INFO};
         fei.displayTime = fs.predictedDisplayTime;
         fei.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
-        fei.layerCount = 1;
+        fei.layerCount = nLayers;
         fei.layers = layers;
         CHECK(xrEndFrame(session, &fei));
     }
@@ -371,6 +622,8 @@ int main(int argc, char** argv) {
     if (d3d12) { queue->Signal(fence.Get(), ++fenceVal); fence->SetEventOnCompletion(fenceVal, evt); WaitForSingleObject(evt, 5000); }
     CHECK(xrEndSession(session));
     for (auto& s : scs) CHECK(xrDestroySwapchain(s.h));
+    for (auto& s : ovs) CHECK(xrDestroySwapchain(s.h));
+    if (viewSpace) xrDestroySpace(viewSpace);
     xrDestroySpace(space);
     CHECK(xrDestroySession(session));
     CHECK(xrDestroyInstance(inst));

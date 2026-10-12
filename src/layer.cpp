@@ -10,6 +10,8 @@
 //   xrEndFrame             first projection layer: views[0] = left, views[1] = right (images + pose + fov)
 //                          -> Recorder::SubmitFrame, then forward
 //                          + in-headset recording indicator: one quad layer appended AFTER the capture (indicator.h)
+//                          + record_overlays: quad / cylinder / equirect / cube layers around the projection layer (overlay.h)
+//   xrCreateReferenceSpace / xrDestroySpace   track VIEW spaces (overlay layers in them follow the submitted head)
 //   xrDestroyInstance      clean up
 // Rule: any internal failure logs and passes through. The game's calls are always forwarded and their results returned
 // unchanged; capture work in xrEndFrame is wrapped in SEH so a fault disables capture instead of crashing the game.
@@ -19,6 +21,8 @@
 #include <shlobj.h>
 #include <atomic>
 #include <cmath>
+#include <cstdarg>
+#include <cstdio>
 #include <cstring>
 #include <deque>
 #include <memory>
@@ -36,6 +40,7 @@
 #include "frame_source.h"
 #include "indicator.h"
 #include "log.h"
+#include "overlay.h"
 #include "recorder.h"
 #include "shared_status.h"
 
@@ -65,6 +70,7 @@ struct InstanceData {
     PFN_xrCreateReferenceSpace CreateReferenceSpace = nullptr;
     PFN_xrDestroySpace DestroySpace = nullptr;
     PFN_xrGetSystemProperties GetSystemProperties = nullptr;
+    PFN_xrLocateSpace LocateSpace = nullptr;           // record_overlays: overlay layer spaces -> the projection space
     std::string runtimeName;
     std::string appName;
 };
@@ -114,6 +120,9 @@ struct SessionData {
     ComPtr<ID3D11Device> dev11;          // D3D11 sessions: the game's device (indicator uploads)
     uint32_t maxLayers = 16;             // XrSystemGraphicsProperties::maxLayerCount
     bool indOff = false, loggedIndAppend = false, loggedIndLimit = false;
+    // record_overlays: overlay layers already logged this session (one line per layer signature, capped)
+    std::vector<std::string> ovSeen;
+    bool loggedOvOff = false;
 };
 
 // Heap-allocated and never freed on purpose: if the game exits without xrDestroySession, static destructors at DLL
@@ -123,6 +132,10 @@ std::mutex& g_lock = *new std::mutex;
 auto& g_instances = *new std::unordered_map<XrInstance, std::unique_ptr<InstanceData>>;
 auto& g_sessions = *new std::unordered_map<XrSession, std::unique_ptr<SessionData>>;
 auto& g_swapchains = *new std::unordered_map<XrSwapchain, std::unique_ptr<SwapchainData>>;
+// record_overlays: VIEW reference spaces created through our xrCreateReferenceSpace hook (by the game or a layer / mod
+// above us, e.g. the DLAA injector's head-locked panel space), with their poseInReferenceSpace.
+struct ViewSpaceData { XrSession session; InstanceData* inst; float q[4], p[3]; };
+auto& g_viewSpaces = *new std::unordered_map<XrSpace, ViewSpaceData>;
 SessionData* g_active = nullptr;              // newest capture-capable session (hotkey / tray act on it)
 std::atomic<bool> g_startRequested{false};
 std::atomic<uint64_t> g_faults{0};
@@ -393,6 +406,7 @@ void ReloadConfigForRecording() {
     note("gamma", c.gamma == GammaMode::Auto ? "auto" : c.gamma == GammaMode::Srgb ? "srgb" : "linear",
          n.gamma == GammaMode::Auto ? "auto" : n.gamma == GammaMode::Srgb ? "srgb" : "linear");
     note("swap_eyes", B(c.swapEyes), B(n.swapEyes));
+    note("record_overlays", B(c.recordOverlays), B(n.recordOverlays));
     note("audio_enabled", B(c.audioEnabled), B(n.audioEnabled));
     note("audio_device", elog::Narrow(c.audioDevice), elog::Narrow(n.audioDevice));
     note("symmetric_fov", B(c.head.symmetricFov), B(n.head.symmetricFov));
@@ -412,12 +426,339 @@ void ReloadConfigForRecording() {
 
     const bool outChanged = c.outputDir != n.outputDir;
     c.outputDir = n.outputDir; c.hevc = n.hevc; c.bitrateMbps = n.bitrateMbps; c.fps = n.fps; c.maxFps = n.maxFps;
-    c.maxWidth = n.maxWidth; c.gamma = n.gamma; c.swapEyes = n.swapEyes; c.audioEnabled = n.audioEnabled;
+    c.maxWidth = n.maxWidth; c.gamma = n.gamma; c.swapEyes = n.swapEyes; c.recordOverlays = n.recordOverlays;
+    c.audioEnabled = n.audioEnabled;
     c.audioDevice = n.audioDevice; c.head = n.head; c.dome = n.dome; c.logLevel = n.logLevel;
     elog::SetLevel(c.logLevel);
     if (outChanged) elog::SetMirror(c.outputDir + L"\\eye_capture.log");
     LOGI("config reloaded for this recording from %s: %s%s", elog::Narrow(n.loadedFrom).c_str(),
          changes.empty() ? "no changes" : "changed ", changes.c_str());
+}
+
+// ------------------------------------------------------------------------------------------------ overlays
+
+const char* LayerTypeName(XrStructureType t) {
+    switch ((int)t) {
+    case XR_TYPE_COMPOSITION_LAYER_PROJECTION: return "projection";
+    case XR_TYPE_COMPOSITION_LAYER_QUAD: return "quad";
+    case XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR: return "cylinder";
+    case XR_TYPE_COMPOSITION_LAYER_EQUIRECT_KHR: return "equirect";
+    case XR_TYPE_COMPOSITION_LAYER_EQUIRECT2_KHR: return "equirect2";
+    case XR_TYPE_COMPOSITION_LAYER_CUBE_KHR: return "cube";
+    case XR_TYPE_COMPOSITION_LAYER_PASSTHROUGH_FB: return "XR_FB_passthrough layer";
+    case XR_TYPE_COMPOSITION_LAYER_PASSTHROUGH_HTC: return "XR_HTC_passthrough layer";
+    case XR_TYPE_COMPOSITION_LAYER_PASSTHROUGH_ANDROID: return "XR_ANDROID passthrough layer";
+    default: return "unknown layer type";
+    }
+}
+
+// One log line per overlay layer signature (type + swapchain + space + outcome) and session, at most 40.
+void OvNote(SessionData* sd, const std::string& sig, const char* fmt, ...) {
+    for (const std::string& s : sd->ovSeen) if (s == sig) return;
+    if (sd->ovSeen.size() >= 40) return;
+    sd->ovSeen.push_back(sig);
+    char b[700];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(b, sizeof(b), fmt, ap);
+    va_end(ap);
+    LOGI("overlay: %s%s", b, sd->ovSeen.size() == 40 ? " (no more overlay lines this session)" : "");
+}
+
+// q = a * b (Hamilton product, x y z w); v rotated by q
+void QuatMul(const float* a, const float* b, float* q) {
+    const float x = a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1];
+    const float y = a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0];
+    const float z = a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3];
+    const float w = a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2];
+    q[0] = x; q[1] = y; q[2] = z; q[3] = w;
+}
+void QuatRotate(const float* q, const float* v, float* out) {
+    const float tx = 2 * (q[1] * v[2] - q[2] * v[1]), ty = 2 * (q[2] * v[0] - q[0] * v[2]), tz = 2 * (q[0] * v[1] - q[1] * v[0]);
+    out[0] = v[0] + q[3] * tx + (q[1] * tz - q[2] * ty);
+    out[1] = v[1] + q[3] * ty + (q[2] * tx - q[0] * tz);
+    out[2] = v[2] + q[3] * tz + (q[0] * ty - q[1] * tx);
+}
+
+// An XrCompositionLayerColorScaleBiasKHR in a layer's next chain (at most 16 links walked), or nullptr.
+const XrCompositionLayerColorScaleBiasKHR* FindColorScaleBias(const void* next) {
+    const XrBaseInStructure* p = static_cast<const XrBaseInStructure*>(next);
+    for (int i = 0; p && i < 16; ++i, p = p->next)
+        if (p->type == XR_TYPE_COMPOSITION_LAYER_COLOR_SCALE_BIAS_KHR) return reinterpret_cast<const XrCompositionLayerColorScaleBiasKHR*>(p);
+    return nullptr;
+}
+
+// record_overlays: the quad / cylinder / equirect / equirect2 / cube layers around the captured projection layer
+// (index projIdx), back to front, with this frame's swapchain image and the pose located in the projection layer's space
+// at displayTime (xrLocateSpace of the NEXT layer: our hooks are not involved). Layers BEFORE the projection layer are
+// collected only when it has BLEND_TEXTURE_SOURCE_ALPHA (they show through its transparent pixels; out.layer[0 ..
+// out.nBehind)); with an opaque projection they are hidden and skipped (logged). Our own indicator is appended to the
+// frame only after the capture (Hook_EndFrame), so it is never in info->layers here. swapped = swap_eyes (output eye 0
+// holds the right eye).
+void CollectOverlays(SessionData* sd, const XrFrameEndInfo* info, uint32_t projIdx, const XrCompositionLayerProjection* proj,
+                     bool swapped, OverlayFrame& out) {
+    out.n = 0;
+    out.nBehind = 0;
+    const bool projBlend = (proj->layerFlags & XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT) != 0;
+    out.projUnpremultiplied = projBlend && (proj->layerFlags & XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT) != 0;
+    if (const XrCompositionLayerColorScaleBiasKHR* pc = FindColorScaleBias(proj->next)) {
+        OvNote(sd, "projection colour scale bias",
+               "the projection layer carries XrCompositionLayerColorScaleBiasKHR (scale %.2f %.2f %.2f %.2f, bias %.2f %.2f %.2f "
+               "%.2f) -- not applied to the recorded eyes", pc->colorScale.r, pc->colorScale.g, pc->colorScale.b, pc->colorScale.a,
+               pc->colorBias.r, pc->colorBias.g, pc->colorBias.b, pc->colorBias.a);
+    }
+    struct Located { XrSpace space; bool ok; XrPosef pose; XrResult r; uint64_t flags; };
+    Located cache[kMaxOverlays];
+    uint32_t nCache = 0;
+    char sig[180];
+    // The head implied by the two submitted views (in the projection space): VIEW space origin = the midpoint of the eye
+    // positions, orientation = the halfway rotation of the two eye orientations (runtimes report the eyes at -+IPD/2
+    // along the head's +X with the head's orientation, or symmetrically canted). Used for VIEW-space layers.
+    struct { float q[4], p[3]; } head{};
+    bool headOk = false;
+    {
+        const XrPosef& a = proj->views[0].pose;
+        const XrPosef& b = proj->views[1].pose;
+        float qa[4] = {a.orientation.x, a.orientation.y, a.orientation.z, a.orientation.w};
+        float qb[4] = {b.orientation.x, b.orientation.y, b.orientation.z, b.orientation.w};
+        if (qa[0] * qb[0] + qa[1] * qb[1] + qa[2] * qb[2] + qa[3] * qb[3] < 0) for (float& c : qb) c = -c;
+        float n = 0;
+        for (int k = 0; k < 4; ++k) { head.q[k] = qa[k] + qb[k]; n += head.q[k] * head.q[k]; }   // nlerp at 0.5
+        n = std::sqrt(n);
+        head.p[0] = 0.5f * (a.position.x + b.position.x);
+        head.p[1] = 0.5f * (a.position.y + b.position.y);
+        head.p[2] = 0.5f * (a.position.z + b.position.z);
+        headOk = n > 1e-3f && std::isfinite(n) && std::isfinite(head.p[0] + head.p[1] + head.p[2]);
+        if (headOk) for (float& c : head.q) c /= n;
+    }
+    for (uint32_t i = 0; i < info->layerCount; ++i) {
+        const XrCompositionLayerBaseHeader* h = info->layers[i];
+        if (!h || i == projIdx) continue;
+        const XrStructureType t = h->type;
+        const bool behind = i < projIdx;
+        OverlayLayer L;
+        switch (t) {
+        case XR_TYPE_COMPOSITION_LAYER_QUAD: L.kind = OverlayKind::Quad; break;
+        case XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR: L.kind = OverlayKind::Cylinder; break;
+        case XR_TYPE_COMPOSITION_LAYER_EQUIRECT_KHR: L.kind = OverlayKind::Equirect; break;
+        case XR_TYPE_COMPOSITION_LAYER_EQUIRECT2_KHR: L.kind = OverlayKind::Equirect2; break;
+        case XR_TYPE_COMPOSITION_LAYER_CUBE_KHR: L.kind = OverlayKind::Cube; break;
+        default:
+            snprintf(sig, sizeof(sig), "type %d", (int)t);
+            if (t == XR_TYPE_COMPOSITION_LAYER_PROJECTION)
+                OvNote(sd, sig, "layer %u is a second projection layer -- not recorded (only the first projection layer is captured)", i + 1);
+            else
+                OvNote(sd, sig, "layer %u (%s, XrStructureType %d)%s -- not recorded: this layer type is not supported (no "
+                       "swapchain image to copy, or unknown to this layer)", i + 1, LayerTypeName(t), (int)t,
+                       behind ? " before the projection layer" : "");
+            continue;
+        }
+        L.behind = behind;
+        const char* kind = OverlayKindName(L.kind);
+        if (behind && !projBlend) {
+            snprintf(sig, sizeof(sig), "below %d %p", (int)t, (void*)h->space);
+            OvNote(sd, sig, "layer %u (%s) is BEFORE the projection layer, which is opaque (no BLEND_TEXTURE_SOURCE_ALPHA) -- "
+                   "hidden behind the 3D view, not recorded", i + 1, kind);
+            continue;
+        }
+        // the layer's image, eye visibility and pose
+        XrSwapchain swapchain = XR_NULL_HANDLE;
+        XrRect2Di rect{};
+        uint32_t slice = 0;
+        XrEyeVisibility vis = XR_EYE_VISIBILITY_BOTH;
+        XrPosef pose{{0, 0, 0, 1}, {0, 0, 0}};
+        bool geoOk = true;
+        auto finite = [](float v) { return std::isfinite(v); };
+        auto radiusOk = [](float r) { return r >= 0 && !std::isnan(r); };   // 0 or +inf = infinite sphere
+        switch (L.kind) {
+        case OverlayKind::Quad: {
+            const auto* q = reinterpret_cast<const XrCompositionLayerQuad*>(h);
+            swapchain = q->subImage.swapchain; rect = q->subImage.imageRect; slice = q->subImage.imageArrayIndex;
+            vis = q->eyeVisibility; pose = q->pose;
+            L.width = q->size.width; L.height = q->size.height;
+            geoOk = L.width > 0 && L.height > 0 && finite(L.width) && finite(L.height);
+            break;
+        }
+        case OverlayKind::Cylinder: {
+            const auto* c = reinterpret_cast<const XrCompositionLayerCylinderKHR*>(h);
+            swapchain = c->subImage.swapchain; rect = c->subImage.imageRect; slice = c->subImage.imageArrayIndex;
+            vis = c->eyeVisibility; pose = c->pose;
+            L.radius = c->radius; L.centralAngle = c->centralAngle; L.aspect = c->aspectRatio;
+            geoOk = L.radius > 0 && L.centralAngle > 0 && L.aspect > 0 && finite(L.radius) && finite(L.centralAngle) && finite(L.aspect);
+            break;
+        }
+        case OverlayKind::Equirect: {
+            const auto* e = reinterpret_cast<const XrCompositionLayerEquirectKHR*>(h);
+            swapchain = e->subImage.swapchain; rect = e->subImage.imageRect; slice = e->subImage.imageArrayIndex;
+            vis = e->eyeVisibility; pose = e->pose;
+            L.radius = e->radius;
+            L.eqScale[0] = e->scale.x; L.eqScale[1] = e->scale.y; L.eqBias[0] = e->bias.x; L.eqBias[1] = e->bias.y;
+            geoOk = radiusOk(L.radius) && finite(L.eqScale[0]) && finite(L.eqScale[1]) && finite(L.eqBias[0]) && finite(L.eqBias[1]);
+            break;
+        }
+        case OverlayKind::Equirect2: {
+            const auto* e = reinterpret_cast<const XrCompositionLayerEquirect2KHR*>(h);
+            swapchain = e->subImage.swapchain; rect = e->subImage.imageRect; slice = e->subImage.imageArrayIndex;
+            vis = e->eyeVisibility; pose = e->pose;
+            L.radius = e->radius;
+            L.centralHorizontalAngle = e->centralHorizontalAngle;
+            L.upperVerticalAngle = e->upperVerticalAngle;
+            L.lowerVerticalAngle = e->lowerVerticalAngle;
+            geoOk = radiusOk(L.radius) && L.centralHorizontalAngle > 0 && L.centralHorizontalAngle <= 6.2832f &&
+                    L.upperVerticalAngle > L.lowerVerticalAngle && L.upperVerticalAngle <= 1.5708f && L.lowerVerticalAngle >= -1.5708f;
+            break;
+        }
+        case OverlayKind::Cube: {
+            const auto* c = reinterpret_cast<const XrCompositionLayerCubeKHR*>(h);
+            swapchain = c->swapchain; slice = c->imageArrayIndex;
+            vis = c->eyeVisibility; pose.orientation = c->orientation;
+            break;
+        }
+        }
+        SwapchainData* scd = FindSwapchain(swapchain);
+        snprintf(sig, sizeof(sig), "%s %p %p%s", kind, (void*)swapchain, (void*)h->space, behind ? " behind" : "");
+        auto skip = [&](const char* why) {
+            std::string s = std::string(sig) + " " + why;
+            OvNote(sd, s, "layer %u (%s, swapchain %p, space %p) -- not recorded: %s", i + 1, kind, (void*)swapchain,
+                   (void*)h->space, why);
+        };
+        if (!scd || !scd->info.format) { skip("its swapchain was not created through this layer"); continue; }
+        if (scd->lastReleased < 0 || (size_t)scd->lastReleased >= scd->images.size()) { skip("no released swapchain image yet"); continue; }
+        if (scd->info.usageFlags & XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) { skip("depth swapchain"); continue; }
+        L.family = OverlayFamily((DXGI_FORMAT)scd->info.format);
+        if (L.family < 0) {
+            char why[120];
+            snprintf(why, sizeof(why), "swapchain format %s not supported", FormatName(sd->api, scd->info.format).c_str());
+            skip(why);
+            continue;
+        }
+        int32_t x = 0, y = 0, w = 0, hh = 0;
+        if (L.kind == OverlayKind::Cube) {
+            if (scd->info.faceCount != 6) { skip("cube layer on a swapchain with faceCount != 6"); continue; }
+            if (scd->info.sampleCount > 1) { skip("multisampled cube swapchain"); continue; }
+            if (scd->info.width != scd->info.height || slice >= scd->info.arraySize) { skip("cube faces not square / bad array index"); continue; }
+            w = (int32_t)scd->info.width; hh = (int32_t)scd->info.height;
+            L.arrayIndex = slice * 6;                // face f = array slice imageArrayIndex * 6 + f
+        } else {
+            x = rect.offset.x; y = rect.offset.y; w = rect.extent.width; hh = rect.extent.height;
+            if (x < 0) { w += x; x = 0; }
+            if (y < 0) { hh += y; y = 0; }
+            if (x + w > (int32_t)scd->info.width) w = (int32_t)scd->info.width - x;
+            if (y + hh > (int32_t)scd->info.height) hh = (int32_t)scd->info.height - y;
+            if (w <= 0 || hh <= 0 || slice >= scd->info.arraySize * (scd->info.faceCount ? scd->info.faceCount : 1)) {
+                skip("empty sub-image rectangle / bad array index");
+                continue;
+            }
+            L.arrayIndex = slice;
+        }
+        if (!geoOk) { skip("bad size / radius / angles"); continue; }
+        // the layer's space -> the projection layer's space
+        float sq[4] = {0, 0, 0, 1}, sp[3] = {0, 0, 0};
+        const char* spaceHow = "same space as the projection layer";
+        const auto vsp = h->space != proj->space ? g_viewSpaces.find(h->space) : g_viewSpaces.end();
+        if (vsp != g_viewSpaces.end() && vsp->second.session == sd->handle && headOk) {
+            // VIEW space (head-locked): placed on the head of the SUBMITTED views, not on a located head -- the runtime shows
+            // it fixed to the display, and the recorded picture is the one rendered from the submitted poses, so the layer
+            // stays at a fixed place in the video even when the game submits poses that differ from xrLocateSpace's
+            const float* vq = vsp->second.q;
+            QuatMul(head.q, vq, sq);
+            QuatRotate(head.q, vsp->second.p, sp);
+            sp[0] += head.p[0]; sp[1] += head.p[1]; sp[2] += head.p[2];
+            spaceHow = "VIEW space: on the head of the submitted views";
+        } else if (h->space != proj->space) {   // any other space: located at the frame's display time (cached per space)
+            Located* lc = nullptr;
+            for (uint32_t k = 0; k < nCache; ++k) if (cache[k].space == h->space) lc = &cache[k];
+            if (!lc && nCache < kMaxOverlays) {
+                lc = &cache[nCache++];
+                lc->space = h->space;
+                lc->ok = false;
+                lc->r = XR_ERROR_FUNCTION_UNSUPPORTED;
+                lc->flags = 0;
+                if (sd->inst->LocateSpace) {
+                    XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION};
+                    lc->r = sd->inst->LocateSpace(h->space, proj->space, info->displayTime, &loc);
+                    lc->flags = loc.locationFlags;
+                    lc->ok = XR_SUCCEEDED(lc->r) && (loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) &&
+                             (loc.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT);
+                    lc->pose = loc.pose;
+                }
+            }
+            if (!lc || !lc->ok) {
+                char why[120];
+                snprintf(why, sizeof(why), "its space could not be located in the projection space (xrLocateSpace %d, flags 0x%llx)",
+                         lc ? (int)lc->r : 0, lc ? (unsigned long long)lc->flags : 0ull);
+                skip(why);
+                continue;
+            }
+            sq[0] = lc->pose.orientation.x; sq[1] = lc->pose.orientation.y; sq[2] = lc->pose.orientation.z; sq[3] = lc->pose.orientation.w;
+            sp[0] = lc->pose.position.x; sp[1] = lc->pose.position.y; sp[2] = lc->pose.position.z;
+            spaceHow = "located in the projection space at displayTime";
+        }
+        const float lq[4] = {pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w};
+        const float lp[3] = {pose.position.x, pose.position.y, pose.position.z};
+        QuatMul(sq, lq, L.q);
+        QuatRotate(sq, lp, L.p);
+        L.p[0] += sp[0]; L.p[1] += sp[1]; L.p[2] += sp[2];
+        const float qn = std::sqrt(L.q[0] * L.q[0] + L.q[1] * L.q[1] + L.q[2] * L.q[2] + L.q[3] * L.q[3]);
+        if (!(qn > 0.5f && qn < 1.5f) || !std::isfinite(L.p[0] + L.p[1] + L.p[2])) { skip("bad orientation / position"); continue; }
+        for (float& c : L.q) c /= qn;
+        // eye visibility -> output eyes (swap_eyes: output eye 0 shows the right eye)
+        const uint8_t left = swapped ? 2 : 1, right = swapped ? 1 : 2;
+        L.eyeMask = vis == XR_EYE_VISIBILITY_LEFT ? left : vis == XR_EYE_VISIBILITY_RIGHT ? right : 3;
+        L.alpha = (h->layerFlags & XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT) != 0;
+        L.unpremultiplied = (h->layerFlags & XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT) != 0;
+        L.srgb = IsSrgbDxgi((DXGI_FORMAT)scd->info.format);
+        const XrCompositionLayerColorScaleBiasKHR* csb = FindColorScaleBias(h->next);
+        if (csb) {
+            const float v[8] = {csb->colorScale.r, csb->colorScale.g, csb->colorScale.b, csb->colorScale.a,
+                                csb->colorBias.r, csb->colorBias.g, csb->colorBias.b, csb->colorBias.a};
+            bool ok = true;
+            for (float c : v) ok = ok && std::isfinite(c);
+            if (!ok) { skip("non-finite XrCompositionLayerColorScaleBiasKHR"); continue; }
+            for (int k = 0; k < 4; ++k) { L.colorScale[k] = v[k]; L.colorBias[k] = v[4 + k]; }
+        }
+        L.image = scd->images[(size_t)scd->lastReleased];
+        L.sc = &scd->info;
+        L.scKey = scd;
+        L.x = x; L.y = y; L.w = (uint32_t)w; L.h = (uint32_t)hh;
+        if (out.n >= kMaxOverlays) { skip("more than 16 overlay layers in one frame"); continue; }
+        out.layer[out.n++] = L;
+        if (behind) ++out.nBehind;
+        {
+            std::string s = std::string(sig) + " recorded";
+            char geo[200] = "";
+            switch (L.kind) {
+            case OverlayKind::Quad: snprintf(geo, sizeof(geo), "size %.3f x %.3f m", L.width, L.height); break;
+            case OverlayKind::Cylinder:
+                snprintf(geo, sizeof(geo), "radius %.3f m, angle %.1f deg, aspect %.2f", L.radius, L.centralAngle * 57.29578f, L.aspect);
+                break;
+            case OverlayKind::Equirect:
+                snprintf(geo, sizeof(geo), "radius %.3f m%s, scale (%.3f, %.3f), bias (%.3f, %.3f)", L.radius,
+                         (L.radius == 0 || std::isinf(L.radius)) ? " (infinite)" : "", L.eqScale[0], L.eqScale[1], L.eqBias[0], L.eqBias[1]);
+                break;
+            case OverlayKind::Equirect2:
+                snprintf(geo, sizeof(geo), "radius %.3f m%s, horizontal %.1f deg, vertical %+.1f .. %+.1f deg", L.radius,
+                         (L.radius == 0 || std::isinf(L.radius)) ? " (infinite)" : "", L.centralHorizontalAngle * 57.29578f,
+                         L.lowerVerticalAngle * 57.29578f, L.upperVerticalAngle * 57.29578f);
+                break;
+            case OverlayKind::Cube: snprintf(geo, sizeof(geo), "cube faces %ux%u (slices %u..%u)", w, hh, L.arrayIndex, L.arrayIndex + 5); break;
+            }
+            char extra[160] = "";
+            if (csb)
+                snprintf(extra, sizeof(extra), ", colour scale (%.2f %.2f %.2f %.2f) bias (%.2f %.2f %.2f %.2f)", L.colorScale[0],
+                         L.colorScale[1], L.colorScale[2], L.colorScale[3], L.colorBias[0], L.colorBias[1], L.colorBias[2], L.colorBias[3]);
+            char ms[40] = "";
+            if (scd->info.sampleCount > 1) snprintf(ms, sizeof(ms), " %ux MSAA (resolved)", scd->info.sampleCount);
+            OvNote(sd, s, "layer %u (%s) RECORDED%s: swapchain %p %s %ux%u%s, sub-image %d,%d %ux%u slice %u, %s, pose (%.2f, %.2f, %.2f) "
+                   "in the projection space (%s), eyes %s, flags 0x%llx (%s)%s", i + 1, kind,
+                   behind ? " BEHIND the projection layer (shows through its transparent pixels)" : "", (void*)swapchain,
+                   FormatName(sd->api, scd->info.format).c_str(), scd->info.width, scd->info.height, ms,
+                   x, y, w, hh, L.arrayIndex, geo, L.p[0], L.p[1], L.p[2], spaceHow,
+                   vis == XR_EYE_VISIBILITY_LEFT ? "left" : vis == XR_EYE_VISIBILITY_RIGHT ? "right" : "both",
+                   (unsigned long long)h->layerFlags,
+                   !L.alpha ? "opaque" : L.unpremultiplied ? "alpha, unpremultiplied" : "alpha, premultiplied", extra);
+        }
+    }
 }
 
 void CaptureImpl(SessionData* sd, const XrFrameEndInfo* info) {
@@ -435,9 +776,11 @@ void CaptureImpl(SessionData* sd, const XrFrameEndInfo* info) {
     if (sd == g_active) wantStart = g_startRequested.exchange(false);
 
     const XrCompositionLayerProjection* proj = nullptr;
+    uint32_t projIdx = 0;
     for (uint32_t i = 0; info->layers && i < info->layerCount; ++i) {
         if (info->layers[i] && info->layers[i]->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
             proj = reinterpret_cast<const XrCompositionLayerProjection*>(info->layers[i]);
+            projIdx = i;
             break;
         }
     }
@@ -520,8 +863,22 @@ void CaptureImpl(SessionData* sd, const XrFrameEndInfo* info) {
 
     const RecState rs = sd->rec->State();
     if (wantStart && rs != RecState::Starting && rs != RecState::Recording) StartRecording(sd, eyes[0], eyes[1]);
-    if (sd->rec->State() == RecState::Recording)
-        sd->rec->SubmitFrame(VideoClock(sd, info->displayTime), eyes[0], eyes[1], (int64_t)info->displayTime);
+    if (sd->rec->State() == RecState::Recording) {
+        // record_overlays: only frames with more than the projection layer do any overlay work
+        OverlayFrame ovf;
+        const OverlayFrame* ovp = nullptr;
+        if (info->layerCount > 1) {
+            if (g_cfg.recordOverlays) {
+                CollectOverlays(sd, info, projIdx, proj, g_cfg.swapEyes, ovf);
+                if (ovf.n) ovp = &ovf;
+            } else if (!sd->loggedOvOff) {
+                sd->loggedOvOff = true;
+                LOGI("overlay: record_overlays = 0 -- the %u other layer(s) of this frame (panels / overlays) are not recorded",
+                     info->layerCount - 1);
+            }
+        }
+        sd->rec->SubmitFrame(VideoClock(sd, info->displayTime), eyes[0], eyes[1], (int64_t)info->displayTime, ovp);
+    }
 }
 
 // SEH wrapper: no C++ objects with destructors in this function.
@@ -768,6 +1125,44 @@ XrResult XRAPI_CALL Hook_DestroySwapchain(XrSwapchain swapchain) {
     return next ? next(swapchain) : XR_ERROR_HANDLE_INVALID;
 }
 
+XrResult XRAPI_CALL Hook_CreateReferenceSpace(XrSession session, const XrReferenceSpaceCreateInfo* ci, XrSpace* space) {
+    PFN_xrCreateReferenceSpace next = nullptr;
+    InstanceData* id = nullptr;
+    bool armed = false;
+    {
+        std::lock_guard<std::mutex> lk(g_lock);
+        SessionData* sd = FindSession(session);
+        if (sd) { id = sd->inst; armed = sd->armed; }
+        else if (!g_instances.empty()) id = g_instances.begin()->second.get();
+        if (id) next = id->CreateReferenceSpace;
+    }
+    if (!next) return XR_ERROR_HANDLE_INVALID;
+    const XrResult r = next(session, ci, space);
+    if (XR_SUCCEEDED(r) && armed && ci && space && ci->referenceSpaceType == XR_REFERENCE_SPACE_TYPE_VIEW) {
+        std::lock_guard<std::mutex> lk(g_lock);
+        const XrPosef& p = ci->poseInReferenceSpace;
+        g_viewSpaces[*space] = ViewSpaceData{session, id, {p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w},
+                                             {p.position.x, p.position.y, p.position.z}};
+        LOGI("reference space %p created: VIEW (pose (%.3f, %.3f, %.3f)) -- overlay layers in it are placed on the submitted views' head",
+             (void*)*space, p.position.x, p.position.y, p.position.z);
+    }
+    return r;
+}
+
+XrResult XRAPI_CALL Hook_DestroySpace(XrSpace space) {
+    PFN_xrDestroySpace next = nullptr;
+    {
+        std::lock_guard<std::mutex> lk(g_lock);
+        auto it = g_viewSpaces.find(space);
+        if (it != g_viewSpaces.end()) {
+            if (it->second.inst) next = it->second.inst->DestroySpace;
+            g_viewSpaces.erase(it);
+        }
+        if (!next && !g_instances.empty()) next = g_instances.begin()->second->DestroySpace;
+    }
+    return next ? next(space) : XR_ERROR_HANDLE_INVALID;
+}
+
 XrResult XRAPI_CALL Hook_EnumerateSwapchainImages(XrSwapchain swapchain, uint32_t capacity, uint32_t* count,
                                                   XrSwapchainImageBaseHeader* images) {
     PFN_xrEnumerateSwapchainImages next = nullptr;
@@ -849,6 +1244,8 @@ XrResult XRAPI_CALL Hook_CreateSession(XrInstance instance, const XrSessionCreat
             if (p->type == XR_TYPE_GRAPHICS_BINDING_VULKAN_KHR) {   // == XR_TYPE_GRAPHICS_BINDING_VULKAN2_KHR
                 sd->api = GfxApi::Vulkan;
                 sd->src = CreateVulkanFrameSource();
+                LOGI("overlay: Vulkan session -- the capture path is a stub, so overlay layers (record_overlays) are not "
+                     "recorded either");
                 break;
             }
             if (p->type == XR_TYPE_GRAPHICS_BINDING_OPENGL_WIN32_KHR) {
@@ -916,6 +1313,8 @@ XrResult XRAPI_CALL Hook_DestroySession(XrSession session) {
             }
             for (auto s = g_swapchains.begin(); s != g_swapchains.end();)
                 s = (s->second->session == sd.get()) ? g_swapchains.erase(s) : std::next(s);
+            for (auto v = g_viewSpaces.begin(); v != g_viewSpaces.end();)   // its spaces die with it
+                v = v->second.session == session ? g_viewSpaces.erase(v) : std::next(v);
         } else if (!g_instances.empty()) {
             next = g_instances.begin()->second->DestroySession;
         }
@@ -965,6 +1364,8 @@ XrResult XRAPI_CALL Hook_DestroyInstance(XrInstance instance) {
                 ++s;
             }
         }
+        for (auto v = g_viewSpaces.begin(); v != g_viewSpaces.end();)
+            v = v->second.inst == id.get() ? g_viewSpaces.erase(v) : std::next(v);
         last = g_instances.empty();
     }
     for (auto& sd : orphans) {
@@ -1016,6 +1417,7 @@ struct HookEntry { const char* name; PFN_xrVoidFunction fn; };
 const HookEntry kHooks[] = {
     HOOK(DestroyInstance), HOOK(CreateSession), HOOK(DestroySession), HOOK(CreateSwapchain), HOOK(DestroySwapchain),
     HOOK(EnumerateSwapchainImages), HOOK(AcquireSwapchainImage), HOOK(ReleaseSwapchainImage), HOOK(EndFrame),
+    HOOK(CreateReferenceSpace), HOOK(DestroySpace),
 };
 
 XrResult XRAPI_CALL Layer_GetInstanceProcAddr(XrInstance instance, const char* name, PFN_xrVoidFunction* function) {
@@ -1084,7 +1486,7 @@ XrResult XRAPI_CALL Layer_CreateApiLayerInstance(const XrInstanceCreateInfo* inf
         RESOLVE(DestroySwapchain); RESOLVE(EnumerateSwapchainImages); RESOLVE(AcquireSwapchainImage);
         RESOLVE(ReleaseSwapchainImage); RESOLVE(EndFrame); RESOLVE(GetInstanceProperties);
         RESOLVE(EnumerateSwapchainFormats); RESOLVE(WaitSwapchainImage); RESOLVE(CreateReferenceSpace); RESOLVE(DestroySpace);
-        RESOLVE(GetSystemProperties);
+        RESOLVE(GetSystemProperties); RESOLVE(LocateSpace);
 #undef RESOLVE
         std::string exts;
         bool fb = false;

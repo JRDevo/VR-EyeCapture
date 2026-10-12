@@ -88,7 +88,8 @@ public:
         return true;
     }
 
-    uint64_t CopyEyes(UINT slot, const EyeView& L, const EyeView& R, UINT dstXRight, uint64_t waitFree) override {
+    uint64_t CopyEyes(UINT slot, const EyeView& L, const EyeView& R, UINT dstXRight, uint64_t waitFree,
+                      const OverlayCopy* ov, UINT nOv) override {
         if (slot >= slots_.size() || !list_) return 0;
         Slot& s = slots_[slot];
         if (s.lastReady && ready_->GetCompletedValue() < s.lastReady) return 0;   // previous copy into this slot still on the GPU
@@ -98,19 +99,91 @@ public:
         ID3D12Resource* imgs[2] = {static_cast<ID3D12Resource*>(L.image), static_cast<ID3D12Resource*>(R.image)};
         const EyeView* eyes[2] = {&L, &R};
         const int nImg = (imgs[1] && imgs[1] != imgs[0]) ? 2 : 1;
+        // record_overlays: the copies whose family atlas exists; their distinct images (an eye image is in its copy /
+        // resolve source state already) and the atlases they go to
+        const UINT kMaxOv = 32;
+        bool famUsed[kOverlayFamilies] = {};
+        const UINT kMaxUse = 128;   // >= kMaxOverlayCopies (overlay.h): every copy the recorder packed
+        const OverlayCopy* use[kMaxUse] = {};
+        UINT nUse = 0;
+        ID3D12Resource* ovImg[kMaxOv] = {};
+        D3D12_RESOURCE_STATES ovFrom[kMaxOv] = {}, ovTo[kMaxOv] = {};
+        UINT nOvImg = 0;
+        for (UINT i = 0; ov && i < nOv && nUse < kMaxUse; ++i) {
+            const OverlayCopy& c = ov[i];
+            if (!c.image || !c.sc || !c.w || !c.h || c.family < 0 || c.family >= kOverlayFamilies) continue;
+            if (!atlasReady_[c.family].load(std::memory_order_acquire) || slot >= atlas_[c.family].size()) continue;
+            const bool msaa = c.sc->sampleCount > 1;
+            if (msaa && listType_ != D3D12_COMMAND_LIST_TYPE_DIRECT) {
+                if (!warnedOvResolveQueue_) { LOGW("D3D12 source: MSAA overlay swapchain on a non-direct queue -- cannot resolve, layer not recorded"); warnedOvResolveQueue_ = true; }
+                continue;
+            }
+            ID3D12Resource* r = static_cast<ID3D12Resource*>(c.image);
+            bool dup = r == imgs[0] || r == imgs[1];
+            for (UINT k = 0; k < nOvImg && !dup; ++k) dup = ovImg[k] == r;
+            if (!dup) {
+                if (nOvImg >= kMaxOv) continue;
+                ovImg[nOvImg] = r;
+                ovFrom[nOvImg] = ScState(c.sc);
+                ovTo[nOvImg] = msaa ? D3D12_RESOURCE_STATE_RESOLVE_SOURCE : D3D12_RESOURCE_STATE_COPY_SOURCE;
+                ++nOvImg;
+            }
+            famUsed[c.family] = true;
+            use[nUse++] = &c;
+        }
 
-        D3D12_RESOURCE_BARRIER b[4]{};
+        D3D12_RESOURCE_BARRIER b[4 + kMaxOv + kOverlayFamilies]{};
         int nb = 0;
         for (int i = 0; i < nImg; ++i) if (imgs[i]) b[nb++] = Transition(imgs[i], SwapchainState(*eyes[i]), PreCopyState(*eyes[i]));
         b[nb++] = Transition(s.tex.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
+        for (UINT k = 0; k < nOvImg; ++k) b[nb++] = Transition(ovImg[k], ovFrom[k], ovTo[k]);
+        for (int f = 0; f < kOverlayFamilies; ++f)
+            if (famUsed[f]) b[nb++] = Transition(atlas_[f][slot].Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
         list_->ResourceBarrier(nb, b);
 
         CopyOne(s.tex.Get(), 0, L, 0);
         CopyOne(s.tex.Get(), dstXRight, R, 1);
+        const void* lastKey = nullptr;
+        UINT lastSub = ~0u;
+        for (UINT i = 0; i < nUse; ++i) {
+            const OverlayCopy& c = *use[i];
+            ID3D12Resource* src = static_cast<ID3D12Resource*>(c.image);
+            UINT sub = c.arrayIndex * (c.sc->mipCount ? c.sc->mipCount : 1);
+            ID3D12Resource* rt = nullptr;
+            if (c.sc->sampleCount > 1) {   // resolve into a per-swapchain texture, copy the rectangle from there
+                rt = ResolveTarget(c.scKey, 2, *c.sc, "overlay");
+                if (!rt) continue;
+                D3D12_RESOURCE_BARRIER rb = Transition(rt, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RESOLVE_DEST);
+                if (lastKey != c.scKey || lastSub != sub) {   // the same slice again (one sub-image per eye): resolved already
+                    list_->ResourceBarrier(1, &rb);
+                    list_->ResolveSubresource(rt, 0, src, sub, (DXGI_FORMAT)c.sc->format);
+                    rb = Transition(rt, D3D12_RESOURCE_STATE_RESOLVE_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE);
+                } else {
+                    rb = Transition(rt, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE);
+                }
+                list_->ResourceBarrier(1, &rb);
+                lastKey = c.scKey;
+                lastSub = sub;
+                src = rt;
+                sub = 0;
+            }
+            D3D12_TEXTURE_COPY_LOCATION d{}, sl{};
+            d.pResource = atlas_[c.family][slot].Get(); d.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; d.SubresourceIndex = 0;
+            sl.pResource = src; sl.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; sl.SubresourceIndex = sub;
+            const D3D12_BOX box{(UINT)c.x, (UINT)c.y, 0, (UINT)c.x + c.w, (UINT)c.y + c.h, 1};
+            list_->CopyTextureRegion(&d, c.dstX, c.dstY, 0, &sl, &box);
+            if (rt) {
+                const D3D12_RESOURCE_BARRIER rb = Transition(rt, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
+                list_->ResourceBarrier(1, &rb);
+            }
+        }
 
         nb = 0;
         for (int i = 0; i < nImg; ++i) if (imgs[i]) b[nb++] = Transition(imgs[i], PreCopyState(*eyes[i]), SwapchainState(*eyes[i]));
         b[nb++] = Transition(s.tex.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
+        for (UINT k = 0; k < nOvImg; ++k) b[nb++] = Transition(ovImg[k], ovTo[k], ovFrom[k]);
+        for (int f = 0; f < kOverlayFamilies; ++f)
+            if (famUsed[f]) b[nb++] = Transition(atlas_[f][slot].Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
         list_->ResourceBarrier(nb, b);
         if (FAILED(list_->Close())) return 0;
 
@@ -124,6 +197,40 @@ public:
         return v;
     }
 
+    bool CreateOverlayAtlas(ID3D11Device* encDev, UINT w, UINT h, DXGI_FORMAT format, UINT count, int family,
+                            std::vector<ComPtr<ID3D11Texture2D>>& out) override {
+        out.clear();
+        if (family < 0 || family >= kOverlayFamilies || atlasReady_[family].load()) return false;   // once per family and ring
+        ComPtr<ID3D11Device1> enc1;
+        if (FAILED(encDev->QueryInterface(IID_PPV_ARGS(&enc1)))) return false;
+        D3D12_HEAP_PROPERTIES hp{};
+        hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+        D3D12_RESOURCE_DESC rd{};
+        rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        rd.Width = w; rd.Height = h; rd.DepthOrArraySize = 1; rd.MipLevels = 1; rd.Format = format;
+        rd.SampleDesc.Count = 1; rd.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+        rd.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;   // as the ring: what cross-API sharing of a texture needs
+        std::vector<ComPtr<ID3D12Resource>> game;
+        for (UINT i = 0; i < count; ++i) {
+            ComPtr<ID3D12Resource> r;
+            HRESULT hr = dev_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_SHARED, &rd, D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                                       IID_PPV_ARGS(&r));
+            if (FAILED(hr)) { LOGE("D3D12 source: overlay atlas %ux%u %s failed hr=0x%08lx", w, h, DxgiFormatName(format), (unsigned long)hr); out.clear(); return false; }
+            HANDLE hnd = nullptr;
+            hr = dev_->CreateSharedHandle(r.Get(), nullptr, GENERIC_ALL, nullptr, &hnd);
+            if (FAILED(hr)) { LOGE("D3D12 source: CreateSharedHandle(overlay atlas) failed hr=0x%08lx", (unsigned long)hr); out.clear(); return false; }
+            ComPtr<ID3D11Texture2D> encTex;
+            hr = enc1->OpenSharedResource1(hnd, IID_PPV_ARGS(&encTex));
+            CloseHandle(hnd);
+            if (FAILED(hr)) { LOGE("D3D12 source: OpenSharedResource1(overlay atlas) on the encoder device failed hr=0x%08lx", (unsigned long)hr); out.clear(); return false; }
+            out.push_back(encTex);
+            game.push_back(r);
+        }
+        atlas_[family] = std::move(game);
+        atlasReady_[family].store(true, std::memory_order_release);
+        return true;
+    }
+
     void DestroyRing() override {
         const uint64_t last = readyValue_.load();
         if (ready_ && last && ready_->GetCompletedValue() < last) {
@@ -132,6 +239,10 @@ public:
                 if (SUCCEEDED(ready_->SetEventOnCompletion(last, e))) WaitForSingleObject(e, 2000);
                 CloseHandle(e);
             }
+        }
+        for (int f = 0; f < kOverlayFamilies; ++f) {
+            atlasReady_[f].store(false);
+            atlas_[f].clear();
         }
         list_.Reset();
         slots_.clear();
@@ -165,6 +276,11 @@ private:
         if (e.sc && (e.sc->usageFlags & kUsageUav)) return D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
         return D3D12_RESOURCE_STATE_RENDER_TARGET;
     }
+    static D3D12_RESOURCE_STATES ScState(const SwapchainInfo* sc) {
+        if (sc && (sc->usageFlags & kUsageColor)) return D3D12_RESOURCE_STATE_RENDER_TARGET;
+        if (sc && (sc->usageFlags & kUsageUav)) return D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        return D3D12_RESOURCE_STATE_RENDER_TARGET;
+    }
     static D3D12_RESOURCE_STATES PreCopyState(const EyeView& e) {
         return (e.sc && e.sc->sampleCount > 1) ? D3D12_RESOURCE_STATE_RESOLVE_SOURCE : D3D12_RESOURCE_STATE_COPY_SOURCE;
     }
@@ -193,7 +309,7 @@ private:
                 if (!warnedResolveQueue_) { LOGW("D3D12 source: MSAA swapchain on a non-direct queue -- cannot resolve, eye skipped"); warnedResolveQueue_ = true; }
                 return;
             }
-            ID3D12Resource* rt = ResolveTarget(e, eye);
+            ID3D12Resource* rt = ResolveTarget(e.swapchainKey, eye, *e.sc, eye ? "eye 1" : "eye 0");
             if (!rt) return;
             D3D12_RESOURCE_BARRIER b = Transition(rt, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RESOLVE_DEST);
             list_->ResourceBarrier(1, &b);
@@ -214,26 +330,27 @@ private:
         }
     }
 
-    ID3D12Resource* ResolveTarget(const EyeView& e, int eye) {
-        auto key = std::make_pair(e.swapchainKey, eye);
+    // idx: 0 / 1 = eye, 2 = overlay layer
+    ID3D12Resource* ResolveTarget(const void* scKey, int idx, const SwapchainInfo& sc, const char* what) {
+        auto key = std::make_pair(scKey, idx);
         auto it = resolve_.find(key);
         if (it != resolve_.end()) return it->second.Get();
         D3D12_HEAP_PROPERTIES hp{};
         hp.Type = D3D12_HEAP_TYPE_DEFAULT;
         D3D12_RESOURCE_DESC rd{};
         rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-        rd.Width = e.sc->width; rd.Height = e.sc->height; rd.DepthOrArraySize = 1; rd.MipLevels = 1;
-        rd.Format = (DXGI_FORMAT)e.sc->format; rd.SampleDesc.Count = 1;
+        rd.Width = sc.width; rd.Height = sc.height; rd.DepthOrArraySize = 1; rd.MipLevels = 1;
+        rd.Format = (DXGI_FORMAT)sc.format; rd.SampleDesc.Count = 1;
         ComPtr<ID3D12Resource> r;
         HRESULT hr = dev_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&r));
         if (FAILED(hr)) {
-            LOGE("D3D12 source: MSAA resolve target %ux%u %s failed hr=0x%08lx", e.sc->width, e.sc->height,
+            LOGE("D3D12 source: MSAA resolve target %ux%u %s failed hr=0x%08lx", sc.width, sc.height,
                  DxgiFormatName(rd.Format), (unsigned long)hr);
             resolve_[key] = nullptr;
             return nullptr;
         }
-        LOGI("D3D12 source: MSAA swapchain (%ux) -> resolving eye %d through a %ux%u %s texture", e.sc->sampleCount, eye,
-             e.sc->width, e.sc->height, DxgiFormatName(rd.Format));
+        LOGI("D3D12 source: MSAA swapchain (%ux) -> resolving %s through a %ux%u %s texture", sc.sampleCount, what,
+             sc.width, sc.height, DxgiFormatName(rd.Format));
         resolve_[key] = r;
         return r.Get();
     }
@@ -243,11 +360,13 @@ private:
     D3D12_COMMAND_LIST_TYPE listType_ = D3D12_COMMAND_LIST_TYPE_DIRECT;
     LUID luid_{};
     std::vector<Slot> slots_;
+    std::vector<ComPtr<ID3D12Resource>> atlas_[kOverlayFamilies];   // record_overlays: per family and slot (COMMON between uses, like the ring)
+    std::atomic<bool> atlasReady_[kOverlayFamilies] = {};
     ComPtr<ID3D12GraphicsCommandList> list_;
     ComPtr<ID3D12Fence> ready_, free_;
     std::atomic<uint64_t> readyValue_{0};
     std::map<std::pair<const void*, int>, ComPtr<ID3D12Resource>> resolve_;
-    bool warnedResolveQueue_ = false;
+    bool warnedResolveQueue_ = false, warnedOvResolveQueue_ = false;
 };
 
 } // namespace

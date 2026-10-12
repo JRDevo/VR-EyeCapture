@@ -82,12 +82,38 @@ public:
         return true;
     }
 
-    uint64_t CopyEyes(UINT slot, const EyeView& L, const EyeView& R, UINT dstXRight, uint64_t waitFree) override {
+    uint64_t CopyEyes(UINT slot, const EyeView& L, const EyeView& R, UINT dstXRight, uint64_t waitFree,
+                      const OverlayCopy* ov, UINT nOv) override {
         if (slot >= gameTex_.size()) return 0;
         ID3D11Texture2D* dst = gameTex_[slot].Get();
         if (waitFree) ctx4_->Wait(free_.Get(), waitFree);
         CopyOne(dst, 0, L, 0);
         CopyOne(dst, dstXRight, R, 1);
+        // record_overlays: the overlay sub-images into this slot's atlas of their family (plain copies, MSAA images
+        // resolved into a per-swapchain texture first; no pipeline state touched)
+        if (nOv && ov) {
+            const void* lastKey = nullptr;
+            UINT lastSub = ~0u;
+            for (UINT i = 0; i < nOv; ++i) {
+                const OverlayCopy& c = ov[i];
+                if (!c.image || !c.sc || !c.w || !c.h || c.family < 0 || c.family >= kOverlayFamilies) continue;
+                if (!atlasReady_[c.family].load(std::memory_order_acquire) || slot >= gameAtlas_[c.family].size()) continue;
+                ID3D11Texture2D* src = static_cast<ID3D11Texture2D*>(c.image);
+                UINT sub = D3D11CalcSubresource(0, c.arrayIndex, c.sc->mipCount ? c.sc->mipCount : 1);
+                if (c.sc->sampleCount > 1) {
+                    ID3D11Texture2D* rt = ResolveTarget(c.scKey, 2, *c.sc, "overlay");
+                    if (!rt) continue;
+                    if (lastKey != c.scKey || lastSub != sub)   // the same slice again (one sub-image per eye): resolved already
+                        ctx_->ResolveSubresource(rt, 0, src, sub, (DXGI_FORMAT)c.sc->format);
+                    lastKey = c.scKey;
+                    lastSub = sub;
+                    src = rt;
+                    sub = 0;
+                }
+                const D3D11_BOX box{(UINT)c.x, (UINT)c.y, 0, (UINT)c.x + c.w, (UINT)c.y + c.h, 1};
+                ctx_->CopySubresourceRegion(gameAtlas_[c.family][slot].Get(), 0, c.dstX, c.dstY, 0, src, sub, &box);
+            }
+        }
         const uint64_t v = readyValue_.load() + 1;
         ctx4_->Signal(ready_.Get(), v);
         ctx_->Flush();    // submit now so the encoder device's GPU wait can be satisfied
@@ -95,11 +121,49 @@ public:
         return v;
     }
 
+    bool CreateOverlayAtlas(ID3D11Device* encDev, UINT w, UINT h, DXGI_FORMAT format, UINT count, int family,
+                            std::vector<ComPtr<ID3D11Texture2D>>& out) override {
+        out.clear();
+        if (family < 0 || family >= kOverlayFamilies || atlasReady_[family].load()) return false;   // once per family and ring
+        std::vector<ComPtr<ID3D11Texture2D>> game;
+        for (UINT i = 0; i < count; ++i) {
+            D3D11_TEXTURE2D_DESC d{};
+            d.Width = w; d.Height = h; d.MipLevels = 1; d.ArraySize = 1; d.Format = format;
+            d.SampleDesc.Count = 1; d.Usage = D3D11_USAGE_DEFAULT;
+            d.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+            d.MiscFlags = D3D11_RESOURCE_MISC_SHARED_NTHANDLE | D3D11_RESOURCE_MISC_SHARED;
+            ComPtr<ID3D11Texture2D> encTex;
+            HRESULT hr = encDev->CreateTexture2D(&d, nullptr, &encTex);
+            if (FAILED(hr)) { LOGE("D3D11 source: overlay atlas %ux%u %s failed hr=0x%08lx", w, h, DxgiFormatName(format), (unsigned long)hr); out.clear(); return false; }
+            ComPtr<IDXGIResource1> res1;
+            HANDLE hnd = nullptr;
+            if (FAILED(encTex.As(&res1)) ||
+                FAILED(hr = res1->CreateSharedHandle(nullptr, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, nullptr, &hnd))) {
+                LOGE("D3D11 source: CreateSharedHandle(overlay atlas) failed hr=0x%08lx", (unsigned long)hr);
+                out.clear();
+                return false;
+            }
+            ComPtr<ID3D11Texture2D> gameTex;
+            hr = dev1_->OpenSharedResource1(hnd, IID_PPV_ARGS(&gameTex));
+            CloseHandle(hnd);
+            if (FAILED(hr)) { LOGE("D3D11 source: OpenSharedResource1(overlay atlas) on the game device failed hr=0x%08lx", (unsigned long)hr); out.clear(); return false; }
+            out.push_back(encTex);
+            game.push_back(gameTex);
+        }
+        gameAtlas_[family] = std::move(game);
+        atlasReady_[family].store(true, std::memory_order_release);
+        return true;
+    }
+
     void DestroyRing() override {
         const uint64_t last = readyValue_.load();
         if (ready_ && last) {
             const ULONGLONG t0 = GetTickCount64();
             while (ready_->GetCompletedValue() < last && GetTickCount64() - t0 < 2000) Sleep(1);
+        }
+        for (int f = 0; f < kOverlayFamilies; ++f) {
+            atlasReady_[f].store(false);
+            gameAtlas_[f].clear();
         }
         gameTex_.clear();
         ready_.Reset();
@@ -129,7 +193,7 @@ private:
         ID3D11Texture2D* src = static_cast<ID3D11Texture2D*>(e.image);
         UINT sub = D3D11CalcSubresource(0, e.arrayIndex, e.sc->mipCount ? e.sc->mipCount : 1);
         if (e.sc->sampleCount > 1) {
-            ID3D11Texture2D* rt = ResolveTarget(e, eye);
+            ID3D11Texture2D* rt = ResolveTarget(e.swapchainKey, eye, *e.sc, eye ? "eye 1" : "eye 0");
             if (!rt) return;
             ctx_->ResolveSubresource(rt, 0, src, sub, (DXGI_FORMAT)e.sc->format);
             src = rt;
@@ -139,13 +203,14 @@ private:
         ctx_->CopySubresourceRegion(dst, 0, dstX, 0, 0, src, sub, &box);
     }
 
-    ID3D11Texture2D* ResolveTarget(const EyeView& e, int eye) {
-        auto key = std::make_pair(e.swapchainKey, eye);
+    // idx: 0 / 1 = eye, 2 = overlay layer
+    ID3D11Texture2D* ResolveTarget(const void* scKey, int idx, const SwapchainInfo& sc, const char* what) {
+        auto key = std::make_pair(scKey, idx);
         auto it = resolve_.find(key);
         if (it != resolve_.end()) return it->second.Get();
         D3D11_TEXTURE2D_DESC d{};
-        d.Width = e.sc->width; d.Height = e.sc->height; d.MipLevels = 1; d.ArraySize = 1;
-        d.Format = (DXGI_FORMAT)e.sc->format;           // typed format (the resolve needs one)
+        d.Width = sc.width; d.Height = sc.height; d.MipLevels = 1; d.ArraySize = 1;
+        d.Format = (DXGI_FORMAT)sc.format;           // typed format (the resolve needs one)
         d.SampleDesc.Count = 1; d.Usage = D3D11_USAGE_DEFAULT; d.BindFlags = 0;
         ComPtr<ID3D11Texture2D> t;
         HRESULT hr = dev_->CreateTexture2D(&d, nullptr, &t);
@@ -154,7 +219,7 @@ private:
             resolve_[key] = nullptr;
             return nullptr;
         }
-        LOGI("D3D11 source: MSAA swapchain (%ux) -> resolving eye %d through a %ux%u %s texture", e.sc->sampleCount, eye,
+        LOGI("D3D11 source: MSAA swapchain (%ux) -> resolving %s through a %ux%u %s texture", sc.sampleCount, what,
              d.Width, d.Height, DxgiFormatName(d.Format));
         resolve_[key] = t;
         return t.Get();
@@ -167,6 +232,8 @@ private:
     ComPtr<ID3D11DeviceContext4> ctx4_;
     LUID luid_{};
     std::vector<ComPtr<ID3D11Texture2D>> gameTex_;
+    std::vector<ComPtr<ID3D11Texture2D>> gameAtlas_[kOverlayFamilies];   // record_overlays: per family and slot, opened on the game device
+    std::atomic<bool> atlasReady_[kOverlayFamilies] = {};
     ComPtr<ID3D11Fence> ready_, free_;
     std::atomic<uint64_t> readyValue_{0};
     std::map<std::pair<const void*, int>, ComPtr<ID3D11Texture2D>> resolve_;

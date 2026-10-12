@@ -9,6 +9,10 @@
 // not registered for this folder it offers to register it and runs itself elevated (one UAC prompt) with --register.
 // Tooltip: game, API, resolution, fps, frames dropped, elapsed, conversion progress. Talks to the layer through
 // src/shared_status.h. After each recording the tray remuxes it to .mkv (YouTube 3D tag) in a worker thread.
+// post_when (config.ini, re-read when the file changes): now = convert at once; session_end = hold the conversion queue
+// while an OpenXR session is live (the layer releases the status block -- ownerPid 0, ECS_NONE -- when the game destroys
+// its last session, even if the process keeps running); game_exit (default) = also hold while the process that made a
+// queued recording is still alive. See UpdateHold() and pp::Processor::SetHold.
 // Start it BEFORE the game: the layer decides at xrCreateSession whether to arm (config require_tray=0 = always arm).
 #include <windows.h>
 #include <objbase.h>
@@ -17,7 +21,9 @@
 #include <map>
 #include <set>
 #include <string>
+#include <vector>
 #include "config.h"
+#include "input.h"
 #include "install.h"
 #include "postprocess.h"
 #include "settings.h"
@@ -63,6 +69,12 @@ bool           g_regEnabled = false;
 install::Status g_reg;                             // cached; re-queried every 10 s and after a register / unregister
 ULONGLONG      g_regQueried = 0;
 bool           g_regBusy = false;                  // a registration prompt / elevated child is in progress
+// post_when (tray/postprocess.h hold). Producers: the game processes that made a queued recording (game_exit waits for
+// them to exit). Handles, not pids, so a re-used pid can never keep the queue held.
+PostWhen       g_postWhen = PostWhen::GameExit;    // cached; reloaded with the input bindings when config.ini changes
+struct Proc { DWORD pid = 0; HANDLE h = nullptr; };
+Proc           g_lastOwner;                        // the last live owner of the status block (ownerPid is 0 once released)
+std::vector<Proc> g_producers;
 
 HICON MakeDotIcon(COLORREF c) {
     const int s = 32;
@@ -119,8 +131,61 @@ std::wstring NormPath(const std::wstring& p) {
 
 bool Exists(const std::wstring& p) { return GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES; }
 
+// ---- post_when: hold the conversion queue while the game / its VR session is still running
+const char* PostWhenName(PostWhen w) { return w == PostWhen::Now ? "now" : w == PostWhen::SessionEnd ? "session_end" : "game_exit"; }
+
+bool ProcAlive(HANDLE h) { return h && WaitForSingleObject(h, 0) == WAIT_TIMEOUT; }
+
+// Remembers the live owner of the status block (the layer clears ownerPid when it releases the block, so it is cached).
+void TrackOwner(DWORD pid) {
+    if (!pid || pid == g_lastOwner.pid) return;
+    if (g_lastOwner.h) CloseHandle(g_lastOwner.h);
+    g_lastOwner.pid = pid;
+    g_lastOwner.h = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+}
+
+// The recording being queued was made by the last live owner: game_exit waits for that process.
+void AddProducer() {
+    if (!ProcAlive(g_lastOwner.h)) return;
+    for (const Proc& p : g_producers) if (p.pid == g_lastOwner.pid) return;
+    Proc p;
+    p.pid = g_lastOwner.pid;
+    if (!DuplicateHandle(GetCurrentProcess(), g_lastOwner.h, GetCurrentProcess(), &p.h, 0, FALSE, DUPLICATE_SAME_ACCESS)) return;
+    g_producers.push_back(p);
+    LOGI("tray: recording made by pid %lu (post_when = game_exit waits for that process to exit)", (unsigned long)p.pid);
+}
+
+// Drops exited producers; true while one is still alive.
+bool ProducersAlive() {
+    for (auto it = g_producers.begin(); it != g_producers.end();) {
+        if (ProcAlive(it->h)) { ++it; continue; }
+        LOGI("tray: pid %lu (made a queued recording) has exited", (unsigned long)it->pid);
+        CloseHandle(it->h);
+        it = g_producers.erase(it);
+    }
+    return !g_producers.empty();
+}
+
+void ClearProducers() {
+    for (Proc& p : g_producers) CloseHandle(p.h);
+    g_producers.clear();
+}
+
+const wchar_t* HoldReason() { return g_postWhen == PostWhen::SessionEnd ? L"when VR stops" : L"when the game closes"; }
+
+// Computes the hold from post_when and the live status and hands it to the worker (it logs the on / off transitions).
+// Called every tick and right before a recording is queued, so a job can never start in the gap.
+void UpdateHold() {
+    const bool sessionLive = g_live && g_st.state != ECS_NONE;
+    bool hold = false;
+    if (g_postWhen == PostWhen::SessionEnd) hold = sessionLive;
+    else if (g_postWhen == PostWhen::GameExit) hold = ProducersAlive() || sessionLive;
+    g_pp.SetHold(hold, HoldReason());
+}
+
 // Queue a finished recording for post-processing (MP4 only; a no-op when post_mkv, post_flat and post_yt8k are all 0).
 // Non-forced requests are deduplicated by full path for the whole tray session (status message vs fallback scan).
+// Forced requests ("Convert last recording now") ignore post_when: they run at once.
 void QueueRecording(const std::wstring& mp4, bool force) {
     Config cfg;
     LoadConfig(g_exeDir, cfg);
@@ -134,7 +199,11 @@ void QueueRecording(const std::wstring& mp4, bool force) {
         return;
     }
     g_queuedPaths.insert(key);
-    if (g_pp.Enqueue(mp4)) LOGI("tray: queued %s for conversion", elog::Narrow(mp4).c_str());
+    if (!force) {
+        AddProducer();
+        UpdateHold();   // before Enqueue: the worker must see the hold before it can pick the job
+    }
+    if (g_pp.Enqueue(mp4, force)) LOGI("tray: queued %s for conversion%s", elog::Narrow(mp4).c_str(), force ? " (forced: ignores post_when)" : "");
     else LOGI("tray: %s is already queued / running", elog::Narrow(mp4).c_str());
 }
 
@@ -257,6 +326,13 @@ void Refresh() {
     if (read && g_st.ownerPid && EyeCapProcessAlive(g_st.ownerPid) && GetTickCount64() - g_st.heartbeatTick < 3000)
         g_live = true;
     const uint32_t state = g_live ? g_st.state : ECS_NONE;
+    if (g_live) TrackOwner(g_st.ownerPid);
+    {
+        // nothing queued or running: forget the producers (a later recording registers its own)
+        const pp::State js = g_pp.GetState();
+        if (!js.busy && js.queued == 0 && !g_producers.empty()) ClearProducers();
+    }
+    UpdateHold();
 
     // A recording just finished: the layer reports "saved <file>" (it stays in the block even after the game exits).
     // The first read only sets the baseline, so a recording that finished before the tray started is not converted.
@@ -289,7 +365,9 @@ void Refresh() {
     if (state == ECS_READY) idx = 1;
     else if (state == ECS_RECORDING) idx = 2;
     else if (state == ECS_STARTING || state == ECS_STOPPING || state == ECS_FAILED) idx = 3;
-    if (job.busy && idx != 2 && idx != 3) idx = 4;   // converting (red recording / amber transitions keep priority)
+    const bool waiting = job.held && job.queued > 0;   // queued, held by post_when
+    if (job.busy && !job.paused && idx != 2 && idx != 3) idx = 4;   // converting (red recording / amber transitions keep priority)
+    else if (idx == 0 && (job.busy || waiting)) idx = 4;            // paused / waiting while no game is live: still blue
 
     // not registered: the first tooltip line says so (the icon is grey anyway: no game can load the layer from here)
     const bool notReg = g_regEnabled && !RegOk();
@@ -311,15 +389,22 @@ void Refresh() {
     }
     // conversion line: "converting <file> (MKV)..." while a job runs, "last: <file>.mkv ready" after
     std::wstring jobLine;
-    if (job.busy) {
+    if (job.busy && job.paused) {
+        jobLine = L"conversion paused: " + job.file + L" -- resumes " + job.holdReason;
+        if (job.queued) jobLine += L" (+" + std::to_wstring(job.queued) + L" waiting)";
+    } else if (job.busy) {
         jobLine = L"converting " + job.file + L" (" + job.step + L")...";
-        if (job.queued) jobLine += L" +" + std::to_wstring(job.queued) + L" queued";
+        if (job.queued) jobLine += L" +" + std::to_wstring(job.queued) + (job.held ? L" waiting" : L" queued");
+    } else if (waiting) {
+        jobLine = std::to_wstring(job.queued) + (job.queued == 1 ? L" recording waiting" : L" recordings waiting") +
+                  L" -- converts " + job.holdReason;
     } else if (!job.lastLine.empty()) {
         jobLine = job.lastLine;
     }
     static std::wstring s_prevJobLine;
     if (jobLine != s_prevJobLine) { s_prevJobLine = jobLine; LOGI("tray: tooltip job line: %s", elog::Narrow(jobLine).c_str()); }
-    if (idx != g_iconIdx && (idx == 4 || g_iconIdx == 4)) LOGI("tray: icon %s", idx == 4 ? "blue (converting)" : "no longer blue");
+    if (idx != g_iconIdx && (idx == 4 || g_iconIdx == 4))
+        LOGI("tray: icon %s", idx == 4 ? (job.busy && !job.paused ? "blue (converting)" : "blue (waiting to convert)") : "no longer blue");
     wchar_t full[256];
     if (jobLine.empty()) wcsncpy_s(full, tip, _TRUNCATE);
     else if (state == ECS_RECORDING) swprintf_s(full, L"%s\n%s", tip, jobLine.c_str());   // recording info first
@@ -363,6 +448,55 @@ std::wstring SettingsPath() {
     return g_live && g_st.configPath[0] ? std::wstring(g_st.configPath) : ConfigPath(g_exeDir);
 }
 
+// ---- controller / wheel hotkeys (tray/input.h): the Pad: / Joy: bindings of `hotkey`, fired by the tray itself
+std::wstring   g_cfgSeenPath;          // config file + write time the bindings were last loaded from
+FILETIME       g_cfgSeenTime{};
+
+// Poll thread of tray/input.cpp. The main thread only reads the status block; sending a command is safe from here.
+void OnInputFire(const HotkeyBinding& b) {
+    EyeCapShared* shm = g_shm;
+    if (shm && EyeCapProcessAlive(shm->ownerPid) && EyeCapSendCommand(shm, ECC_TOGGLE))
+        LOGI("tray: input %s pressed -> toggle", elog::Narrow(b.text).c_str());
+    else
+        LOGI("tray: input %s pressed but no game is running", elog::Narrow(b.text).c_str());
+}
+
+FILETIME ConfigWriteTime(const std::wstring& path) {
+    WIN32_FILE_ATTRIBUTE_DATA a{};
+    if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &a)) return FILETIME{};
+    return a.ftLastWriteTime;
+}
+
+// (Re)loads config.ini and hands its Pad: / Joy: bindings to the input module (they apply at once; keyboard / mouse
+// bindings are the layer's and need a game restart).
+void ApplyInputBindings(const char* why) {
+    g_cfgSeenPath = ConfigPath(g_exeDir);
+    g_cfgSeenTime = ConfigWriteTime(g_cfgSeenPath);
+    Config cfg;
+    LoadConfig(g_exeDir, cfg);
+    input::SetBindings(cfg.hotkey.bindings);
+    static bool s_postWhenLogged = false;
+    if (!s_postWhenLogged || cfg.postWhen != g_postWhen) {
+        s_postWhenLogged = true;
+        g_postWhen = cfg.postWhen;
+        LOGI("tray: post_when = %s (%s)", PostWhenName(g_postWhen), g_postWhen == PostWhen::Now ? "convert recordings right away"
+             : g_postWhen == PostWhen::SessionEnd ? "convert when no VR session is live" : "convert when the game that made the recording has closed");
+    }
+    std::wstring list;
+    for (const auto& b : cfg.hotkey.bindings)
+        if (b.kind != HotkeyBinding::Kind::Key) list += (list.empty() ? L"" : L", ") + b.text;
+    LOGI("tray: hotkey %s (%s); controller / wheel bindings: %s", elog::Narrow(cfg.hotkey.text).c_str(), why,
+         list.empty() ? "none" : elog::Narrow(list).c_str());
+}
+
+// Cheap check in the 500 ms timer: config.ini edited by hand (or the %APPDATA% copy appeared / went away).
+void CheckConfigChanged() {
+    const std::wstring p = ConfigPath(g_exeDir);
+    const FILETIME t = ConfigWriteTime(p);
+    if (p == g_cfgSeenPath && CompareFileTime(&t, &g_cfgSeenTime) == 0) return;
+    ApplyInputBindings("config.ini changed");
+}
+
 // Settings -> Save: log the changed keys, show "settings saved" in the tooltip for 5 s.
 void OnSettingsSaved(const std::vector<std::wstring>& changed) {
     {
@@ -376,6 +510,7 @@ void OnSettingsSaved(const std::vector<std::wstring>& changed) {
     for (const auto& c : changed) list += (list.empty() ? L"" : L", ") + c;
     LOGI("tray: settings saved to %s: %s", elog::Narrow(SettingsPath()).c_str(),
          changed.empty() ? "no changes" : ("changed " + elog::Narrow(list)).c_str());
+    ApplyInputBindings("settings saved");   // controller / wheel hotkeys apply at once
     g_savedTip = L"settings saved — applies to the next recording";
     g_savedTipUntil = GetTickCount64() + 5000;
     SetTimer(g_wnd, kTipTimer, 5100, nullptr);
@@ -518,7 +653,7 @@ void RegisterFlow(bool fromStart) {
     } else {
         Config cfg;
         LoadConfig(g_exeDir, cfg);
-        if (cfg.hotkey.vk && !cfg.hotkey.text.empty())
+        if (!cfg.hotkey.bindings.empty() && !cfg.hotkey.text.empty())
             Balloon(L"Registered", L"Registered. Start a VR game and press " + cfg.hotkey.text + L" to record.", false);
         else
             Balloon(L"Registered", L"Registered. Start a VR game and use the tray menu to record.", false);
@@ -669,6 +804,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_TIMER:
         if (wp == kTipTimer) { KillTimer(h, kTipTimer); g_savedTip.clear(); Refresh(); LOGI("tray: tooltip restored: %s", elog::Narrow(g_nid.szTip).c_str()); return 0; }
         if (g_regEnabled && !g_regBusy && GetTickCount64() - g_regQueried >= 10000) QueryReg(false);   // cheap registry read
+        CheckConfigChanged();   // one GetFileAttributesEx: controller / wheel hotkeys follow config.ini edits
         Refresh();
         return 0;
     case WM_CHECK_REG:
@@ -685,7 +821,9 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_DESTROY:
         KillTimer(h, kTimer);
-        g_pp.Stop();   // cancels a running ffmpeg and deletes its partial output
+        g_pp.Stop();   // cancels a running ffmpeg (resumed first if held) and deletes its partial output
+        ClearProducers();
+        if (g_lastOwner.h) { CloseHandle(g_lastOwner.h); g_lastOwner = Proc(); }
         Shell_NotifyIconW(NIM_DELETE, &g_nid);
         PostQuitMessage(0);
         return 0;
@@ -740,6 +878,68 @@ int RunRegCli(const std::wstring& arg) {
                                  : std::wstring(L"unregistered: no ") + install::JsonName() + L" value left (HKLM OpenXR implicit layers)";
     LOGI("tray: %s", elog::Narrow(msg).c_str());
     CliPrint(msg);
+    return 0;
+}
+
+// EyeCaptureTray.exe --inputs [seconds]: lists the Xbox controllers and DirectInput game controllers (wheels, pedals,
+// button boxes ...), then for N seconds (default 15) prints every button press as the text the `hotkey` setting takes
+// ("Pad:A", "Joy:Thrustmaster T300RS Racing Wheel:Button3"). Hold several buttons for a combination; the text is printed
+// when you let go. Read-only: nothing is sent to a game, nothing is saved. Keyboard keys are not listed (use the
+// Settings window's "Press a key...").
+int RunInputs(const std::wstring& arg) {
+    unsigned secs = 15;
+    {
+        const std::wstring rest = arg.size() > 8 ? arg.substr(8) : std::wstring();
+        const unsigned v = (unsigned)wcstoul(rest.c_str(), nullptr, 10);
+        if (v > 0 && v <= 3600) secs = v;
+    }
+    g_exeDir = ExeDir();
+    elog::Init(g_exeDir + L"\\logs\\tray.log", false);
+    Config cfg;
+    LoadConfig(g_exeDir, cfg);
+    elog::SetLevel(cfg.logLevel);
+    LOGI("tray: --inputs %u s", secs);
+    input::Start(nullptr);
+    if (!input::WaitReady(10000)) CliPrint(L"(device scan still running after 10 s)");
+    auto describe = [](const std::vector<input::DeviceInfo>& devs) {
+        if (devs.empty()) CliPrint(L"  none found");
+        for (const auto& d : devs) {
+            if (d.kind == L"pad")
+                CliPrint(L"  Xbox / XInput controller in slot " + std::to_wstring(d.index) + L"  -> bindings Pad:<button> or Pad" +
+                         std::to_wstring(d.index) + L":<button>");
+            else if (d.xinputSkipped)
+                CliPrint(L"  \"" + d.name + L"\"  -> XInput device, skipped here (it is read as an Xbox controller: Pad:<button>)");
+            else
+                CliPrint(L"  \"" + d.name + L"\"  " + std::to_wstring(d.buttons) + L" buttons" +
+                         (d.povs ? L", " + std::to_wstring(d.povs) + L" POV hat(s)" : std::wstring()) +
+                         L"  -> bindings Joy:" + d.name + L":Button<n>");
+        }
+    };
+    std::vector<input::DeviceInfo> devs = input::Devices();
+    std::wstring devText = input::DevicesText(devs);
+    CliPrint(L"Game controllers:");
+    describe(devs);
+    CliPrint(L"Current hotkey setting: " + cfg.hotkey.text);
+    CliPrint(L"Press controller / wheel buttons now (hold several for a combination; the text appears when you let go). "
+             L"Listening for " + std::to_wstring(secs) + L" s...");
+    input::SetCapture(true);
+    const ULONGLONG until = GetTickCount64() + secs * 1000ull;
+    while (GetTickCount64() < until) {
+        Sleep(30);
+        std::wstring t;
+        if (input::TakeCaptured(t)) CliPrint(L"  pressed: " + t);
+        const std::vector<input::DeviceInfo> now = input::Devices();
+        const std::wstring nowText = input::DevicesText(now);
+        if (nowText != devText) {
+            devText = nowText;
+            CliPrint(L"Game controllers changed:");
+            describe(now);
+        }
+    }
+    input::SetCapture(false);
+    input::Stop();
+    CliPrint(L"done. Put a printed text into the Settings window's Hotkey field (or config.ini: hotkey = ...), "
+             L"several separated by commas.");
     return 0;
 }
 
@@ -798,6 +998,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
         while (!a.empty() && a.back() == L' ') a.pop_back();
         if (a == L"--start" || a == L"--stop" || a == L"--toggle" || a == L"--status") return RunCli(a);
         if (a == L"--register" || a == L"--unregister") return RunRegCli(a);
+        if (a == L"--inputs" || a.compare(0, 9, L"--inputs ") == 0) return RunInputs(a);
     }
     // Test-only: EYECAP_TRAY_TEST_SHM=<name> runs an extra tray instance on a private status block (no single-instance
     // check, no tray-alive marker), so tests/status_sim.exe can drive it without touching a real game's status.
@@ -874,6 +1075,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     if (install::SyncAutostart(g_exeDir))
         LOGI("tray: start-with-Windows entry pointed at another folder, updated to %s", elog::Narrow(install::AutostartCommand(g_exeDir)).c_str());
     LOGI("tray: start with Windows: %s", install::AutostartEnabled() ? "on" : "off");
+    // controller / wheel hotkeys (Pad: / Joy: bindings): the tray polls them and sends ECC_TOGGLE to the game
+    ApplyInputBindings("start");
+    input::Start(OnInputFire);
     Refresh();
 
     MSG m;
@@ -881,6 +1085,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
         TranslateMessage(&m);
         DispatchMessageW(&m);
     }
+    input::Stop();   // before the status block is unmapped (the poll thread sends commands through it)
     for (HICON i : g_icons) if (i) DestroyIcon(i);
     if (g_shm) UnmapViewOfFile(g_shm);
     if (g_map) CloseHandle(g_map);

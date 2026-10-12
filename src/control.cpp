@@ -30,11 +30,17 @@ void Cue(int kind) {
     }
 }
 
+// True while ANY keyboard / mouse binding of the list is held with exactly its modifiers. Pad: / Joy: bindings are the
+// tray's job (tray/input.cpp sends ECC_TOGGLE); the layer ignores them.
 bool HotkeyDown(const Hotkey& h) {
-    if (!h.vk) return false;
     auto down = [](int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; };
-    if (!down((int)h.vk)) return false;
-    return down(VK_CONTROL) == h.ctrl && down(VK_SHIFT) == h.shift && down(VK_MENU) == h.alt;
+    bool mods = false, ctrl = false, shift = false, alt = false;
+    for (const HotkeyBinding& b : h.bindings) {
+        if (b.kind != HotkeyBinding::Kind::Key || !b.vk || !down((int)b.vk)) continue;
+        if (!mods) { ctrl = down(VK_CONTROL); shift = down(VK_SHIFT); alt = down(VK_MENU); mods = true; }
+        if (ctrl == b.ctrl && shift == b.shift && alt == b.alt) return true;
+    }
+    return false;
 }
 
 uint32_t MapState(const CaptureSnapshot& s) {
@@ -233,7 +239,7 @@ void ControlStart(const Config& cfg, const std::wstring& logPath, const std::wst
         LOGE("control: CreateThread failed -- hotkey and tray control disabled");
         return;
     }
-    LOGI("control: hotkey %s (exact modifiers), tray IPC %s", elog::Narrow(cfg.hotkey.text).c_str(),
+    LOGI("control: hotkey %s (keyboard / mouse: exact modifiers; Pad: / Joy: are read by the tray), tray IPC %s", elog::Narrow(cfg.hotkey.text).c_str(),
          elog::Narrow(s_shmName).c_str());
 }
 

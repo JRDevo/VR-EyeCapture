@@ -7,19 +7,22 @@
 #include <vector>
 #include "dome.h"
 #include "head_smoothing.h"
+#include "hotkey.h"   // Hotkey, ParseHotkey (keyboard / mouse / XInput pad / DirectInput bindings)
 #include "log.h"
 
-struct Hotkey {
-    unsigned vk = 0;          // virtual-key code of the main key
-    bool ctrl = false, shift = false, alt = false;
-    std::wstring text;        // normalised, e.g. "Ctrl+Shift+F10"
-};
-
-// "Ctrl+Shift+F10", "Alt+R", "Ctrl+Numpad5", "F9", "none" ... Modifiers must match exactly when pressed.
-// "none" yields vk = 0 (hotkey disabled; the tray app still works).
-bool ParseHotkey(const std::wstring& s, Hotkey& out);
 
 enum class GammaMode { Auto, Srgb, Linear };
+// layout_3d: 3D layout of the files the tray makes from a flat recording (.mkv, 8K copy). tb_half = top-bottom half =
+// YouTube's format; sbs_full = the recording as it is (the .mkv is then a plain remux). The recording itself is always full SBS.
+enum class Layout3d { TbHalf, SbsHalf, SbsFull, TbFull };
+// eye_crop: before scaling, each eye of a flat recording that is TALLER than this aspect is centre-cropped (vertically) to it.
+// Flat SBS eyes are often taller than wide (4096x4630); a tall top/bottom video crashes the Quest YouTube player and YouTube
+// caps it at 2160p. Wide169 (default) = 16:9 (8K frame 7680x4320), Std43 = 4:3 (5760x4320), None = keep the full eye.
+enum class EyeCrop { Wide169, Std43, None };
+// post_when: when the tray converts a finished recording. now = at once; session_end = once no OpenXR session is live
+// (the game left VR / destroyed its session); game_exit (default) = once the game process that made it has exited and no
+// OpenXR game is live. "Convert last recording now" from the tray menu always runs at once.
+enum class PostWhen { Now, SessionEnd, GameExit };
 
 // In-headset recording indicator ([indicator] section; see indicator.h).
 struct IndicatorSettings {
@@ -42,11 +45,15 @@ struct Config {
     GammaMode    gamma = GammaMode::Auto;
     bool         requireTray = true;     // require_tray: layer stays dormant unless EyeCaptureTray.exe is running
     bool         swapEyes = false;       // swap_eyes: put the right eye in the left half (for players that flip SBS)
+    bool         recordOverlays = true;  // record_overlays: composite the game's / mods' overlay layers into the recording
     // Post-processing, done by EyeCaptureTray.exe after each recording (the layer parses but ignores these).
-    bool         postMkv = true;         // post_mkv: remux the MP4 to <name>.mkv with Matroska stereo_mode=left_right
+    bool         postMkv = true;         // post_mkv: remux (sbs_full) or re-encode (other layout_3d) the MP4 to <name>.mkv with the Matroska stereo_mode tag
     bool         keepMp4 = false;        // keep_mp4: keep the MP4 after a verified MKV (and flat) conversion
     bool         postFlat = false;       // post_flat: also write <name>_FLAT.mp4 (left eye, 16:9, 3840 wide)
-    bool         postYt8k = false;       // post_yt8k: also write <name>_YT8K.mkv (flat SBS only: each eye in a 3840x4320 box, 7680x4320)
+    bool         postYt8k = false;       // post_yt8k: also write <name>_YT8K.mkv (flat SBS only; layout per layout_3d)
+    PostWhen     postWhen = PostWhen::GameExit;  // post_when = now | session_end | game_exit (tray only)
+    Layout3d     layout3d = Layout3d::TbHalf;   // layout_3d = tb_half | sbs_half | sbs_full | tb_full (tray only; flat recordings)
+    EyeCrop      eyeCrop = EyeCrop::Wide169;     // eye_crop = 16:9 | 4:3 | none (tray only; flat recordings)
     std::wstring ffmpegPath;             // ffmpeg_path: empty = PATH, then WinGet packages, then <dll folder>\ffmpeg\ffmpeg.exe
     IndicatorSettings indicator;         // vr_indicator, indicator_x/_y/_z, indicator_size, indicator_opacity
     HeadSmoothingSettings head;          // head_smoothing, head_follow_deg, roll_lock, output_fov_scale, edge_guard, symmetric_fov

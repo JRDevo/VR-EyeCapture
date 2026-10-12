@@ -1,11 +1,13 @@
 // status_sim -- plays the layer's side of the tray IPC without a game or a GPU: publishes ready -> recording -> stopping ->
 // "saved <file>" for each MP4 given, so EyeCaptureTray.exe's post-processing can be tested.
 //
-//   status_sim.exe <shm name> <seconds to stay alive after the last file> [--vanish] [--outdir <dir>] <file.mp4> [more.mp4 ...]
+//   status_sim.exe <shm name> <seconds to stay alive after the last file> [--vanish] [--linger <s>] [--outdir <dir>] <file.mp4> [more.mp4 ...]
 //
 //   --vanish   the game quits right after the recording: ~50 ms after publishing "saved <file>" ownerPid / state are cleared
 //              (message + file stay), like the layer's shutdown path. Tests that the tray still queues the conversion.
 //   --outdir   publish <dir> as the captures folder (outputDir) in the block.
+//   --linger <s>  after releasing the block at the end (ownerPid 0, ECS_NONE: the layer's "session destroyed" state),
+//              keep the process alive for <s> more seconds -- a game that left VR but is still running (post_when tests).
 //
 // Use a private block name (the tray reads it when started with the environment variable EYECAP_TRAY_TEST_SHM=<name>),
 // e.g. Local\EyeCapture-Test-Status. Refuses to touch the real block (a real game's status).
@@ -37,15 +39,17 @@ static void Hold(EyeCapShared* s, int ms) {   // keep the heartbeat fresh
 }
 
 int wmain(int argc, wchar_t** argv) {
-    if (argc < 3) { fwprintf(stderr, L"usage: status_sim <shm name> <hold seconds> [--vanish] [--outdir <dir>] [file.mp4 ...]\n"); return 2; }
+    if (argc < 3) { fwprintf(stderr, L"usage: status_sim <shm name> <hold seconds> [--vanish] [--linger <s>] [--outdir <dir>] [file.mp4 ...]\n"); return 2; }
     if (wcscmp(argv[1], EYECAP_SHM_NAME) == 0) { fwprintf(stderr, L"refusing to use the real status block\n"); return 2; }
     HANDLE map = nullptr;
     EyeCapShared* s = EyeCapOpenShared(&map, argv[1]);
     if (!s) { fwprintf(stderr, L"cannot open the shared block\n"); return 3; }
     bool vanish = false;
+    int linger = 0;
     int first = 3;
     for (; first < argc; ++first) {
         if (wcscmp(argv[first], L"--vanish") == 0) vanish = true;
+        else if (wcscmp(argv[first], L"--linger") == 0 && first + 1 < argc) linger = _wtoi(argv[++first]);
         else if (wcscmp(argv[first], L"--outdir") == 0 && first + 1 < argc) { EyeCapCopy(s->outputDir, 260, argv[++first]); }
         else break;
     }
@@ -79,6 +83,11 @@ int wmain(int argc, wchar_t** argv) {
     s->ownerPid = 0;
     s->state = ECS_NONE;
     EyeCapEndWrite(s);
+    if (linger > 0) {
+        wprintf(L"released the block; lingering %d s\n", linger);
+        fflush(stdout);
+        Sleep((DWORD)linger * 1000);
+    }
     UnmapViewOfFile(s);
     CloseHandle(map);
     return 0;

@@ -53,6 +53,20 @@ struct EyeView {
     float                fov[4] = {0, 0, 0, 0};           // angleLeft, angleRight, angleUp, angleDown (radians)
 };
 
+// record_overlays: one overlay sub-image to copy into this frame's slot of the overlay atlas of its format family
+// (src/overlay.h). One atlas per family: RGBA8, BGRA8, BGRX8, RGB10A2, RGBA16F, R11G11B10F (OverlayFamily()).
+const int kOverlayFamilies = 6;
+struct OverlayCopy {
+    void*                image = nullptr;   // ID3D11Texture2D* / ID3D12Resource* (MSAA images are resolved first)
+    const SwapchainInfo* sc = nullptr;
+    const void*          scKey = nullptr;   // swapchain identity: MSAA resolve target cache
+    int                  family = 0;        // which atlas (same copy family as the image)
+    uint32_t             arrayIndex = 0;
+    int32_t              x = 0, y = 0;      // source rectangle (already clipped to the image)
+    uint32_t             w = 0, h = 0;
+    uint32_t             dstX = 0, dstY = 0;   // where it goes in the atlas
+};
+
 // The ring as the encoder device sees it.
 struct SharedRing {
     std::vector<ComPtr<ID3D11Texture2D>> tex;   // opened / created on the encoder device
@@ -74,9 +88,19 @@ public:
     virtual bool CreateRing(ID3D11Device* encDev, UINT w, UINT h, DXGI_FORMAT fmt, UINT count, SharedRing& out) = 0;
     // Game thread (inside xrEndFrame): GPU-wait free >= waitFree, copy L to (0,0) and R to (dstXRight,0) of slot,
     // signal ready. Returns the ready fence value of this frame, or 0 if nothing was submitted (frame dropped).
-    // The caller has already clipped the eye rectangles to the slot.
-    virtual uint64_t CopyEyes(UINT slot, const EyeView& L, const EyeView& R, UINT dstXRight, uint64_t waitFree) = 0;
-    // Encoder worker thread, after the game thread has stopped calling CopyEyes: wait for the last copy, release.
+    // The caller has already clipped the eye rectangles to the slot. record_overlays: `ov` (n = nOv) are copied into the
+    // slot's overlay atlas of their family in the same submission (MSAA ones resolved first; a copy whose family's
+    // atlas CreateOverlayAtlas has not made yet is ignored).
+    virtual uint64_t CopyEyes(UINT slot, const EyeView& L, const EyeView& R, UINT dstXRight, uint64_t waitFree,
+                              const OverlayCopy* ov = nullptr, UINT nOv = 0) = 0;
+    // Encoder worker thread, record_overlays: one shared atlas texture per ring slot (same count / index as the ring) for
+    // format family `family` (once per family and ring), typed (UNORM / float) format `format`, w x h, shared between the
+    // game and encoder devices (out = the encoder side). Called while the game thread may be inside CopyEyes: the game
+    // side starts using that family's atlas only after it returns.
+    virtual bool CreateOverlayAtlas(ID3D11Device* encDev, UINT w, UINT h, DXGI_FORMAT format, UINT count, int family,
+                                    std::vector<ComPtr<ID3D11Texture2D>>& out) = 0;
+    // Encoder worker thread, after the game thread has stopped calling CopyEyes: wait for the last copy, release
+    // (the ring and the overlay atlas).
     virtual void DestroyRing() = 0;
     // Game thread: a swapchain was destroyed; drop caches keyed on it.
     virtual void ForgetSwapchain(const void* swapchainKey) = 0;

@@ -24,6 +24,7 @@
 #include "dome.h"
 #include "frame_source.h"
 #include "head_smoothing.h"
+#include "overlay.h"
 
 struct RecorderSettings {
     std::wstring path;               // output .mp4
@@ -65,8 +66,10 @@ public:
     bool Start(IFrameSource* src, const RecorderSettings& s, UINT w, UINT h, UINT leftWidth, DXGI_FORMAT fmt, bool srgbEncoded);
     // Game thread. ts100ns = presentation time on the QPC clock (100-ns units). L/R are clipped here.
     // displayTimeNs = the frame's XrFrameEndInfo::displayTime (head smoothing dt); 0 = derive from ts100ns.
-    // Returns true if the frame was queued.
-    bool SubmitFrame(int64_t ts100ns, const EyeView& L, const EyeView& R, int64_t displayTimeNs = 0);
+    // ov (record_overlays): this frame's overlay layers, back to front, composited into the recorded eyes (overlay.h);
+    // nullptr / n = 0 = none (no overlay work at all). Returns true if the frame was queued.
+    bool SubmitFrame(int64_t ts100ns, const EyeView& L, const EyeView& R, int64_t displayTimeNs = 0,
+                     const OverlayFrame* ov = nullptr);
     void Stop();                        // async; any thread
     bool WaitIdle(DWORD ms);            // waits for the worker to finish (finalize + st3d)
     RecState State() const { return state_.load(); }

@@ -272,8 +272,11 @@ struct Recorder::Impl {
     bool ringCreated = false;
 
     // CPU side of the ring
-    struct ItemEye { bool valid; float q[4]; float fov[4]; UINT x0, w, h; };
-    struct Item { UINT slot; uint64_t ready; int64_t ts; int64_t disp; ItemEye eye[2]; };
+    struct ItemEye { bool valid; float q[4]; float p[3]; float fov[4]; UINT x0, w, h; };
+    struct Item {
+        UINT slot; uint64_t ready; int64_t ts; int64_t disp; ItemEye eye[2];
+        uint32_t nOv, nBehind; bool projUnpremul; OverlayDraw ov[kMaxOverlays];   // record_overlays (ov[0 .. nBehind) behind the projection)
+    };
     std::mutex qm;
     std::condition_variable qcv;
     std::deque<Item> queue;
@@ -324,6 +327,15 @@ struct Recorder::Impl {
     ComPtr<ID3D11RenderTargetView> domeRtv[2], domeTimeRtv[2];
     ComPtr<ID3D11ShaderResourceView> domeSrv[2], domeTimeSrv[2];
     uint64_t domePainted = 0, domeNoPose = 0;
+    // record_overlays (overlay.h): one atlas per format family, created by the worker at the first frame that has a
+    // layer of that family (bit f = OverlayFamily f)
+    std::atomic<uint32_t> ovWantMask{0}, ovReadyMask{0}, ovFailedMask{0};
+    std::vector<ComPtr<ID3D11Texture2D>> ovAtlas[kOverlayFamilies];
+    OverlayCompositor ovComp;
+    std::atomic<uint64_t> ovLayersIn{0}, ovNotReady{0}, ovFull{0}, ovSetupFailed{0}, ovBehind{0};   // game thread counts
+    uint64_t ovFrames = 0, ovDraws = 0;    // worker
+    bool ovLoggedFull = false, ovLoggedFirst = false;   // game thread / worker (one each)
+    void InitOverlays();
     // smoothing stats (worker thread only)
     uint64_t smFrames = 0, smGuarded = 0, smUncovered = 0, smCatch = 0, smNoPose = 0, smResets = 0, gpuN = 0;
     double smCorrSum = 0, smCorrMax = 0, gpuSum = 0, gpuMax = 0, cpuSum = 0, cpuMax = 0;
@@ -414,6 +426,9 @@ bool Recorder::Start(IFrameSource* src, const RecorderSettings& s, UINT w, UINT 
     m.domeClear = false;
     m.domeCur = 0;
     m.domePainted = m.domeNoPose = 0;
+    m.ovWantMask = 0; m.ovReadyMask = 0; m.ovFailedMask = 0;
+    m.ovLayersIn = 0; m.ovNotReady = 0; m.ovFull = 0; m.ovSetupFailed = 0; m.ovBehind = 0; m.ovFrames = 0; m.ovDraws = 0;
+    m.ovLoggedFull = m.ovLoggedFirst = false;
     m.sym = SymmetricFov();
     if (!m.dome.valid && s.head.symmetricFov && s.startFovValid)
         m.sym = ComputeSymmetricFov(s.startFov[0], s.startFov[1], s.startEyeW[0], s.startEyeH[0], s.startEyeW[1], s.startEyeH[1]);
@@ -433,7 +448,7 @@ bool Recorder::Start(IFrameSource* src, const RecorderSettings& s, UINT w, UINT 
     return true;
 }
 
-bool Recorder::SubmitFrame(int64_t ts, const EyeView& L, const EyeView& R, int64_t displayTimeNs) {
+bool Recorder::SubmitFrame(int64_t ts, const EyeView& L, const EyeView& R, int64_t displayTimeNs, const OverlayFrame* ov) {
     Impl& m = *impl_;
     m.gameBusy.fetch_add(1);
     struct Guard { std::atomic<int>& c; ~Guard() { c.fetch_sub(1); } } guard{m.gameBusy};
@@ -460,7 +475,66 @@ bool Recorder::SubmitFrame(int64_t ts, const EyeView& L, const EyeView& R, int64
     l.h = std::min<uint32_t>(l.h, m.H);
     r.w = std::min<uint32_t>(r.w, m.W - m.leftW);
     r.h = std::min<uint32_t>(r.h, m.H);
-    const uint64_t ready = m.src->CopyEyes(slot, l, r, m.leftW, waitFree);
+    // record_overlays: pack this frame's overlay sub-images into the slot's atlas of their format family (shelf packing
+    // per family, identical sub-images once, a cube layer's 6 faces as one 3 x 2 block). Nothing at all happens without
+    // overlays. Layers of a family whose atlas the worker has not made yet are only counted (and the atlas requested).
+    OverlayCopy copies[kMaxOverlayCopies];
+    OverlayDraw draws[kMaxOverlays];
+    UINT nCopy = 0;
+    uint32_t nDraw = 0, nDrawBehind = 0;
+    if (ov && ov->n) {
+        const uint32_t n = std::min<uint32_t>(ov->n, kMaxOverlays);
+        m.ovLayersIn += n;
+        const uint32_t readyMask = m.ovReadyMask.load(std::memory_order_acquire), failedMask = m.ovFailedMask.load();
+        struct Shelf { UINT cx = 0, cy = 0, rowH = 0; } shelf[kOverlayFamilies];
+        const UINT A = kOverlayAtlasSize;
+        for (uint32_t i = 0; i < n; ++i) {
+            const OverlayLayer& la = ov->layer[i];
+            if (la.family < 0 || la.family >= kOverlayFamilies) continue;
+            const uint32_t bit = 1u << la.family;
+            if (failedMask & bit) { ++m.ovSetupFailed; continue; }
+            if (!(readyMask & bit)) { m.ovWantMask.fetch_or(bit); ++m.ovNotReady; continue; }
+            const bool cube = la.kind == OverlayKind::Cube;
+            const UINT bw = cube ? 3 * la.w : la.w, bh = cube ? 2 * la.h : la.h, nc = cube ? 6 : 1;
+            OverlayDraw& d = draws[nDraw];
+            d.l = la;
+            bool placed = false;
+            for (uint32_t j = 0; j < nDraw && !placed; ++j) {   // the same sub-image again (e.g. one per eye): reuse it
+                const OverlayLayer& o = draws[j].l;
+                if (o.image == la.image && o.arrayIndex == la.arrayIndex && o.x == la.x && o.y == la.y && o.w == la.w &&
+                    o.h == la.h && (o.kind == OverlayKind::Cube) == cube) {
+                    d.ax = draws[j].ax; d.ay = draws[j].ay; placed = true;
+                }
+            }
+            if (!placed) {
+                Shelf& s = shelf[la.family];
+                if (s.cx + bw > A) { s.cx = 0; s.cy += s.rowH; s.rowH = 0; }
+                if (bw > A || s.cy + bh > A || nCopy + nc > kMaxOverlayCopies) {
+                    ++m.ovFull;
+                    if (!m.ovLoggedFull) {
+                        m.ovLoggedFull = true;
+                        LOGW("recorder: overlay sub-image %ux%u (%s) does not fit the %ux%u %s overlay atlas next to this frame's "
+                             "other overlays -- not recorded on such frames", bw, bh, OverlayKindName(la.kind), A, A,
+                             OverlayFamilyName(la.family));
+                    }
+                    continue;
+                }
+                d.ax = s.cx; d.ay = s.cy;
+                for (UINT f = 0; f < nc; ++f) {
+                    OverlayCopy& c = copies[nCopy++];
+                    c.image = la.image; c.sc = la.sc; c.scKey = la.scKey; c.family = la.family;
+                    c.arrayIndex = la.arrayIndex + f;
+                    c.x = la.x; c.y = la.y; c.w = la.w; c.h = la.h;
+                    c.dstX = s.cx + (f % 3) * la.w; c.dstY = s.cy + (f / 3) * la.h;
+                }
+                s.cx += bw;
+                s.rowH = std::max(s.rowH, bh);
+            }
+            if (la.behind) { ++nDrawBehind; ++m.ovBehind; }   // behind layers come first in ov->layer
+            ++nDraw;
+        }
+    }
+    const uint64_t ready = m.src->CopyEyes(slot, l, r, m.leftW, waitFree, nCopy ? copies : nullptr, nCopy);
     if (!ready) {
         m.FreeSlot(slot, 0, false);
         ++m.dropGpu;
@@ -472,7 +546,11 @@ bool Recorder::SubmitFrame(int64_t ts, const EyeView& L, const EyeView& R, int64
     m.lastTs = ts;
     Impl::Item item{};
     item.slot = slot; item.ready = ready; item.ts = ts; item.disp = disp;
-    if (m.stage) {
+    item.nOv = nDraw;
+    item.nBehind = nDrawBehind;
+    item.projUnpremul = ov && ov->projUnpremultiplied;
+    for (uint32_t i = 0; i < nDraw; ++i) item.ov[i] = draws[i];
+    if (m.stage || nDraw) {
         const EyeView* ev[2] = {&l, &r};
         const UINT x0[2] = {0, m.leftW};
         for (int e = 0; e < 2; ++e) {
@@ -485,6 +563,7 @@ bool Recorder::SubmitFrame(int64_t ts, const EyeView& L, const EyeView& R, int64
             ok = ok && v.fov[0] < v.fov[1] && v.fov[3] < v.fov[2];
             ie.valid = ok;
             memcpy(ie.q, v.orientation, sizeof(ie.q));
+            memcpy(ie.p, v.position, sizeof(ie.p));
             memcpy(ie.fov, v.fov, sizeof(ie.fov));
         }
     }
@@ -631,6 +710,14 @@ void Recorder::Impl::Run() {
              hasAudio ? "AAC" : "none", (unsigned long long)audioFrames.load(), audioFrames.load() / 48000.0,
              HrText(fhr).c_str(), st3dReport.c_str());
     if (fileOk) LOGI("%s", sum); else LOGE("%s", sum);
+    if (ovLayersIn.load())
+        LOGI("overlay summary: %llu frames with overlays composited (%llu layer x eye draws) | layers handed over %llu "
+             "(%llu behind the projection layer): before their atlas existed %llu, atlas full %llu, atlas setup failed %llu "
+             "| atlases: 0x%x%s",
+             (unsigned long long)ovFrames, (unsigned long long)ovDraws, (unsigned long long)ovLayersIn.load(),
+             (unsigned long long)ovBehind.load(), (unsigned long long)ovNotReady.load(), (unsigned long long)ovFull.load(),
+             (unsigned long long)ovSetupFailed.load(), (unsigned)ovReadyMask.load(),
+             ovFailedMask.load() ? " | an atlas / compositor setup FAILED" : "");
     if (stage && dome.valid) {
         LOGI("re-projection summary (dome %s, fill %s): %llu frames | dome: %llu frames painted, %llu frames without pose | "
              "D yaw %+.2f deg%s | re-projection %ux%u: GPU %.3f ms avg, %.3f ms max (%llu samples), worker CPU %.3f ms avg, "
@@ -1307,12 +1394,48 @@ void Recorder::Impl::LogTransforms() {
     }
 }
 
+// record_overlays: the per-slot overlay atlas (through the frame source: shared with the game device) + the compositor.
+// Worker thread, at the first frame after the game thread saw an overlay layer; the frames before are recorded without
+// their overlays (counted as "atlas not ready"). A failure switches overlays off for this recording.
+void Recorder::Impl::InitOverlays() {
+    const uint32_t want = ovWantMask.load() & ~(ovReadyMask.load() | ovFailedMask.load());
+    if (!want) return;
+    // view / shader / texture creation is free-threaded: nothing touches the immediate context here
+    if (!ovComp.Ready() && !ovComp.Init(enc.Get(), ring.tex, fmt, srgb)) {
+        ovFailedMask.fetch_or((1u << kOverlayFamilies) - 1);
+        LOGE("recorder: overlay compositor setup failed -- overlays are not recorded in this recording");
+        return;
+    }
+    const UINT A = kOverlayAtlasSize;
+    for (int f = 0; f < kOverlayFamilies; ++f) {
+        const uint32_t bit = 1u << f;
+        if (!(want & bit)) continue;
+        // typed member of the family (D3D11 cannot open a TYPELESS D3D12 shared resource; the shader decodes sRGB itself)
+        const DXGI_FORMAT typed = OverlayFamilyFormat(f);
+        const bool ok = typed != DXGI_FORMAT_UNKNOWN && src->CreateOverlayAtlas(enc.Get(), A, A, typed, kRingSize, f, ovAtlas[f]) &&
+                        ovComp.AddAtlas(f, ovAtlas[f], typed);
+        if (!ok) {
+            ovFailedMask.fetch_or(bit);
+            LOGE("recorder: overlay atlas setup failed (%s) -- layers of that format family are not recorded in this recording",
+                 DxgiFormatName(typed));
+            continue;
+        }
+        const double mb = (double)A * A * OverlayFamilyBytes(f) * kRingSize / (1024.0 * 1024.0);
+        LOGI("recorder: overlays: %s atlas %ux%u %s x %u ring slots (+%.0f MB VRAM, shared with the game device) + compositor on "
+             "the encoder device; blended in %s into the ring before %s", OverlayFamilyName(f), A, A, DxgiFormatName(typed),
+             kRingSize, mb, srgb ? "linear light (sRGB decode / encode in the shader)" : "linear light",
+             stage ? "the re-projection / dome pass" : "the encoder");
+        ovReadyMask.fetch_or(bit, std::memory_order_release);
+    }
+}
+
 void Recorder::Impl::Process(const Item& it) {
     if (!loggedFirst) {
         loggedFirst = true;
         LOGI("recorder: first video frame (t = 0 in the file): displayTime %lld ns", (long long)t0Disp.load());
     }
     encCtx4->Wait(ring.ready.Get(), it.ready);
+    if (ovWantMask.load() & ~(ovReadyMask.load() | ovFailedMask.load())) InitOverlays();   // a new overlay format family
 
     // head smoothing, CPU part: filter + per-eye re-projection constants (before taking the device lock)
     RpConstants rc{};
@@ -1372,6 +1495,28 @@ void Recorder::Impl::Process(const Item& it) {
     // Exclusive use of the encoder device's immediate context against the MF components that share it.
     ComPtr<ID3D11Device> locked;
     const bool haveLock = devHandle && SUCCEEDED(devMgr->LockDevice(devHandle, IID_PPV_ARGS(&locked), TRUE));
+    // record_overlays: the overlay layers onto OUR copy of the eyes (the ring slot), before every other pass
+    if (it.nOv && ovComp.Ready()) {
+        OverlayEye oe[2];
+        for (int e = 0; e < 2; ++e) {
+            const ItemEye& ie = it.eye[e];
+            oe[e].valid = ie.valid;
+            memcpy(oe[e].q, ie.q, sizeof(oe[e].q));
+            memcpy(oe[e].p, ie.p, sizeof(oe[e].p));
+            memcpy(oe[e].fov, ie.fov, sizeof(oe[e].fov));
+            oe[e].x0 = ie.x0; oe[e].w = ie.w; oe[e].h = ie.h;
+        }
+        const int nd = ovComp.Draw(encCtx.Get(), it.slot, oe, it.ov, it.nOv, it.nBehind, it.projUnpremul);
+        if (nd) {
+            ++ovFrames;
+            ovDraws += (uint64_t)nd;
+            if (!ovLoggedFirst) {
+                ovLoggedFirst = true;
+                LOGI("recorder: first frame with overlays composited (%u layer(s), %d eye draws) at t = %.3f s", it.nOv, nd,
+                     (double)(it.ts - t0.load()) / 1e7);
+            }
+        }
+    }
     ID3D11VideoProcessorInputView* view = nullptr;
     ID3D11ShaderResourceView* rpSrc = nullptr;
     if (!srgb) {
@@ -1510,6 +1655,8 @@ void Recorder::Impl::Cleanup() {
     devHandle = nullptr;
     inViews.clear();
     localCopies.clear();
+    ovComp.Release();
+    for (auto& a : ovAtlas) a.clear();   // ovReadyMask stays for the summary line; Start resets it
     linView.Reset(); linUav.Reset(); linTex.Reset(); linSrv.clear(); linCs.Reset();
     rpView.Reset(); rpRtv.Reset(); rpTex.Reset(); rpRingSrv.clear(); rpLinSrv.Reset(); rpQ.clear();
     rpCb.Reset(); rpSmp.Reset(); rpVs.Reset(); rpPs.Reset();

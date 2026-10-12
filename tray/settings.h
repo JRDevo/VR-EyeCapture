@@ -29,7 +29,8 @@ KeyValues FromConfig(const Config& c);
 bool SaveKeyValuesToFile(const std::wstring& path, const KeyValues& kv, SaveResult& r);
 bool SaveSettingsToFile(const std::wstring& path, const Config& c, SaveResult& r);
 
-// Virtual key + modifiers -> the text ParseHotkey accepts ("Ctrl+Shift+F10"). False for keys it cannot name.
+// Virtual key + modifiers -> the text ParseHotkey accepts ("Ctrl+Shift+F10", "MouseX1", "Key0xE5"). False only for Escape,
+// the modifier / Windows keys themselves and vk 0. Same table as KeyBindingText (src/hotkey.h).
 bool HotkeyText(unsigned vk, bool ctrl, bool shift, bool alt, std::wstring& out);
 
 // Error reporting goes through one function: MessageBox by default; tests redirect it (tray: EYECAP_TRAY_TEST_SHM).
@@ -51,7 +52,12 @@ enum : int {
     ID_INDX, ID_INDY, ID_INDZ,  // indicator position (appended after ID_HELPTEXT for the same reason)
     ID_POSTYT8K,                // hidden check bound to post_yt8k (appended for the same reason)
     ID_YTMODE,                  // "Make for YouTube" drop-down: drives the hidden ID_POSTMKV / ID_POSTYT8K checks
-    ID_AUTOSTART                // "Start with Windows" check (HKCU Run key, not a config.ini key; appended: existing ids do not move)
+    ID_AUTOSTART,               // "Start with Windows" check (HKCU Run key, not a config.ini key; appended: existing ids do not move)
+    ID_LAYOUT3D,              // "3D layout of the YouTube copy" drop-down bound to layout_3d (appended: existing ids do not move)
+    ID_HOTKEY_ADD,              // "Add another...": captures a binding and appends it to the hotkey list (appended for the same reason)
+    ID_POSTWHEN,                // "Convert recordings" drop-down bound to post_when (appended for the same reason)
+    ID_EYECROP,                 // "Crop each eye" drop-down bound to eye_crop (appended for the same reason)
+    ID_OVERLAYS                 // "Record overlays" check bound to record_overlays (appended for the same reason)
 };
 extern const wchar_t* const kWindowTitle;
 
