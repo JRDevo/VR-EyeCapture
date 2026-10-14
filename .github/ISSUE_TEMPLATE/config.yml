@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Download (Releases page)
+    url: https://github.com/JRDevo/OpenXR-EyeCapture/releases
+    about: The only place to download the tool. Always try the latest version before reporting a problem.
+  - name: Troubleshooting guide
+    url: https://github.com/JRDevo/OpenXR-EyeCapture#log-and-troubleshooting
+    about: Common problems and what the log lines mean.

@@ -1,0 +1,75 @@
+name: Bug report
+description: Something does not record, crashes, or looks wrong in the video.
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. **Without the three log / config files below I usually cannot tell what happened**, so please attach them.
+        They are in the tool's folder (next to `eye_capture.dll`).
+        **Privacy:** the logs contain folder paths with your Windows user name. Open them and check (or edit them) before uploading.
+  - type: input
+    id: version
+    attributes:
+      label: Tool version
+      description: The name of the zip you downloaded, e.g. `OpenXR-EyeCapture-v0.2.0.zip`.
+    validations:
+      required: true
+  - type: input
+    id: game
+    attributes:
+      label: Game
+      description: Which game, and was it started with `-openxr`?
+      placeholder: "Game name, started with -openxr (if the game needs that switch)"
+    validations:
+      required: true
+  - type: input
+    id: headset
+    attributes:
+      label: Headset and runtime
+      placeholder: "Quest 3 via Virtual Desktop (VDXR) / Quest Link / SteamVR / ..."
+    validations:
+      required: true
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU and driver version
+      placeholder: "RTX 4070, driver 580.xx"
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      placeholder: "Windows 11 24H2"
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What did you do, and what happened?
+      description: What you pressed, which beeps you heard, the tray icon colour, what the video looks like.
+    validations:
+      required: true
+  - type: textarea
+    id: mods
+    attributes:
+      label: Other OpenXR layers or mods in use
+      placeholder: "OpenXR Toolkit, other API layers, overlays, ..."
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and config (drag the files in here)
+      description: "Attach logs\eye_capture.log, logs\tray.log and config.ini. GitHub does not accept .log / .ini drops directly: rename them to .txt or zip them first."
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before you send
+      options:
+        - label: I use the latest version from the Releases page of this repository (not a copy from somewhere else).
+          required: true
+        - label: I checked the logs for my user name / private paths before attaching them.
+          required: true

@@ -1,0 +1,21 @@
+name: Feature request
+description: Suggest a new option, game, runtime or workflow.
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What do you want to do that you cannot do now?
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: How should it work?
+      description: A hotkey, a Settings option, a new output file, ...
+  - type: input
+    id: setup
+    attributes:
+      label: Your setup
+      placeholder: "Game, headset, runtime, GPU"
