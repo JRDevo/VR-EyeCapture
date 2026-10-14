@@ -492,7 +492,7 @@ Without the logs I usually can't tell what happened.
 
 ## License and credits
 
-**This tool** — [PolyForm Noncommercial License 1.0.0](LICENSE.md), Copyright (c) 2026 JRDevo (same license as the ETS2 / ATS DLAA + DLSS injector mod).
+**This tool** — [PolyForm Noncommercial License 1.0.0](LICENSE.md), Copyright (c) 2026 JRDevo.
 
 - Free to use, copy, change and share for **noncommercial** purposes.
 - **No commercial use** (no selling, no paid bundles) without written permission.
