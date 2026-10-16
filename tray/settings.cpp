@@ -459,6 +459,7 @@ namespace {
 HWND                g_dlg = nullptr;
 HWND                g_tip = nullptr;            // the tooltip window (owned by the dialog)
 HFONT               g_font = nullptr;
+HFONT               g_logoFont = nullptr;      // the bold wordmark font of the logo (ID_LOGO): the message font at 20 px, FW_BOLD
 HWND                g_hover = nullptr;          // the control the help panel last followed (mouse or keyboard focus)
 const wchar_t*      g_shown = nullptr;          // the text now in the help panel (pointer compare: no flicker)
 std::wstring        g_path;
@@ -480,8 +481,19 @@ int                 g_contentH = 0;         // client height of the content abov
 int                 g_footerH = 0;
 int                 g_viewH = 0;            // visible content height when the window is shorter than the content (scrolling)
 int                 g_scrollY = 0, g_scrollMax = 0;   // scroll offset / its maximum (0 = nothing to scroll)
-const int           kClientW = 1140;         // client width of the window
+std::vector<HWND>   g_made;                 // every control made by Builder::Make, in creation order (the Move pass walks it)
+int                 g_helpMinH = 0;         // height of the help edit that shows the longest help text without cut (MeasureHelp)
+int                 g_helpPad = 0;          // help edit client height minus its default formatting rectangle height
+int                 g_naturalH = 0;         // content height with the help edit at g_helpMinH (independent of the window size)
+size_t              g_contentEnd = 0;       // g_made index of the first footer control (set by the Create pass)
+bool                g_footerRaised = false; // the footer is above the content in the z-order (only while scrolling)
+const int           kLayoutW = 1140;        // the narrowest layout: client width without the scroll bar
+const int           kMinClientH = 400;      // minimum client height (the content scrolls below its natural height)
+const int           kFooterH = 64;
 const int           kFooterBgId = 3001;     // opaque owner-drawn strip behind the footer buttons
+// The client is never narrower than kLayoutW, even with the vertical scroll bar shown.
+int MinClientW() { return kLayoutW + GetSystemMetrics(SM_CXVSCROLL); }
+void Relayout();
 
 
 // ---- help texts: hover tooltip + the "Description" panel. Product-documentation style: short, neutral, complete sentences.
@@ -963,6 +975,111 @@ void UpdateFreeSpace() {
 
 void UpdateLayoutPreview() {
     if (g_dlg && Ctl(ID_LAYOUTPREVIEW)) InvalidateRect(Ctl(ID_LAYOUTPREVIEW), nullptr, FALSE);
+}
+
+// ---- the logo at the top of the window (ID_LOGO, owner-drawn): the mark of scripts\make_logo.py (VR goggles, a 256-unit design box),
+// the wordmark in bold and the tagline in grey. GDI has no anti-aliasing: everything is drawn SS times bigger into a memory bitmap
+// and StretchBlt'ed down with HALFTONE. The layout (logoW) in BuildControls must match the x positions used here.
+void DrawLogo(const DRAWITEMSTRUCT* di) {
+    const int SS = 4;
+    const RECT rc = di->rcItem;
+    const int w = rc.right - rc.left, h = rc.bottom - rc.top;
+    if (w <= 0 || h <= 0) return;
+    const int W = w * SS, H = h * SS;
+    HDC dc = CreateCompatibleDC(di->hDC);
+    HBITMAP bmp = CreateCompatibleBitmap(di->hDC, W, H);
+    HGDIOBJ oldBmp = SelectObject(dc, bmp);
+    const RECT all{0, 0, W, H};
+    FillRect(dc, &all, GetSysColorBrush(COLOR_BTNFACE));
+
+    const double s = (double)H / 256.0;   // the mark is the square (0, 0, H, H)
+    auto U = [&](double v) { return (int)(v * s + 0.5); };
+    const COLORREF grey = RGB(154, 163, 178), blue = RGB(59, 139, 255), coral = RGB(255, 107, 107), red = RGB(255, 59, 59);
+    HGDIOBJ oldPen = SelectObject(dc, GetStockObject(NULL_PEN));
+    HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(NULL_BRUSH));
+    auto disc = [&](double cx, double cy, double r, COLORREF c) {   // filled circle, no outline
+        HBRUSH br = CreateSolidBrush(c);
+        HGDIOBJ ob = SelectObject(dc, br);
+        SelectObject(dc, GetStockObject(NULL_PEN));
+        Ellipse(dc, U(cx - r), U(cy - r), U(cx + r) + 1, U(cy + r) + 1);
+        SelectObject(dc, ob);
+        DeleteObject(br);
+    };
+    // head strap stubs: round-ended lines
+    {
+        LOGBRUSH lb{BS_SOLID, grey, 0};
+        HPEN pen = ExtCreatePen(PS_GEOMETRIC | PS_SOLID | PS_ENDCAP_ROUND | PS_JOIN_ROUND, (DWORD)(U(9) > 1 ? U(9) : 1), &lb, 0, nullptr);
+        HGDIOBJ op = SelectObject(dc, pen);
+        MoveToEx(dc, U(4), U(128), nullptr);
+        LineTo(dc, U(24), U(128));
+        MoveToEx(dc, U(232), U(128), nullptr);
+        LineTo(dc, U(252), U(128));
+        SelectObject(dc, op);
+        DeleteObject(pen);
+    }
+    // bridge between the lenses
+    {
+        HBRUSH br = CreateSolidBrush(grey);
+        HGDIOBJ ob = SelectObject(dc, br);
+        SelectObject(dc, GetStockObject(NULL_PEN));
+        RoundRect(dc, U(112), U(117), U(144) + 1, U(139) + 1, U(12), U(12));
+        SelectObject(dc, ob);
+        DeleteObject(br);
+    }
+    // lenses: an outline of 11 units that stays inside the design box (the rect is inset by half the pen width, and so is the
+    // corner: outer corner diameter 52 -> 52 - 11 on the pen's centre line)
+    {
+        const int pw = U(11) > 1 ? U(11) : 1;
+        const int ins = pw / 2;
+        auto lens = [&](double l, double t, double r, double b, COLORREF c) {
+            HPEN pen = CreatePen(PS_SOLID, pw, c);
+            HGDIOBJ op = SelectObject(dc, pen);
+            SelectObject(dc, GetStockObject(NULL_BRUSH));
+            RoundRect(dc, U(l) + ins, U(t) + ins, U(r) - ins, U(b) - ins, U(52 - 11), U(52 - 11));
+            SelectObject(dc, op);
+            DeleteObject(pen);
+        };
+        lens(24, 76, 118, 180, blue);
+        lens(138, 76, 232, 180, coral);
+    }
+    // pupils, looking slightly inwards
+    disc(78, 128, 17, blue);
+    disc(178, 128, 17, coral);
+    // recording dot
+    disc(222, 50, 18, RGB(255, 255, 255));
+    disc(222, 50, 13, red);
+    SelectObject(dc, oldPen);
+    SelectObject(dc, oldBrush);
+
+    // wordmark (bold) and tagline (grey), vertically centred on the lens row
+    SetBkMode(dc, TRANSPARENT);
+    const UINT fmt = DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX;
+    int x = (32 + 6) * SS;
+    auto line = [&](HFONT base, const wchar_t* t, COLORREF c) {
+        LOGFONTW lf{};
+        if (!base || !GetObjectW(base, sizeof(lf), &lf)) return;
+        lf.lfHeight *= SS;
+        HFONT f = CreateFontIndirectW(&lf);
+        HGDIOBJ of = SelectObject(dc, f);
+        SetTextColor(dc, c);
+        SIZE sz{};
+        GetTextExtentPoint32W(dc, t, (int)wcslen(t), &sz);
+        RECT r{x, 0, x + sz.cx + SS, H};
+        DrawTextW(dc, t, -1, &r, fmt);
+        x += sz.cx;
+        SelectObject(dc, of);
+        DeleteObject(f);
+    };
+    line(g_logoFont, L"OpenXR-EyeCapture", RGB(14, 16, 23));
+    x += 16 * SS;
+    line(g_font, L"Stereo 3D recorder for any OpenXR game", GetSysColor(COLOR_GRAYTEXT));
+
+    SetStretchBltMode(di->hDC, HALFTONE);
+    SetBrushOrgEx(di->hDC, 0, 0, nullptr);
+    StretchBlt(di->hDC, rc.left, rc.top, w, h, dc, 0, 0, W, H, SRCCOPY);
+    SelectObject(dc, oldBmp);
+    DeleteObject(bmp);
+    DeleteDC(dc);
 }
 
 void DrawLayoutPreview(const DRAWITEMSTRUCT* di) {
@@ -1572,27 +1689,15 @@ void DoBrowse() {
     dlg->Release();
 }
 
-// The window is shorter than its content (small screens): the content scrolls, the footer stays put. Everything except the footer
-// is moved by the scroll delta (DeferWindowPos); g_scrollY is the offset.
+// The window is shorter than its content: the content scrolls, the footer stays put. Relayout places every content control
+// at its layout position minus g_scrollY.
 void ScrollContent(int pos) {
     if (g_scrollMax <= 0 || !g_dlg) return;
     pos = pos < 0 ? 0 : (pos > g_scrollMax ? g_scrollMax : pos);
-    const int dy = g_scrollY - pos;
-    if (!dy) return;
+    if (pos == g_scrollY) return;
     g_scrollY = pos;
-    HDWP dwp = BeginDeferWindowPos(160);
-    for (HWND c = GetWindow(g_dlg, GW_CHILD); c && dwp; c = GetWindow(c, GW_HWNDNEXT)) {
-        bool footer = false;
-        for (HWND f : g_footer) if (f == c) footer = true;
-        if (footer) continue;
-        RECT r;
-        GetWindowRect(c, &r);
-        MapWindowPoints(nullptr, g_dlg, (POINT*)&r, 2);
-        dwp = DeferWindowPos(dwp, c, nullptr, r.left, r.top + dy, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-    }
-    if (dwp) EndDeferWindowPos(dwp);
+    Relayout();
     SetScrollPos(g_dlg, SB_VERT, pos, TRUE);
-    RedrawWindow(g_dlg, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
 }
 // Keyboard focus moved to `c`: scroll it into view.
 void EnsureVisible(HWND c) {
@@ -1737,6 +1842,7 @@ LRESULT CALLBACK DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         }
         if (wp == ID_INDPREVIEW) { DrawPreview((const DRAWITEMSTRUCT*)lp); return TRUE; }
         if (wp == ID_LAYOUTPREVIEW) { DrawLayoutPreview((const DRAWITEMSTRUCT*)lp); return TRUE; }
+        if (wp == ID_LOGO) { DrawLogo((const DRAWITEMSTRUCT*)lp); return TRUE; }
         return DefWindowProcW(h, msg, wp, lp);
     case WM_ACTIVATE:
         if (LOWORD(wp) == WA_INACTIVE && g_capturing) ArmCapture(0);
@@ -1789,6 +1895,17 @@ LRESULT CALLBACK DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_QUEUE_POKE:
         UpdateQueueView();
         return 0;
+    case WM_SIZE:
+        if (wp != SIZE_MINIMIZED) Relayout();
+        return 0;
+    case WM_GETMINMAXINFO: {
+        MINMAXINFO* mm = (MINMAXINFO*)lp;
+        RECT r{0, 0, MinClientW(), kMinClientH};
+        AdjustWindowRectEx(&r, (DWORD)GetWindowLongW(h, GWL_STYLE), FALSE, (DWORD)GetWindowLongW(h, GWL_EXSTYLE));
+        mm->ptMinTrackSize.x = r.right - r.left;
+        mm->ptMinTrackSize.y = r.bottom - r.top;
+        return 0;
+    }
     case WM_CLOSE:
         DestroyWindow(h);
         return 0;
@@ -1811,6 +1928,11 @@ LRESULT CALLBACK DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         g_scrollY = g_scrollMax = g_viewH = 0;
         g_dim.clear();
         g_footer.clear();
+        g_made.clear();
+        g_domeLabels.clear();
+        g_helpMinH = g_helpPad = g_naturalH = 0;
+        g_contentEnd = 0;
+        g_footerRaised = false;
         PostMessageW(nullptr, WM_NULL, 0, 0);
         return 0;
     default:
@@ -1818,18 +1940,35 @@ LRESULT CALLBACK DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     }
 }
 
+// BuildControls runs in two passes with the same sequence of Make calls: Create makes every control once (and records it in
+// g_made); Move (Relayout: resize / scroll) walks g_made in the same order and only moves / sizes each control (DeferWindowPos).
+// Everything that must happen only once (tooltips, items, ranges, the g_dim / g_footer lists) is skipped in the Move pass.
 struct Builder {
+    enum class Pass { Create, Move };
     HWND parent;
+    Pass pass = Pass::Create;
+    size_t step = 0;        // Move: index of the next control in g_made
+    HDWP dwp = nullptr;     // Move: the batched moves (nullptr = SetWindowPos one by one)
+    int dy = 0;             // vertical offset added to every y (-scroll offset for the content, 0 for the footer)
     HWND Make(const wchar_t* cls, const wchar_t* text, DWORD style, int x, int y, int w, int hgt, int id, DWORD ex = 0) {
-        HWND c = CreateWindowExW(ex, cls, text, WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | style, x, y, w, hgt, parent, (HMENU)(INT_PTR)id,
-                                 GetModuleHandleW(nullptr), nullptr);
+        if (pass == Pass::Move) {
+            if (step >= g_made.size()) { ++step; return nullptr; }   // a sequence mismatch: BuildControls logs it
+            HWND c = g_made[step++];
+            if (dwp) dwp = DeferWindowPos(dwp, c, nullptr, x, y + dy, w, hgt, SWP_NOZORDER | SWP_NOACTIVATE);
+            if (!dwp) SetWindowPos(c, nullptr, x, y + dy, w, hgt, SWP_NOZORDER | SWP_NOACTIVATE);
+            return c;
+        }
+        HWND c = CreateWindowExW(ex, cls, text, WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | style, x, y + dy, w, hgt, parent,
+                                 (HMENU)(INT_PTR)id, GetModuleHandleW(nullptr), nullptr);
         if (g_font) SendMessageW(c, WM_SETFONT, (WPARAM)g_font, TRUE);
+        g_made.push_back(c);
         return c;
     }
+    void Tip(HWND c, const wchar_t* t) { if (pass == Pass::Create) AddTip(c, t); }
     // Width of `t` in the dialog font (no padding).
-    int TextW(const wchar_t* t) {
+    int TextW(const wchar_t* t, HFONT font = g_font) {
         HDC dc = GetDC(parent);
-        HGDIOBJ old = g_font ? SelectObject(dc, g_font) : nullptr;
+        HGDIOBJ old = font ? SelectObject(dc, font) : nullptr;
         SIZE s{};
         GetTextExtentPoint32W(dc, t, (int)wcslen(t), &s);
         if (old) SelectObject(dc, old);
@@ -1842,28 +1981,28 @@ struct Builder {
         HWND c = Make(L"STATIC", t, SS_LEFT | SS_NOPREFIX | (helpId ? SS_NOTIFY : 0), x, y + 4, w, 16, -1);
         if (helpId) {
             SetWindowLongPtrW(c, GWLP_USERDATA, helpId);
-            AddTip(c, HelpText(helpId));
+            Tip(c, HelpText(helpId));
         }
         return c;
     }
     // A hint / caption: a label drawn in the grey (COLOR_GRAYTEXT) colour, see WM_CTLCOLORSTATIC.
     HWND Hint(int x, int y, int w, const wchar_t* t, int helpId = 0) {
         HWND c = Label(x, y, w, t, helpId);
-        g_dim.push_back(c);
+        if (pass == Pass::Create) g_dim.push_back(c);
         return c;
     }
     void Edit(int id, int x, int y, int w) {
-        AddTip(Make(L"EDIT", L"", WS_TABSTOP | ES_AUTOHSCROLL, x, y, w, 23, id, WS_EX_CLIENTEDGE), HelpText(id));
+        Tip(Make(L"EDIT", L"", WS_TABSTOP | ES_AUTOHSCROLL, x, y, w, 23, id, WS_EX_CLIENTEDGE), HelpText(id));
     }
     // Returns the width taken (box + text), so the caller can lay several checks out in a row.
     int Check(int id, int x, int y, const wchar_t* t) {
         const int w = TextW(t) + 24;
-        AddTip(Make(L"BUTTON", t, WS_TABSTOP | BS_AUTOCHECKBOX | BS_NOTIFY, x, y + 1, w, 21, id), HelpText(id));
+        Tip(Make(L"BUTTON", t, WS_TABSTOP | BS_AUTOCHECKBOX | BS_NOTIFY, x, y + 1, w, 21, id), HelpText(id));
         return w;
     }
     // Push buttons are 26 px tall and centred on the 23 px row that starts at y.
     void Button(int id, int x, int y, int w, const wchar_t* t, bool def = false) {
-        AddTip(Make(L"BUTTON", t, WS_TABSTOP | BS_NOTIFY | (def ? BS_DEFPUSHBUTTON : BS_PUSHBUTTON), x, y - 2, w, 26, id), HelpText(id));
+        Tip(Make(L"BUTTON", t, WS_TABSTOP | BS_NOTIFY | (def ? BS_DEFPUSHBUTTON : BS_PUSHBUTTON), x, y - 2, w, 26, id), HelpText(id));
     }
     int ButtonW(const wchar_t* t) { const int w = TextW(t) + 28; return w < 88 ? 88 : w; }
     // Height of one text line in the dialog font (what a multi-line edit / static advances per line).
@@ -1881,7 +2020,9 @@ struct Builder {
     std::vector<HWND> groups;
     void Group(int x, int y, int w, int hgt, const wchar_t* t) { groups.push_back(Make(L"BUTTON", t, BS_GROUPBOX, x, y, w, hgt, -1)); }
     // A check box bound to a config key but not shown (the "YouTube output" drop-down drives it): no WS_VISIBLE, no tab stop, 0x0.
+    // Not in g_made (nothing to move): the Move pass does nothing.
     void HiddenCheck(int id) {
+        if (pass == Pass::Move) return;
         HWND c = CreateWindowExW(0, L"BUTTON", L"", WS_CHILD | BS_AUTOCHECKBOX, 0, 0, 0, 0, parent, (HMENU)(INT_PTR)id,
                                  GetModuleHandleW(nullptr), nullptr);
         if (g_font) SendMessageW(c, WM_SETFONT, (WPARAM)g_font, TRUE);
@@ -1895,8 +2036,8 @@ struct Builder {
     void Combo(int id, int x, int y, int w, const wchar_t* items) { ComboItems(id, x, y, w, items); }
     void ComboItems(int id, int x, int y, int w, const wchar_t* items) {
         HWND c = Make(L"COMBOBOX", L"", WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, x, y, w, 160, id);
-        AddTip(c, HelpText(id));
-        if (!items) return;
+        Tip(c, HelpText(id));
+        if (!items || pass == Pass::Move) return;
         const std::wstring o = items;
         size_t pos = 0;
         int widest = 0;
@@ -1914,24 +2055,39 @@ struct Builder {
     }
 };
 
-// Creates all controls; returns the client height the window needs (g_contentH / g_footerH tell where the footer starts).
-// Layout: client width kClientW, margin 12, two columns of group boxes, and inside a group ONE grid: labels in a fixed left
+// Creates (Pass::Create) or moves (Pass::Move) all controls for a client of clientW x clientH, the content scrolled up by
+// scrollY; returns the client height the window would need (g_contentH / g_footerH tell where the footer starts) and writes
+// the natural content height (help panel at its measured minimum, g_helpMinH) to *naturalH. The footer is pinned to the
+// bottom of the client; extra height goes to the Description panel, extra width to the columns (and the two previews).
+// Layout: client width >= kLayoutW, margin 12, two columns of group boxes, and inside a group ONE grid: labels in a fixed left
 // column, every control starting at the same x (`cx`) in the second column; rows are 30 px apart, edits / combos 23 px tall,
-// buttons 26 px tall and at least 88 px wide.
-int BuildControls(HWND dlg) {
-    Builder b{dlg};
-    g_dim.clear();
-    g_footer.clear();
-    g_tip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_NOPREFIX | TTS_ALWAYSTIP, CW_USEDEFAULT, CW_USEDEFAULT,
-                            CW_USEDEFAULT, CW_USEDEFAULT, dlg, nullptr, GetModuleHandleW(nullptr), nullptr);
-    if (g_tip) {
-        SetWindowPos(g_tip, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-        SendMessageW(g_tip, TTM_SETMAXTIPWIDTH, 0, 380);
-        SendMessageW(g_tip, TTM_SETDELAYTIME, TTDT_AUTOPOP, MAKELONG(30000, 0));
+// buttons 26 px tall and at least 88 px wide. The sequence of Make calls must not depend on the pass or the size.
+int BuildControls(HWND dlg, Builder::Pass pass, int clientW, int clientH, int scrollY, int* naturalH) {
+    const bool create = pass == Builder::Pass::Create;
+    Builder b{dlg, pass};
+    auto keep = [&](std::vector<HWND>& v, HWND c) { if (create) v.push_back(c); return c; };
+    g_footerH = kFooterH;
+    if (create) {
+        g_made.clear();
+        g_dim.clear();
+        g_footer.clear();
+        g_domeLabels.clear();
+        g_tip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_NOPREFIX | TTS_ALWAYSTIP, CW_USEDEFAULT,
+                                CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, dlg, nullptr, GetModuleHandleW(nullptr), nullptr);
+        if (g_tip) {
+            SetWindowPos(g_tip, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            SendMessageW(g_tip, TTM_SETMAXTIPWIDTH, 0, 380);
+            SendMessageW(g_tip, TTM_SETDELAYTIME, TTDT_AUTOPOP, MAKELONG(30000, 0));
+        }
+    } else {
+        b.dwp = BeginDeferWindowPos((int)g_made.size());
     }
+    b.dy = -scrollY;
     // Two columns of group boxes (left: Recording, Video, Stereo 3D; right: Recording Indicator, Export, Advanced), then the
     // Description and the footer across the full width. setCol() moves the grid to a column: label column at lx, controls at cx.
-    const int margin = 12, colGap = 12, fullW = kClientW - 2 * margin, colW = (fullW - colGap) / 2;
+    const int margin = 12, colGap = 12, fullW = clientW - 2 * margin, colW = (fullW - colGap) / 2;
+    const int colWMin = (kLayoutW - 2 * margin - colGap) / 2;
+    const int extraW = colW > colWMin ? colW - colWMin : 0;   // the previews grow with the column
     int gx = margin, gw = colW, lx = 0, cx = 0, cw = 0;
     const int labelW = 108;
     auto setCol = [&](int x, int w) { gx = x; gw = w; lx = gx + 12; cx = gx + 132; cw = gx + gw - 12 - cx; };
@@ -1939,22 +2095,25 @@ int BuildControls(HWND dlg) {
     const int pitch = 30, top = 22, gap = 8;
     auto groupH = [&](int rows) { return top + rows * pitch + 2; };
     const int unitGap = 6;
-    // column heights (rows): left Recording 7 + Video 4 + Stereo 3D 5; right Recording Indicator 5 + Export + Advanced 2. The
+    // column heights (rows): left Recording 7 + Video 4 + Stereo 3D 5; right Recording Indicator 5 + Export + Advanced 1. The
     // shorter column's groups get the difference (left: leftEx on Stereo 3D; right: spare, below).
     const int kExportRows = 10;
     const int leftH = groupH(7) + gap + groupH(4) + gap + groupH(5) + gap;
-    const int rightH = groupH(5) + gap + groupH(kExportRows) + gap + groupH(2) + gap;
+    const int rightH = groupH(5) + gap + groupH(kExportRows) + gap + groupH(1) + gap;
     const int leftEx = rightH > leftH ? rightH - leftH : 0;
-    int y = 10;
+    int y = 6;
 
-    // ---- header
+    // ---- header: the logo (mark + wordmark + tagline, owner-drawn by DrawLogo) and, to its right, the config file path
     {
+        const int logoW = 32 + 6 + b.TextW(L"OpenXR-EyeCapture", g_logoFont) + 16 + b.TextW(L"Stereo 3D recorder for any OpenXR game") + 2;
+        b.Make(L"STATIC", L"", SS_OWNERDRAW, gx, y, logoW, 32, ID_LOGO);
         const wchar_t* t = L"Configuration file:";
         const int tw = b.TextW(t) + 6;
-        b.Make(L"STATIC", t, SS_LEFT | SS_NOPREFIX, gx, y, tw, 16, -1);
-        g_dim.push_back(b.Make(L"STATIC", g_path.c_str(), SS_LEFT | SS_NOPREFIX | SS_PATHELLIPSIS, gx + tw, y, fullW - tw, 16, -1));
+        const int hx = gx + logoW + 24, hy = y + (32 - 16) / 2;
+        b.Make(L"STATIC", t, SS_LEFT | SS_NOPREFIX, hx, hy, tw, 16, -1);
+        keep(g_dim, b.Make(L"STATIC", g_path.c_str(), SS_LEFT | SS_NOPREFIX | SS_PATHELLIPSIS, hx + tw, hy, fullW - (logoW + 24 + tw), 16, -1));
     }
-    y += 26;
+    y += 32 + 4;
     const int yTop = y;
 
     // ---- Recording
@@ -1976,8 +2135,7 @@ int BuildControls(HWND dlg) {
     b.Button(ID_BROWSE, cx + cw - 88, r, 88, L"Browse...");
     r += pitch;
     b.Label(lx, r, labelW, L"Free space:", ID_OUTFREE);
-    b.Hint(cx, r, cw, L"", ID_OUTFREE);
-    SetWindowLongPtrW(g_dim.back(), GWLP_ID, ID_OUTFREE);   // the hint is updated by UpdateFreeSpace
+    SetWindowLongPtrW(b.Hint(cx, r, cw, L"", ID_OUTFREE), GWLP_ID, ID_OUTFREE);   // the hint is updated by UpdateFreeSpace
     r += pitch;
     b.Label(lx, r, labelW, L"Audio:", ID_AUDIO);
     b.Check(ID_AUDIO, cx, r, L"Record system audio");
@@ -1998,8 +2156,7 @@ int BuildControls(HWND dlg) {
     r += pitch;
     b.Label(lx, r, labelW, L"Bitrate:", ID_BITRATE);
     b.Combo(ID_BITRATE, cx, r, 190);
-    b.Hint(cx + 190 + 8, r, cw - 198, L"", ID_BITRATEHINT);
-    SetWindowLongPtrW(g_dim.back(), GWLP_ID, ID_BITRATEHINT);   // updated by UpdateBitrateHint
+    SetWindowLongPtrW(b.Hint(cx + 190 + 8, r, cw - 198, L"", ID_BITRATEHINT), GWLP_ID, ID_BITRATEHINT);   // updated by UpdateBitrateHint
     r += pitch;
     b.Label(lx, r, labelW, L"Resolution:", ID_MAXWIDTH);
     b.Combo(ID_MAXWIDTH, cx, r, 190);
@@ -2018,14 +2175,13 @@ int BuildControls(HWND dlg) {
     b.Label(lx, r, labelW, L"Projection:", ID_PROJECTION);
     b.Combo(ID_PROJECTION, cx, r, 240);
     r += pitch;
-    g_domeLabels.clear();
-    g_domeLabels.push_back(b.Label(lx, r, labelW, L"Dome fill:", ID_FILL));
+    keep(g_domeLabels, b.Label(lx, r, labelW, L"Dome fill:", ID_FILL));
     b.Combo(ID_FILL, cx, r, 160);
     {
         const int fx = cx + 160 + 16, fw = b.TextW(L"Fade after:") + 8;
-        g_domeLabels.push_back(b.Label(fx, r, fw, L"Fade after:", ID_FILLFADE));
+        keep(g_domeLabels, b.Label(fx, r, fw, L"Fade after:", ID_FILLFADE));
         b.Edit(ID_FILLFADE, fx + fw + 2, r, 50);
-        g_domeLabels.push_back(b.Label(fx + fw + 2 + 50 + unitGap, r, 14, L"s", ID_FILLFADE));
+        keep(g_domeLabels, b.Label(fx + fw + 2 + 50 + unitGap, r, 14, L"s", ID_FILLFADE));
     }
     r += pitch;
     b.Label(lx, r, labelW, L"Options:", ID_SYMFOV);
@@ -2038,11 +2194,13 @@ int BuildControls(HWND dlg) {
     r += pitch;
     b.Label(lx, r, labelW, L"Head smoothing:", ID_SMOOTH);
     HWND tb = b.Make(L"msctls_trackbar32", L"", WS_TABSTOP | TBS_HORZ | TBS_AUTOTICKS, cx, r - 3, 340, 28, ID_SMOOTH);
-    AddTip(tb, HelpText(ID_SMOOTH));
-    SendMessageW(tb, TBM_SETRANGE, TRUE, MAKELONG(0, 20));
-    SendMessageW(tb, TBM_SETTICFREQ, 2, 0);
-    SendMessageW(tb, TBM_SETPAGESIZE, 0, 2);
-    SendMessageW(tb, TBM_SETLINESIZE, 0, 1);
+    b.Tip(tb, HelpText(ID_SMOOTH));
+    if (create) {
+        SendMessageW(tb, TBM_SETRANGE, TRUE, MAKELONG(0, 20));
+        SendMessageW(tb, TBM_SETTICFREQ, 2, 0);
+        SendMessageW(tb, TBM_SETPAGESIZE, 0, 2);
+        SendMessageW(tb, TBM_SETLINESIZE, 0, 1);
+    }
     b.Make(L"STATIC", L"0.00", SS_LEFT | SS_NOPREFIX, cx + 348, r + 4, 44, 16, ID_SMOOTHVAL);
     r += pitch;
     b.Label(lx, r, labelW, L"Field of view scale:", ID_FOVSCALE);
@@ -2053,12 +2211,15 @@ int BuildControls(HWND dlg) {
     y = yTop;
     setCol(margin + colW + colGap, colW);
     // when the right column is shorter, the spare height is shared by its three groups (rows stay on top, previews are
-    // centred); when it is longer (today: 17 rows vs 16), the Stereo 3D group took the difference (leftEx)
+    // centred); when it is longer, the Stereo 3D group takes the difference (leftEx). Today both are 16 rows (576 px): 0 / 0.
     const int spare = yLeftEnd - (yTop + rightH);
     const int ex1 = spare > 0 ? spare / 3 : 0, ex2 = ex1, ex3 = spare > 0 ? spare - 2 * ex1 : 0;
 
-    // ---- Recording Indicator (fields on the left, the live preview of the view on the right)
-    const int prevSize = 140;
+    // ---- Recording Indicator (fields on the left, the live preview of the view on the right; square, it grows with the
+    // column up to the inside of the group)
+    int prevGrow = groupH(5) + ex1 - top - 10 - 140;
+    prevGrow = prevGrow < 0 ? 0 : (extraW < prevGrow ? extraW : prevGrow);
+    const int prevSize = 140 + prevGrow, prevY = ex1 > prevGrow ? (ex1 - prevGrow) / 2 : 0;
     b.Group(gx, y, gw, groupH(5) + ex1, L"Recording Indicator");
     r = y + top;
     b.Label(lx, r, labelW, L"Indicator:", ID_INDICATOR);
@@ -2086,12 +2247,14 @@ int BuildControls(HWND dlg) {
     }
     r += pitch;
     b.Hint(lx, r, 370, L"Z is negative: the indicator floats in front of the viewer.");
-    AddTip(b.Make(L"STATIC", L"", SS_OWNERDRAW | SS_NOTIFY, gx + gw - 12 - prevSize, y + top + ex1 / 2, prevSize, prevSize, ID_INDPREVIEW),
-           HelpText(ID_INDPREVIEW));
+    b.Tip(b.Make(L"STATIC", L"", SS_OWNERDRAW | SS_NOTIFY, gx + gw - 12 - prevSize, y + top + prevY, prevSize, prevSize, ID_INDPREVIEW),
+          HelpText(ID_INDPREVIEW));
     y += groupH(5) + ex1 + gap;
 
-    // ---- Export (fields on the left, the live layout preview on the right)
-    const int lpW = 205, lpH = 140;
+    // ---- Export (fields on the left, the live layout preview on the right). The preview is 213 px wide at the minimum width and
+    // grows with the column by up to 40 px (its text lines need that room; DrawLayoutPreview draws at fixed pixel positions, so
+    // more would only add empty space); it stays right-aligned in the column and the combos left of it (`ecw`) take the rest.
+    const int lpW = 213 + (extraW < 40 ? extraW : 40), lpH = 140;
     const int ecw = gx + gw - 12 - lpW - 12 - cx;   // combo width that leaves a gap before the preview
     // rows: YouTube output, Convert, 8K bitrate, 8K codec, the 2D check (left of the preview: their texts fit `ecw`), Keep MP4,
     // Output layout, Eye crop (below the preview: the layout items are wider than `ecw`), the record_for_youtube check, the two
@@ -2131,20 +2294,22 @@ int BuildControls(HWND dlg) {
     }
     b.HiddenCheck(ID_POSTMKV);     // bound to post_mkv / post_yt8k, set from / read into the drop-down
     b.HiddenCheck(ID_POSTYT8K);
-    AddTip(b.Make(L"STATIC", L"", SS_OWNERDRAW | SS_NOTIFY, gx + gw - 12 - lpW, y + top + ex2 / 2, lpW, lpH, ID_LAYOUTPREVIEW),
-           HelpText(ID_LAYOUTPREVIEW));
+    b.Tip(b.Make(L"STATIC", L"", SS_OWNERDRAW | SS_NOTIFY, gx + gw - 12 - lpW, y + top + ex2 / 2, lpW, lpH, ID_LAYOUTPREVIEW),
+          HelpText(ID_LAYOUTPREVIEW));
     y += groupH(kExportRows) + ex2 + gap;
 
     // ---- Advanced
-    b.Group(gx, y, gw, groupH(2) + ex3, L"Advanced");
+    b.Group(gx, y, gw, groupH(1) + ex3, L"Advanced");
     r = y + top;
     b.HiddenCheck(ID_REQTRAY);   // require_tray stays a config.ini key (default 1); the tray is required anyway, so no checkbox
     b.Label(lx, r, labelW, L"Log level:", ID_LOGLEVEL);
     b.Combo(ID_LOGLEVEL, cx, r, 160);
-    r += pitch;
-    b.Label(lx, r, labelW, L"Startup:", ID_AUTOSTART);
-    b.Check(ID_AUTOSTART, cx, r, L"Start with Windows");
-    y += groupH(2) + ex3 + gap;
+    {   // one row: "Startup:" + its check right of the Log level drop-down
+        const int sx = cx + 160 + 16, sw = b.TextW(L"Startup:") + 8;
+        b.Label(sx, r, sw, L"Startup:", ID_AUTOSTART);
+        b.Check(ID_AUTOSTART, sx + sw, r, L"Start with Windows");
+    }
+    y += groupH(1) + ex3 + gap;
     y = yLeftEnd > y ? yLeftEnd : y;
 
     // ---- Conversions (full width; the same two-column grid as the groups above): left = the running job (three status lines:
@@ -2159,10 +2324,10 @@ int BuildControls(HWND dlg) {
         r = y + top;
         setCol(margin, colW);
         b.Label(lx, r, labelW, L"Running:", ID_QSTATUS);
-        AddTip(b.Make(L"STATIC", L"", SS_LEFT | SS_NOPREFIX | SS_NOTIFY, cx, r + 2, cw, stH, ID_QSTATUS), HelpText(ID_QSTATUS));
+        b.Tip(b.Make(L"STATIC", L"", SS_LEFT | SS_NOPREFIX | SS_NOTIFY, cx, r + 2, cw, stH, ID_QSTATUS), HelpText(ID_QSTATUS));
         HWND pb = b.Make(PROGRESS_CLASSW, L"", PBS_SMOOTH, cx, r + 2 + pbY, cw, 14, ID_QPROGRESS);
-        SendMessageW(pb, PBM_SETRANGE32, 0, 100);
-        AddTip(pb, HelpText(ID_QPROGRESS));
+        if (create) SendMessageW(pb, PBM_SETRANGE32, 0, 100);
+        b.Tip(pb, HelpText(ID_QPROGRESS));
         b.Button(ID_QPAUSE, cx, r + 2 + btY, 96, L"Pause");
         b.Button(ID_QCANCEL, cx + 96 + 8, r + 2 + btY, 96, L"Cancel");
         setCol(margin + colW + colGap, colW);
@@ -2170,9 +2335,9 @@ int BuildControls(HWND dlg) {
         int qbW = b.ButtonW(L"Start all");
         for (const wchar_t* t : {L"Start", L"Remove"}) if (b.ButtonW(t) > qbW) qbW = b.ButtonW(t);
         const int lbW = cw - qbW - 8;
-        AddTip(b.Make(L"LISTBOX", L"", WS_TABSTOP | WS_VSCROLL | WS_HSCROLL | LBS_NOTIFY | LBS_EXTENDEDSEL | LBS_NOINTEGRALHEIGHT, cx, r,
-                      lbW, listH, ID_QLIST, WS_EX_CLIENTEDGE),
-               HelpText(ID_QLIST));
+        b.Tip(b.Make(L"LISTBOX", L"", WS_TABSTOP | WS_VSCROLL | WS_HSCROLL | LBS_NOTIFY | LBS_EXTENDEDSEL | LBS_NOINTEGRALHEIGHT, cx, r,
+                     lbW, listH, ID_QLIST, WS_EX_CLIENTEDGE),
+              HelpText(ID_QLIST));
         const int bstep = (listH - 26) / 2;
         b.Button(ID_QSTART, cx + lbW + 8, r + 2, qbW, L"Start");
         b.Button(ID_QSTARTALL, cx + lbW + 8, r + 2 + bstep, qbW, L"Start all");
@@ -2181,51 +2346,162 @@ int BuildControls(HWND dlg) {
     }
     setCol(margin, fullW);
 
-    // ---- Description panel (follows the mouse / keyboard focus, see Hover / ShowHelp)
-    const int helpLines = 5, helpH = helpLines * b.LineH();
+    // ---- Description panel (follows the mouse / keyboard focus, see Hover / ShowHelp). At least g_helpMinH tall (the longest
+    // help text, MeasureHelp; 5 lines before it ran); a window taller than the content gives all its extra height to it.
+    const int lh = b.LineH();
+    const int helpMin = g_helpMinH > 0 ? g_helpMinH : 5 * lh;
+    const int naturalContentH = y + (20 + helpMin + 10) + gap - 4;   // = g_contentH below with helpH = helpMin
+    const int avail = (clientH - g_footerH) - naturalContentH;
+    const int helpH = helpMin + (avail > 0 ? avail : 0);
     const int descH = 20 + helpH + 10;
     b.Group(gx, y, gw, descH, L"Description");
     {
         HWND he = b.Make(L"EDIT", kOverview, ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL, lx, y + 20, gw - 24, helpH, ID_HELPTEXT);
-        // the formatting rectangle: exactly helpLines lines from the top, so the last visible line is never cut in half
+        // Move pass: apply the queued moves now, so the edit has its new size (which resets its formatting rectangle) below
+        if (!create && b.dwp) {
+            EndDeferWindowPos(b.dwp);
+            b.dwp = BeginDeferWindowPos(8);
+        }
+        // the formatting rectangle: whole lines from the top, so the last visible line is never cut in half
         RECT fr{};
-        SendMessageW(he, EM_GETRECT, 0, (LPARAM)&fr);
-        const int lines = (fr.bottom - fr.top) / b.LineH();
-        if (lines >= 1) {
-            fr.bottom = fr.top + lines * b.LineH();
+        if (he) SendMessageW(he, EM_GETRECT, 0, (LPARAM)&fr);
+        if (create) g_helpPad = helpH > fr.bottom - fr.top ? helpH - (fr.bottom - fr.top) : 0;
+        const int lines = (fr.bottom - fr.top) / lh;
+        if (he && lines >= 1) {
+            fr.bottom = fr.top + lines * lh;
             SendMessageW(he, EM_SETRECTNP, 0, (LPARAM)&fr);
         }
     }
-    g_shown = kOverview;
+    if (create) g_shown = kOverview;
     y += descH + gap;
 
     // ---- footer: an opaque strip (so scrolled content never shows through when the window is shorter than the content),
-    // one short note and the buttons. It stays at the bottom of the window.
+    // one short note and the buttons. It is pinned to the bottom of the client and does not scroll.
     g_contentH = y - 4;
-    g_footerH = 70;
-    const int fy = g_contentH;
-    const int by = fy + 38;
+    b.dy = 0;
+    const int fy = clientH - g_footerH;
+    const int by = fy + 32;
     const int wOpen = b.ButtonW(L"Open config.ini"), wDef = b.ButtonW(L"Restore Defaults"), wOk = 96;
+    if (create) g_contentEnd = g_made.size();   // g_made[0 .. g_contentEnd) = the content, the rest = the footer
     b.Button(ID_OPENINI, gx, by, wOpen, L"Open config.ini");
     b.Button(ID_DEFAULTS, gx + wOpen + 8, by, wDef, L"Restore Defaults");
     b.Button(ID_SAVE, gx + gw - 2 * wOk - 8, by, wOk, L"Save", true);
     b.Button(ID_CANCEL, gx + gw - wOk, by, wOk, L"Cancel");
-    for (int id : {ID_OPENINI, ID_DEFAULTS, ID_SAVE, ID_CANCEL}) g_footer.push_back(GetDlgItem(dlg, id));
+    if (create) for (int id : {ID_OPENINI, ID_DEFAULTS, ID_SAVE, ID_CANCEL}) g_footer.push_back(GetDlgItem(dlg, id));
     HWND note = b.Make(L"STATIC", L"Changes apply to the next recording. Keyboard hotkeys and the indicator require a game restart.",
-                       SS_LEFT | SS_NOPREFIX, gx, fy + 12, gw, 16, -1);
-    g_dim.push_back(note);
-    g_footer.push_back(note);
+                       SS_LEFT | SS_NOPREFIX, gx, fy + 9, gw, 16, -1);
+    keep(g_dim, note);
+    keep(g_footer, note);
     // created last = lowest of the footer: it only paints the background behind the note and the buttons
-    g_footer.push_back(b.Make(L"STATIC", L"", SS_OWNERDRAW, 0, fy, kClientW, g_footerH, kFooterBgId));
-    for (HWND g : b.groups) SetWindowPos(g, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    keep(g_footer, b.Make(L"STATIC", L"", SS_OWNERDRAW, 0, fy, clientW, g_footerH, kFooterBgId));
+    if (create) {
+        for (HWND g : b.groups) SetWindowPos(g, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        g_footerRaised = false;   // the footer stays below the content (Tab order) until scrolling needs it on top (RaiseFooter)
+    } else {
+        if (b.dwp) EndDeferWindowPos(b.dwp);
+        b.dwp = nullptr;
+        if (b.step != g_made.size())
+            LOGE("settings: layout pass made %zu controls, the window has %zu (BuildControls must make the same calls in every pass)",
+                 b.step, g_made.size());
+    }
+    if (naturalH) *naturalH = naturalContentH;
     return g_contentH + g_footerH;
+}
+
+// The height the help edit needs for the longest help text (kOverview and every kHelp text) at the current (narrowest) width:
+// DrawText DT_CALCRECT in the dialog font and the edit's own line count (its wrapping is the ground truth), the larger one.
+// Sets g_helpMinH; run right after the Create pass (client kLayoutW wide).
+void MeasureHelp() {
+    HWND he = Ctl(ID_HELPTEXT);
+    if (!he) return;
+    Builder b{g_dlg};
+    const int lh = b.LineH();
+    RECT fr{};
+    SendMessageW(he, EM_GETRECT, 0, (LPARAM)&fr);
+    const int width = fr.right - fr.left;
+    HDC dc = GetDC(g_dlg);
+    HGDIOBJ old = g_font ? SelectObject(dc, g_font) : nullptr;
+    int maxLines = 0, maxId = -1;
+    auto measure = [&](int id, const wchar_t* t) {
+        RECT r{0, 0, width, 0};
+        DrawTextW(dc, t, -1, &r, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX | DT_EDITCONTROL);
+        int lines = (r.bottom + lh - 1) / lh;
+        SetWindowTextW(he, t);
+        const int el = (int)SendMessageW(he, EM_GETLINECOUNT, 0, 0);
+        if (el > lines) lines = el;
+        if (lines > maxLines) { maxLines = lines; maxId = id; }
+    };
+    measure(0, kOverview);
+    for (const Help& h : kHelp) measure(h.id, h.text);
+    if (old) SelectObject(dc, old);
+    ReleaseDC(g_dlg, dc);
+    SetWindowTextW(he, kOverview);
+    g_shown = kOverview;
+    g_helpMinH = maxLines * lh + g_helpPad;
+    LOGI("settings: description panel: %d lines (longest help text id %d)", maxLines, maxId);
+}
+
+// While the content scrolls, the footer must be above it (z-order: the first created is the topmost; keep its order) -- that
+// also puts the footer first in the Tab order, so without scrolling it goes back to where it was created: right after the last
+// content control, in creation order. Only on a state change.
+void RaiseFooter(bool raise) {
+    if (raise == g_footerRaised || g_footer.empty()) return;
+    g_footerRaised = raise;
+    if (raise) {
+        for (size_t i = g_footer.size(); i-- > 0;) SetWindowPos(g_footer[i], HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        return;
+    }
+    HWND after = g_contentEnd > 0 && g_contentEnd <= g_made.size() ? g_made[g_contentEnd - 1] : HWND_TOP;
+    for (HWND f : g_footer) {
+        SetWindowPos(f, after, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        after = f;
+    }
+}
+
+// Places every control for the current client size and scroll offset (WM_SIZE, ScrollContent): shows / hides the vertical
+// scroll bar when the natural content height does not fit, then runs the Move pass of BuildControls.
+void Relayout() {
+    static bool inLayout = false;   // ShowScrollBar sends a nested WM_SIZE
+    if (!g_dlg || g_made.empty() || inLayout) return;
+    inLayout = true;
+    for (int i = 0; i < 3; ++i) {
+        RECT rc{};
+        GetClientRect(g_dlg, &rc);
+        const int cw = rc.right - rc.left, ch = rc.bottom - rc.top;
+        const int view = ch - g_footerH;
+        const bool scroll = g_naturalH > view;
+        g_viewH = view;
+        g_scrollMax = scroll ? g_naturalH - view : 0;
+        g_scrollY = g_scrollY < 0 ? 0 : (g_scrollY > g_scrollMax ? g_scrollMax : g_scrollY);
+        const bool shown = (GetWindowLongW(g_dlg, GWL_STYLE) & WS_VSCROLL) != 0;
+        if (shown != scroll && i < 2) {
+            ShowScrollBar(g_dlg, SB_VERT, scroll);
+            continue;   // the client width changed: read it again
+        }
+        RaiseFooter(scroll);
+        int natural = 0;
+        BuildControls(g_dlg, Builder::Pass::Move, cw, ch, g_scrollY, &natural);
+        g_naturalH = natural;
+        if (scroll) {
+            SCROLLINFO si{sizeof(si), SIF_RANGE | SIF_PAGE | SIF_POS};
+            si.nMin = 0;
+            si.nMax = g_naturalH + g_footerH - 1;
+            si.nPage = (UINT)ch;
+            si.nPos = g_scrollY;
+            SetScrollInfo(g_dlg, SB_VERT, &si, TRUE);
+        }
+        break;
+    }
+    inLayout = false;
+    RedrawWindow(g_dlg, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
 }
 
 // Measures the text of every visible label, check box, button, group box and combo item with the dialog font (GetTextExtentPoint32
 // / DrawText DT_CALCRECT) against its control and logs each one that would be cut ("settings: text does not fit: ..."), then one
 // summary line "settings: text fit check: N controls, M cut" (tests require M = 0). Run once the window is filled (after
 // LoadFromFile), so the drop-downs and dynamic hints hold real values. Statics with an ellipsis style, owner-drawn controls,
-// edits and the list box (it scrolls sideways) are skipped.
+// edits and the list box (it scrolls sideways) are skipped. The Description panel is checked separately: every help text must
+// fit its visible lines (EM_GETLINECOUNT against the formatting rectangle), each counts as one control.
 void CheckTextFit() {
     if (!g_dlg) return;
     HDC dc = GetDC(g_dlg);
@@ -2279,6 +2555,22 @@ void CheckTextFit() {
             }
         }
     }
+    // the Description panel: every help text must fit its visible lines without scrolling the edit
+    if (HWND he = Ctl(ID_HELPTEXT)) {
+        RECT fr{};
+        SendMessageW(he, EM_GETRECT, 0, (LPARAM)&fr);
+        const int visible = (fr.bottom - fr.top) / Builder{g_dlg}.LineH();
+        auto checkHelp = [&](const wchar_t* t) {
+            ++checked;
+            SetWindowTextW(he, t);
+            const int lines = (int)SendMessageW(he, EM_GETLINECOUNT, 0, 0);
+            if (lines > visible) report(he, std::wstring(t).substr(0, 60), lines, visible, "description (lines)");
+        };
+        checkHelp(kOverview);
+        for (const Help& hp : kHelp) checkHelp(hp.text);
+        SetWindowTextW(he, kOverview);
+        g_shown = kOverview;
+    }
     if (old) SelectObject(dc, old);
     ReleaseDC(g_dlg, dc);
     LOGI("settings: text fit check: %d controls, %d cut", checked, cut);
@@ -2309,7 +2601,13 @@ void ShowDialog(const std::wstring& configPath, std::function<void(const std::ve
     g_capturing = 0;
 
     NONCLIENTMETRICSW ncm{sizeof(ncm)};
-    if (SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0)) g_font = CreateFontIndirectW(&ncm.lfMessageFont);
+    if (SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0)) {
+        g_font = CreateFontIndirectW(&ncm.lfMessageFont);
+        LOGFONTW lf = ncm.lfMessageFont;
+        lf.lfHeight = -20;
+        lf.lfWeight = FW_BOLD;
+        g_logoFont = CreateFontIndirectW(&lf);
+    }
 
     static bool registered = false;
     if (!registered) {
@@ -2323,46 +2621,36 @@ void ShowDialog(const std::wstring& configPath, std::function<void(const std::ve
         registered = true;
     }
     g_scrollY = g_scrollMax = g_viewH = 0;
-    RECT rc{0, 0, kClientW, 700};   // provisional: resized below to the height BuildControls computed
-    const DWORD style = WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+    g_made.clear();
+    g_helpMinH = g_helpPad = g_naturalH = 0;
+    RECT rc{0, 0, kLayoutW, 700};   // provisional: resized below to the height BuildControls computed
+    const DWORD style = WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_THICKFRAME;
     AdjustWindowRectEx(&rc, style, FALSE, WS_EX_APPWINDOW);
     const int w = rc.right - rc.left, hgt = rc.bottom - rc.top;
     const int sx = (GetSystemMetrics(SM_CXSCREEN) - w) / 2, sy = (GetSystemMetrics(SM_CYSCREEN) - hgt) / 2;
     g_dlg = CreateWindowExW(WS_EX_APPWINDOW, L"EyeCaptureSettings", kWindowTitle, style, sx < 0 ? 0 : sx, sy < 0 ? 0 : sy,
                             w, hgt, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
     if (g_dlg) {
-        const int clientH = BuildControls(g_dlg);
+        // Create at the narrowest width, measure the help texts there, then one Move pass at the same provisional size: it
+        // gives the natural content height with the measured Description panel (g_naturalH; independent of the window size).
+        RECT pc{};
+        GetClientRect(g_dlg, &pc);
+        int natural = 0;
+        BuildControls(g_dlg, Builder::Pass::Create, kLayoutW, pc.bottom - pc.top, 0, &natural);
+        MeasureHelp();
+        BuildControls(g_dlg, Builder::Pass::Move, kLayoutW, pc.bottom - pc.top, 0, &natural);
+        g_naturalH = natural;
         RECT wa{};
         if (!SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0)) wa = RECT{0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)};
-        RECT fit{0, 0, kClientW, clientH};
+        // the whole content without scrolling when the work area allows it; else as high as the work area (Relayout shows the
+        // scroll bar; MinClientW() already leaves room for it)
+        RECT fit{0, 0, MinClientW(), g_naturalH + g_footerH};
         AdjustWindowRectEx(&fit, style, FALSE, WS_EX_APPWINDOW);
-        int fw = fit.right - fit.left, fh = fit.bottom - fit.top;
-        const int maxH = wa.bottom - wa.top;
-        if (fh > maxH && maxH - (fh - clientH) > g_footerH + 120) {
-            // Higher than the work area: shrink the window, keep the footer at the bottom and scroll the rest.
-            const int over = fh - maxH;
-            fh = maxH;
-            g_viewH = clientH - over - g_footerH;
-            g_scrollMax = g_contentH - g_viewH;
-            for (HWND f : g_footer) {
-                RECT r;
-                GetWindowRect(f, &r);
-                MapWindowPoints(nullptr, g_dlg, (POINT*)&r, 2);
-                SetWindowPos(f, nullptr, r.left, r.top - over, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-            }
-            // the footer must be above the scrolled content (z-order: the first created is the topmost; keep its tab order)
-            for (size_t i = g_footer.size(); i-- > 0;) SetWindowPos(g_footer[i], HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-            SCROLLINFO si{sizeof(si), SIF_RANGE | SIF_PAGE | SIF_POS};
-            si.nMin = 0;
-            si.nMax = g_contentH + g_footerH - 1;
-            si.nPage = (UINT)(clientH - over);
-            si.nPos = 0;
-            SetScrollInfo(g_dlg, SB_VERT, &si, FALSE);
-            ShowScrollBar(g_dlg, SB_VERT, TRUE);
-            fw += GetSystemMetrics(SM_CXVSCROLL);
-        }
+        const int fw = fit.right - fit.left, maxH = wa.bottom - wa.top;
+        const int fh = fit.bottom - fit.top < maxH ? fit.bottom - fit.top : maxH;
         const int fx = wa.left + (wa.right - wa.left - fw) / 2, fy = wa.top + (maxH - fh) / 2;
         SetWindowPos(g_dlg, nullptr, fx < wa.left ? wa.left : fx, fy < wa.top ? wa.top : fy, fw, fh, SWP_NOZORDER | SWP_NOACTIVATE);
+        Relayout();   // WM_SIZE did it already unless the size did not change
         SetTimer(g_dlg, kHoverTimer, 100, nullptr);
         SetTimer(g_dlg, kPulseTimer, 50, nullptr);
         SetTimer(g_dlg, kQueueTimer, 500, nullptr);
@@ -2388,6 +2676,7 @@ void ShowDialog(const std::wstring& configPath, std::function<void(const std::ve
         if (g_dlg) DestroyWindow(g_dlg);
     }
     if (g_font) { DeleteObject(g_font); g_font = nullptr; }
+    if (g_logoFont) { DeleteObject(g_logoFont); g_logoFont = nullptr; }
     g_dlg = nullptr;
     g_onSaved = nullptr;
     if (SUCCEEDED(co)) CoUninitialize();
