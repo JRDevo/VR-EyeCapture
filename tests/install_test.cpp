@@ -85,6 +85,7 @@ bool SetSddl(const wchar_t* sub, const wchar_t* sddl) {
 
 void Cleanup() {
     SetSddl(kRo, L"D:(A;;KA;;;WD)");   // make the read-only demo key deletable again (owner keeps WRITE_DAC)
+    SetSddl(L"Software\\OpenXR-EyeCapture-Test\\RunApproved", L"D:(A;;KA;;;WD)");   // the read-only approval key test, if interrupted
     RegDeleteTreeW(HKEY_CURRENT_USER, kBase);
 }
 
@@ -119,6 +120,34 @@ int LockDemo() {
     if (!SetSddl(kRo, L"D:P(A;;KR;;;WD)")) { printf("cannot set the read-only DACL\n"); return 1; }
     printf("lockdemo: HKCU\\%s is read-only and holds %s\n", N(kRo).c_str(), N(stale).c_str());
     return 0;
+}
+
+const wchar_t kApprovedTest[] = L"Software\\OpenXR-EyeCapture-Test\\RunApproved";
+// Reads the test StartupApproved value: returns its type (REG_NONE if missing), size and first byte.
+DWORD ApprovedRead(BYTE& b0, DWORD& size) {
+    b0 = 0; size = 0;
+    HKEY k = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, kApprovedTest, 0, KEY_QUERY_VALUE, &k) != ERROR_SUCCESS) return REG_NONE;
+    BYTE buf[64] = {};
+    DWORD type = REG_NONE, sz = sizeof(buf);
+    const LSTATUS e = RegQueryValueExW(k, L"OpenXR-EyeCapture", nullptr, &type, buf, &sz);
+    RegCloseKey(k);
+    if (e != ERROR_SUCCESS) return REG_NONE;
+    b0 = buf[0]; size = sz;
+    return type;
+}
+void ApprovedWriteByte0(BYTE v) {
+    HKEY k = nullptr;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, kApprovedTest, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &k, nullptr) != ERROR_SUCCESS) return;
+    BYTE rec[12] = {v};
+    RegSetValueExW(k, L"OpenXR-EyeCapture", 0, REG_BINARY, rec, sizeof(rec));
+    RegCloseKey(k);
+}
+void ApprovedDelete() {
+    HKEY k = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, kApprovedTest, 0, KEY_SET_VALUE, &k) != ERROR_SUCCESS) return;
+    RegDeleteValueW(k, L"OpenXR-EyeCapture");
+    RegCloseKey(k);
 }
 
 int RunAll() {
@@ -270,6 +299,21 @@ int RunAll() {
         Check(!install::SyncAutostart(dirA), "SyncAutostart when not enabled: no-op");
         Check(!install::AutostartEnabled(), "SyncAutostart did not turn it on");
         Check(install::SetAutostart(true, dirA, err), "SetAutostart(true) succeeds");
+        {
+            BYTE b0 = 0; DWORD n = 0;
+            Check(ApprovedRead(b0, n) == REG_BINARY && n == 12 && b0 == 2, "approved record: REG_BINARY, 12 bytes, byte0 == 2");
+            ApprovedWriteByte0(3);
+            Check(!install::AutostartEnabled(), "approved byte0 = 3 (disabled by the user): AutostartEnabled false");
+            Check(!install::SyncAutostart(dirA), "SyncAutostart leaves a user-disabled entry alone");
+            Check(install::SetAutostart(true, dirA, err), "SetAutostart(true) again");
+            Check(ApprovedRead(b0, n) == REG_BINARY && n == 12 && b0 == 2, "approved byte0 back to 2");
+            Check(install::AutostartEnabled(), "enabled again");
+            ApprovedDelete();
+            Check(install::AutostartEnabled(), "approved value missing: still enabled");
+            Check(install::SyncAutostart(dirA), "SyncAutostart with the approval missing: true (rewritten)");
+            Check(ApprovedRead(b0, n) == REG_BINARY && n == 12 && b0 == 2, "SyncAutostart recreated the approved record");
+            Check(!install::SyncAutostart(dirA), "SyncAutostart again: false");
+        }
         Check(install::AutostartEnabled(&stored), "enabled");
         Check(stored == install::AutostartCommand(dirA), "stored command == AutostartCommand(C:\\A)");
         Check(install::AutostartCommand(dirA) == L"\"C:\\A\\EyeCaptureTray.exe\"", "command is quoted, no arguments");
@@ -280,9 +324,36 @@ int RunAll() {
         Check(!install::SyncAutostart(L"c:\\b"), "SyncAutostart: case-insensitive compare");
         Check(install::SetAutostart(false, dirA, err), "SetAutostart(false) succeeds");
         Check(!install::AutostartEnabled(&stored) && stored.empty(), "not enabled again");
+        {
+            BYTE b0 = 0; DWORD n = 0;
+            Check(ApprovedRead(b0, n) == REG_NONE, "SetAutostart(false) removed the approved value");
+        }
         Check(install::SetAutostart(false, dirA, err), "SetAutostart(false) again: still success");
+        // all or nothing: the approval record cannot be written (read-only test approval key) -> the Run value is put back
+        ApprovedWriteByte0(2);
+        ApprovedDelete();   // the key exists, the value does not
+        if (SetSddl(kApprovedTest, L"D:P(A;;KR;;;WD)")) {
+            const bool failed = !install::SetAutostart(true, dirA, err);
+            printf("    read-only approval key: %s\n", N(err).c_str());
+            Check(failed && !err.empty(), "read-only approval key: SetAutostart(true) fails with an error text");
+            Check(!install::AutostartEnabled(&stored) && stored.empty(), "... and the Run value it wrote first is removed again");
+            SetSddl(kApprovedTest, L"D:(A;;KA;;;WD)");
+            // a user-disabled entry (Run value C:\A, record byte0 = 3): a failed re-enable for C:\B leaves it exactly as it was
+            Check(install::SetAutostart(true, dirA, err), "SetAutostart(true) C:\\A with the key writable again");
+            ApprovedWriteByte0(3);
+            SetSddl(kApprovedTest, L"D:P(A;;KR;;;WD)");
+            Check(!install::SetAutostart(true, dirB, err), "read-only approval key: re-enabling a user-disabled entry fails");
+            Check(!install::AutostartEnabled(&stored) && stored == install::AutostartCommand(dirA),
+                  "... and the old Run value (C:\\A, still user-disabled) is restored");
+            SetSddl(kApprovedTest, L"D:(A;;KA;;;WD)");
+            Check(install::SetAutostart(false, dirA, err) && !install::AutostartEnabled(&stored) && stored.empty(),
+                  "SetAutostart(false) cleans up after the read-only key test");
+        } else {
+            Check(false, "could not make the test approval key read-only");
+        }
     }
     install::SetAutostartTestKey(L"");
+    RegDeleteKeyW(HKEY_CURRENT_USER, L"Software\\OpenXR-EyeCapture-Test\\RunApproved");
 
     install::SetTestRoots(L"", L"");
     Cleanup();

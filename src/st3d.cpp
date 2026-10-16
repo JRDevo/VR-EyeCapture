@@ -211,8 +211,9 @@ bool PatchStereoSpherical(const std::wstring& path, unsigned char stereoMode, bo
         // stsd: version/flags(4) entry_count(4) then entries
         const uint64_t e0 = stsd.off + stsd.hdr + 8;
         if (!ParseBox(moov, e0, stsd.off + stsd.size, entry)) continue;
+        // av01 (AV1, ISO/IEC 14496-12 + the AV1-ISOBMFF binding) is a VisualSampleEntry like hvc1 / avc1: same 78-byte fixed part.
         if (memcmp(entry.type, "hvc1", 4) && memcmp(entry.type, "hev1", 4) && memcmp(entry.type, "avc1", 4) &&
-            memcmp(entry.type, "avc3", 4)) {
+            memcmp(entry.type, "avc3", 4) && memcmp(entry.type, "av01", 4)) {
             snprintf(msg, sizeof(msg), "st3d: unexpected video sample entry '%s'", entry.type);
             report = msg;
             return false;

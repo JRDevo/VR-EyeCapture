@@ -1,12 +1,16 @@
 // head_smoothing_test -- CPU unit test of src/head_smoothing (filter, conventions, roll lock, follow, edge guard) and
-// src/dome (VR180 / VR360 size, lon / lat convention, dome frame, eye matrix, world lock).
+// src/dome (VR180 / VR360 size, lon / lat convention, dome frame, eye matrix, world lock) and src/yt_layout
+// (record_for_youtube frame sizes: PredictYtLayout == the tray's pp::PredictLayout, the codec / max_width limits, taps).
 // No GPU, no files. Exit code 0 = all checks passed.
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <string>
 #include "dome.h"
 #include "head_smoothing.h"
 #include "test_motion.h"
+#include "yt_layout.h"
+#include "../tray/postprocess.h"   // pp::PredictLayout (header-only arithmetic): the YouTube layout must match it exactly
 
 namespace {
 int g_fail = 0;
@@ -300,6 +304,138 @@ int main() {
                (u0 - 0.5) * 180, (0.5 - v0) * 180, f.yawDeg);
         Check(in && std::fabs((u0 - 0.5) * 180 - 7) < 1e-9 && std::fabs(v0 - 0.5) < 1e-12 && worst < 1e-12,
               "world lock: marker pixel independent of the head pose (lon = +start yaw, lat 0)", worst);
+    }
+
+    {   // re-projection output at the recorded size (max_width / codec limit)
+        const StageFit n0 = FitStageOutput(3384, 3384, 4630, 0, 8192);
+        Check(!n0.scaled && n0.eyeW[0] == 3384 && n0.eyeW[1] == 3384 && n0.h == 4630 && n0.taps == 1,
+              "fits already: native size, 1 tap", (double)n0.h);
+        const StageFit a = FitStageOutput(3384, 3384, 4630, 3840, 8192);
+        Check(a.scaled && a.eyeW[0] == 1920 && a.eyeW[1] == 1920 && a.h == 2626 && a.taps == 2,
+              "6768 wide -> max_width 3840: 1920 | 1920 x 2626, 1.76x -> 2 x 2 taps", (double)a.h);
+        const StageFit b = FitStageOutput(3384, 3384, 4630, 1280, 8192);
+        Check(b.eyeW[0] + b.eyeW[1] <= 1280 && b.eyeW[0] == 640 && b.h == 876 && b.taps == 3,
+              "max_width 1280: 640 | 640 x 876, 5.3x -> 3 x 3 taps", (double)b.taps);
+        const StageFit c = FitStageOutput(9272 / 2, 9272 / 2, 5242, 4096, 4096);   // H.264 limit, no max_width (as recorder.cpp passes it)
+        Check(c.scaled && c.eyeW[0] + c.eyeW[1] <= 4096 && c.h <= 4096 && c.eyeW[0] % 2 == 0 && c.h % 2 == 0,
+              "codec limit 4096 alone also shrinks the render", (double)(c.eyeW[0] + c.eyeW[1]));
+        const StageFit d = FitStageOutput(1408, 1300, 1440, 1001, 0);   // unequal eyes (raw layout), odd max
+        Check(d.eyeW[0] + d.eyeW[1] <= 1001 && d.eyeW[0] % 2 == 0 && d.eyeW[1] % 2 == 0 && d.eyeW[0] > d.eyeW[1],
+              "unequal eyes keep their ratio, sum <= max_width, even", (double)(d.eyeW[0] + d.eyeW[1]));
+        const StageFit g = FitStageOutput(6120, 6120, 6496, 8192, 8192);   // in game (ATS on VDXR, raw layout): 1.494x
+        Check(g.scaled && g.eyeW[0] == 4096 && g.eyeW[1] == 4096 && g.h == 4348 && g.taps == 2,
+              "12240x6496 -> 8192x4348 (1.49x) -> 2 x 2 taps", (double)g.taps);
+        const StageFit lo = FitStageOutput(3384, 3384, 4630, 6000, 8192);   // 1.13x: one tap is enough
+        Check(lo.scaled && lo.eyeW[0] + lo.eyeW[1] <= 6000 && lo.taps == 1, "6768 -> max_width 6000 (1.13x) -> 1 tap", (double)lo.taps);
+        const StageFit hi = FitStageOutput(3384, 3384, 4630, 5600, 8192);   // 1.21x: just above the single-tap limit
+        Check(hi.scaled && hi.taps == 2, "6768 -> max_width 5600 (1.21x) -> 2 x 2 taps", (double)hi.taps);
+        const StageFit t = FitStageOutput(8000, 8000, 8000, 256, 0);
+        Check(t.taps == 4, "huge minification -> taps clamped to 4", (double)t.taps);
+        const StageFit h = FitStageOutput(1000, 1000, 9000, 0, 4096);   // height-limited
+        Check(h.scaled && h.h <= 4096 && h.eyeW[0] <= 456, "height limit scales the width too", (double)h.h);
+    }
+
+    printf("record_for_youtube layout (yt_layout.h)\n");
+    {
+        auto is = [](const YtLayout& l, int cw, int ch, int fw, int fh, int sw, int sh) {
+            return l.cw == cw && l.ch == ch && l.fw == fw && l.fh == fh && l.sw == sw && l.sh == sh;
+        };
+        // Quest 3 (symmetric eye 4096x4630) -- the README / DEVELOPMENT numbers
+        const YtLayout q169 = PredictYtLayout(4096, 4630, Layout3d::TbHalf, EyeCrop::Wide169, kYtShortSide);
+        Check(is(q169, 4096, 2304, 7680, 4320, 7680, 2160), "4096x4630 16:9 tb_half: crop 4096x2304 -> frame 7680x4320, eye 7680x2160", q169.fw);
+        const YtLayout q43 = PredictYtLayout(4096, 4630, Layout3d::TbHalf, EyeCrop::Std43, kYtShortSide);
+        Check(is(q43, 4096, 3072, 5760, 4320, 5760, 2160), "4096x4630 4:3 tb_half: crop 4096x3072 -> frame 5760x4320, eye 5760x2160", q43.fw);
+        const YtLayout qn = PredictYtLayout(4096, 4630, Layout3d::TbHalf, EyeCrop::None, kYtShortSide);
+        Check(is(qn, 4096, 4630, 4320, 4884, 4320, 2442), "4096x4630 none tb_half: no crop -> frame 4320x4884 (short side = the width), eye 4320x2442", qn.fh);
+        const YtLayout qsh = PredictYtLayout(4096, 4630, Layout3d::SbsHalf, EyeCrop::Wide169, kYtShortSide);
+        Check(is(qsh, 4096, 2304, 7680, 4320, 3840, 4320), "4096x4630 16:9 sbs_half: frame 7680x4320, eye 3840x4320", qsh.fw);
+        const YtLayout qsf = PredictYtLayout(4096, 4630, Layout3d::SbsFull, EyeCrop::Wide169, kYtShortSide);
+        Check(is(qsf, 4096, 2304, 8192, 2304, 4096, 2304), "4096x4630 16:9 sbs_full: long side 8192 caps it -> frame 8192x2304", qsf.fw);
+        const YtLayout qtf = PredictYtLayout(4096, 4630, Layout3d::TbFull, EyeCrop::Wide169, kYtShortSide);
+        Check(is(qtf, 4096, 2304, 4320, 4860, 4320, 2430), "4096x4630 16:9 tb_full: frame 4320x4860, eye 4320x2430", qtf.fh);
+        const YtLayout wide = PredictYtLayout(4096, 2000, Layout3d::TbHalf, EyeCrop::Wide169, kYtShortSide);
+        Check(wide.ch == 2000, "an eye already wider than 16:9 is not cropped", wide.ch);
+        // 4:3pad: the 4:3 crop, black bars left and right up to 16:9 (eye units, before the scale); the picture in the middle
+        const YtLayout qp = PredictYtLayout(4096, 4630, Layout3d::TbHalf, EyeCrop::Pad43, kYtShortSide);
+        Check(is(qp, 4096, 3072, 7680, 4320, 7680, 2160) && qp.pw == 5462 && qp.vw == 5760 && qp.vx >= 958 && qp.vx <= 962,
+              "4096x4630 4:3pad tb_half: crop 4096x3072, pad 5462 -> frame 7680x4320, eye 7680x2160, picture 5760 at ~960", qp.vx);
+        Check(qp.vx + qp.vw <= qp.sw && q43.vw == q43.sw && q43.vx == 0 && q43.pw == q43.cw && q169.vw == q169.sw && q169.vx == 0,
+              "4:3pad picture inside the eye; 4:3 / 16:9: picture = eye, no bars", q43.vx);
+        const YtLayout wp = PredictYtLayout(4096, 2000, Layout3d::TbHalf, EyeCrop::Pad43, kYtShortSide);
+        Check(is(wp, wide.cw, wide.ch, wide.fw, wide.fh, wide.sw, wide.sh) && wp.pw == wp.cw && wp.vw == wp.sw && wp.vx == 0,
+              "4:3pad, an eye already wider than 16:9: neither cropped nor padded (= 16:9's numbers)", wp.pw);
+        const YtLayout qpsh = PredictYtLayout(4096, 4630, Layout3d::SbsHalf, EyeCrop::Pad43, kYtShortSide);
+        Check(is(qpsh, 4096, 3072, 7680, 4320, 3840, 4320) && qpsh.vw == 2880 && qpsh.vx >= 478 && qpsh.vx <= 482,
+              "4096x4630 4:3pad sbs_half: frame 7680x4320, eye 3840x4320, picture 2880 at ~480", qpsh.vx);
+        // run_selftests.ps1 youtube cases (XR_EYE_CAPTURE_TEST_YT_SHORT)
+        const YtLayout ta = PredictYtLayout(1920, 1080, Layout3d::TbHalf, EyeCrop::Wide169, 540);
+        Check(is(ta, 1920, 1080, 960, 540, 960, 270), "selftest a: 1920x1080 tb_half short 540 -> 960x540, eye 960x270", ta.fw);
+        const YtLayout tb = PredictYtLayout(1920, 1080, Layout3d::SbsHalf, EyeCrop::Wide169, 540);
+        Check(is(tb, 1920, 1080, 960, 540, 480, 540), "selftest b: 1920x1080 sbs_half short 540 -> 960x540, eye 480x540", tb.fw);
+        const YtLayout tc = PredictYtLayout(1200, 1600, Layout3d::TbHalf, EyeCrop::Std43, 450);
+        Check(is(tc, 1200, 900, 600, 452, 600, 226), "selftest c: 1200x1600 4:3 tb_half short 450 -> crop 1200x900 -> 600x452, eye 600x226", tc.fh);
+        const YtLayout te = PredictYtLayout(1200, 1600, Layout3d::TbHalf, EyeCrop::Pad43, 450);
+        Check(is(te, 1200, 900, 800, 452, 800, 226) && te.pw == 1600 && te.vw == 600 && te.vx == 100,
+              "selftest e: 1200x1600 4:3pad tb_half short 450 -> pad 1600x900 -> 800x452, eye 800x226, picture 600 at 100", te.fw);
+        const YtLayout td = PredictYtLayout(1920, 1080, Layout3d::TbHalf, EyeCrop::Wide169, kYtShortSide);
+        Check(is(td, 1920, 1080, 7680, 4320, 7680, 2160), "selftest d: 1920x1080 tb_half short 4320 -> 7680x4320", td.fw);
+        // identical to the tray's 8K-step arithmetic over a sweep (eye sizes, layouts, crops, short sides incl. 0 = native)
+        int mism = 0, n = 0, badPic = 0;
+        const Layout3d lays[4] = {Layout3d::TbHalf, Layout3d::SbsHalf, Layout3d::SbsFull, Layout3d::TbFull};
+        const EyeCrop crops[4] = {EyeCrop::Wide169, EyeCrop::Std43, EyeCrop::None, EyeCrop::Pad43};
+        const int shorts[4] = {0, 4320, 540, 2160};
+        for (int w = 640; w <= 6200; w += 389)
+            for (int h = 480; h <= 6600; h += 431)
+                for (Layout3d l : lays)
+                    for (EyeCrop c : crops)
+                        for (int sh : shorts) {
+                            const YtLayout a = PredictYtLayout(w, h, l, c, sh);
+                            const pp::LayoutSize b = pp::PredictLayout(w, h, l, c, sh);
+                            ++n;
+                            if (a.cw != b.cw || a.ch != b.ch || a.fw != b.fw || a.fh != b.fh || a.sw != b.sw || a.sh != b.sh ||
+                                a.pw != b.pw || a.vw != b.vw || a.vx != b.vx)
+                                ++mism;
+                            // the picture inside the eye; unpadded crops: the whole eye
+                            if (a.vx < 0 || a.vx + a.vw > a.sw || (c != EyeCrop::Pad43 && (a.pw != a.cw || a.vw != a.sw || a.vx != 0))) ++badPic;
+                        }
+        Check(mism == 0 && n > 1000, "PredictYtLayout == pp::PredictLayout (tray 8K step) on every case of the sweep (mismatches)", mism);
+        Check(badPic == 0, "sweep: the picture (vw at vx) inside the eye; = the eye unless 4:3pad (bad cases)", badPic);
+        // limits on top (recorder: VideoCodecMaxSide, max_width)
+        const YtFit fn = FitYtLayout(q169, Layout3d::TbHalf, VideoCodecMaxSide(VideoCodec::Hevc), 0);
+        Check(!fn.Scaled() && fn.fw == 7680 && fn.fh == 4320 && fn.sw == 7680 && fn.sh == 2160, "HEVC, no max_width: 7680x4320 as predicted", fn.fw);
+        const YtFit f264 = FitYtLayout(q169, Layout3d::TbHalf, VideoCodecMaxSide(VideoCodec::H264), 0);
+        Check(f264.byCodec && !f264.byWidth && f264.fw == 4096 && f264.fh == 2304 && f264.sw == 4096 && f264.sh == 1152,
+              "H.264 limit 4096: 7680x4320 -> 4096x2304, eye 4096x1152", f264.fh);
+        const YtFit fmw = FitYtLayout(q169, Layout3d::TbHalf, VideoCodecMaxSide(VideoCodec::Hevc), 3840);
+        Check(fmw.byWidth && !fmw.byCodec && fmw.fw == 3840 && fmw.fh == 2160 && fmw.sw == 3840 && fmw.sh == 1080,
+              "max_width 3840: 7680x4320 -> 3840x2160, eye 3840x1080", fmw.fw);
+        const YtFit fboth = FitYtLayout(q169, Layout3d::TbHalf, VideoCodecMaxSide(VideoCodec::H264), 3840);
+        Check(fboth.byWidth && fboth.byCodec && fboth.fw == 3840 && fboth.fh == 2160, "H.264 + max_width 3840: the smaller (3840x2160)", fboth.fw);
+        const YtFit fbig = FitYtLayout(q169, Layout3d::TbHalf, VideoCodecMaxSide(VideoCodec::Hevc), 9000);
+        Check(!fbig.Scaled() && fbig.fw == 7680, "max_width above the frame width: unchanged", fbig.fw);
+        const YtFit fs = FitYtLayout(qsh, Layout3d::SbsHalf, VideoCodecMaxSide(VideoCodec::H264), 0);
+        Check(fs.fw == 2 * fs.sw && fs.fh == fs.sh && fs.fw <= 4096 && fs.fh <= 4096 && fs.sw % 2 == 0 && fs.sh % 2 == 0,
+              "sbs_half under the H.264 limit: 2 eyes side by side, even, <= 4096", fs.fw);
+        Check(fn.vw == fn.sw && fn.vx == 0 && f264.vw == f264.sw && f264.vx == 0, "16:9 under the limits: picture = the eye", f264.vw);
+        const YtFit fp = FitYtLayout(qp, Layout3d::TbHalf, VideoCodecMaxSide(VideoCodec::Hevc), 0);
+        Check(!fp.Scaled() && fp.fw == 7680 && fp.fh == 4320 && fp.vw == qp.vw && fp.vx == qp.vx, "4:3pad, HEVC: 7680x4320, picture as predicted", fp.vw);
+        const YtFit fp264 = FitYtLayout(qp, Layout3d::TbHalf, VideoCodecMaxSide(VideoCodec::H264), 0);
+        Check(fp264.fw == 4096 && fp264.fh == 2304 && fp264.vw == 3072 && fp264.vx >= 510 && fp264.vx <= 514 &&
+              fp264.vx + fp264.vw <= fp264.sw && fp264.vx % 2 == 0,
+              "4:3pad, H.264 4096: 4096x2304, picture 3072 at ~512 (even, inside the eye)", fp264.vx);
+        const YtFit fodd = FitYtLayout(tc, Layout3d::TbHalf, 8192, 333);
+        Check(fodd.fw <= 333 && fodd.sw % 2 == 0 && fodd.sh % 2 == 0 && fodd.fh == 2 * fodd.sh, "odd max_width: frame <= it, even eyes", fodd.fw);
+        // taps: the larger minification of the two axes, FitStageOutput's rule
+        Check(YtTaps(4096, 2304, 7680, 2160) == 1, "Quest 8K tb_half (0.53x wide, 1.07x tall): 1 tap", YtTaps(4096, 2304, 7680, 2160));
+        Check(YtTaps(4096, 3072, 5760, 2160) == 2, "Quest 8K 4:3pad (picture 5760: 0.71x wide, 1.42x tall): 2 x 2 taps",
+              YtTaps(4096, 3072, 5760, 2160));
+        Check(YtTaps(1920, 1080, 960, 270) == 2, "selftest a (2x wide, 4x tall): 2 x 2 taps", YtTaps(1920, 1080, 960, 270));
+        Check(YtTaps(1200, 900, 600, 226) == 2, "selftest c (2x, 3.98x): 2 x 2 taps", YtTaps(1200, 900, 600, 226));
+        Check(YtTaps(4096, 2304, 3840, 1080) == 2, "max_width 3840 tb_half (1.07x, 2.13x): 2 x 2 taps", YtTaps(4096, 2304, 3840, 1080));
+        Check(YtTaps(4096, 4096, 512, 256) == 4, "16x: clamped to 4", YtTaps(4096, 4096, 512, 256));
+        Check(std::string(YtPackingKey(Layout3d::SbsFull)) == "sbs_full" && std::string(YtCropKey(EyeCrop::Std43)) == "4:3" &&
+              std::string(YtCropKey(EyeCrop::Pad43)) == "4:3pad" && std::string(YtCropKey(EyeCrop::None)) == "none" &&
+              YtTopBottom(Layout3d::TbFull) && !YtTopBottom(Layout3d::SbsHalf), "keys / top-bottom flag", 0);
     }
 
     printf("=== head_smoothing_test %s\n", g_fail ? "FAIL" : "PASS");

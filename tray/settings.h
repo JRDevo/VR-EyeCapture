@@ -12,6 +12,7 @@
 #include <utility>
 #include <vector>
 #include "config.h"
+#include "postprocess.h"
 
 namespace settings {
 
@@ -42,23 +43,57 @@ void SetReporter(Reporter r);
 void ShowDialog(const std::wstring& configPath, std::function<void(const std::vector<std::wstring>& changed)> onSaved);
 HWND DialogWindow();   // the open settings window, or nullptr
 
+// The "Conversions" group (queue / progress view) and the "Convert a recording..." / "Add to queue..." buttons talk to the
+// tray's conversion worker through these callbacks (the window runs on the tray's UI thread, so they are called on that
+// thread). The tray sets them once before the first ShowDialog; an unset hook disables its control (settings_test links the
+// window without a worker).
+struct QueueHooks {
+    std::function<pp::State()>                   state;           // pp::Processor::GetState
+    std::function<std::vector<pp::QueuedJob>()>  queued;          // pp::Processor::Queued (jobs without a snapshot: fmt = config.ini's)
+    // the multi-select MP4 Open dialog; each file queued with `fmt` (the values the window shows, saved or not):
+    // start = forced ("Convert a recording..."), else held by the user ("Add to queue...")
+    std::function<void(HWND owner, const pp::JobFormat& fmt, bool start)> pickFiles;
+    std::function<void()>                        togglePause;     // pause / resume the running job
+    std::function<void()>                        cancel;          // cancel the running job
+    std::function<void(unsigned long long id)>   start;           // force a waiting job (or the running, held one)
+    std::function<void()>                        startAll;        // force every waiting job (they run oldest first)
+    std::function<void(unsigned long long id)>   remove;          // drop a waiting job
+};
+void SetQueueHooks(const QueueHooks& hooks);
+// The worker changed state: refresh the queue view now (it also refreshes every 500 ms on its own). No-op when closed.
+void NotifyQueueChanged();
+
 // Control IDs, so tests can drive the window through SendMessage.
 enum : int {
     ID_HOTKEY = 2001, ID_HOTKEY_PICK, ID_CODEC, ID_BITRATE, ID_MAXFPS, ID_OUTDIR, ID_BROWSE, ID_AUDIO, ID_AUDIODEV,
     ID_PROJECTION, ID_FILL, ID_FILLFADE, ID_SYMFOV, ID_SWAP, ID_ROLL, ID_SMOOTH, ID_SMOOTHVAL, ID_FOVSCALE,
     ID_INDICATOR, ID_INDSIZE, ID_INDOPACITY, ID_POSTMKV, ID_KEEPMP4, ID_POSTFLAT, ID_REQTRAY, ID_LOGLEVEL,
     ID_SAVE, ID_CANCEL, ID_OPENINI, ID_DEFAULTS,
-    ID_HELPTEXT,  // the read-only "What does this do?" panel (appended: existing ids do not move)
+    ID_HELPTEXT,  // the read-only "Description" panel (appended: existing ids do not move)
     ID_INDX, ID_INDY, ID_INDZ,  // indicator position (appended after ID_HELPTEXT for the same reason)
     ID_POSTYT8K,                // hidden check bound to post_yt8k (appended for the same reason)
-    ID_YTMODE,                  // "Make for YouTube" drop-down: drives the hidden ID_POSTMKV / ID_POSTYT8K checks
+    ID_YTMODE,                  // "YouTube output" drop-down: drives the hidden ID_POSTMKV / ID_POSTYT8K checks
     ID_AUTOSTART,               // "Start with Windows" check (HKCU Run key, not a config.ini key; appended: existing ids do not move)
-    ID_LAYOUT3D,              // "3D layout of the YouTube copy" drop-down bound to layout_3d (appended: existing ids do not move)
-    ID_HOTKEY_ADD,              // "Add another...": captures a binding and appends it to the hotkey list (appended for the same reason)
-    ID_POSTWHEN,                // "Convert recordings" drop-down bound to post_when (appended for the same reason)
-    ID_EYECROP,                 // "Crop each eye" drop-down bound to eye_crop (appended for the same reason)
-    ID_OVERLAYS                 // "Record overlays" check bound to record_overlays (appended for the same reason)
+    ID_LAYOUT3D,              // "Output layout" drop-down bound to layout_3d (appended: existing ids do not move)
+    ID_HOTKEY_ADD,              // "Add...": captures a binding and appends it to the hotkey list (appended for the same reason)
+    ID_POSTWHEN,                // "Convert" drop-down bound to post_when (appended for the same reason)
+    ID_EYECROP,                 // "Eye crop" drop-down bound to eye_crop (appended for the same reason)
+    ID_OVERLAYS,                // "Include overlay layers" check bound to record_overlays (appended for the same reason)
+    ID_MAXWIDTH,                // "Resolution" drop-down bound to max_width (appended for the same reason)
+    ID_INDPREVIEW,              // owner-drawn live preview of the indicator dot in the headset view (not a config key; appended for the same reason)
+    ID_LAYOUTPREVIEW,           // owner-drawn live preview of the 3D layout: frame shapes and pixel sizes (not a config key; appended for the same reason)
+    // Conversion controls (not config keys; appended for the same reason): "Convert a recording..." in the Export group and the
+    // "Conversions" group (running job status + progress bar + Pause / Cancel; waiting list + Start now / Remove)
+    ID_CONVERTPICK, ID_QSTATUS, ID_QPROGRESS, ID_QPAUSE, ID_QCANCEL, ID_QLIST, ID_QSTART, ID_QREMOVE,
+    ID_BITRATEHINT,             // "about 54 GB per hour" next to the bitrate drop-down (not a config key)
+    ID_YT8KBITRATE,             // "8K bitrate" drop-down bound to yt8k_bitrate_mbps
+    ID_OUTFREE,                 // free space of the output folder's drive, under the folder field (not a config key)
+    ID_YT8KCODEC,               // "8K codec" drop-down bound to yt8k_codec (appended: existing ids do not move)
+    ID_ADDQUEUE,                // "Add to queue...": picked MP4s wait in the list with the window's format (not a config key)
+    ID_QSTARTALL,               // "Start all": every waiting job (not a config key)
+    ID_RECORDYT                 // "Record directly in the YouTube layout" check bound to record_for_youtube (appended: existing ids do not move)
 };
+// ID_QSTART reads "Start" and acts on every selected item of ID_QLIST (a multi-select list box: LB_SETSEL / LB_GETSELITEMS).
 extern const wchar_t* const kWindowTitle;
 
 } // namespace settings

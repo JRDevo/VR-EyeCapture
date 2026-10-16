@@ -152,6 +152,27 @@ SymmetricFov ComputeSymmetricFov(const float fovL[4], const float fovR[4], uint3
     return r;
 }
 
+StageFit FitStageOutput(uint32_t wL, uint32_t wR, uint32_t h, uint32_t maxW, uint32_t maxH) {
+    StageFit r;
+    r.eyeW[0] = wL; r.eyeW[1] = wR; r.h = h;
+    const uint64_t w = (uint64_t)wL + wR;
+    if (!w || !h) return r;
+    double f = 1.0;
+    if (maxW && w > maxW) f = std::min(f, (double)maxW / (double)w);
+    if (maxH && h > maxH) f = std::min(f, (double)maxH / (double)h);
+    if (f >= 1.0) return r;
+    auto even = [f](uint32_t v) { return std::max<uint32_t>(2u, 2u * (uint32_t)std::floor(v * f / 2.0 + 1e-7)); };
+    r.eyeW[0] = even(wL); r.eyeW[1] = even(wR);
+    // height: nearest even (keeps the aspect closest), but never above maxH
+    r.h = std::max<uint32_t>(2u, 2u * (uint32_t)std::lround(h * f / 2.0));
+    if (maxH && r.h > maxH) r.h = even(h);
+    r.factor = f;
+    r.scaled = true;
+    const double m = 1.0 / f;
+    r.taps = m <= 1.2 ? 1u : std::clamp<uint32_t>((uint32_t)std::ceil(m / 2.0), 2u, 4u);
+    return r;
+}
+
 double HeadSmoothingTimeConstant(float s) {
     if (s <= 0) return 0;
     return 0.05 * std::pow(30.0, ((double)s - 0.1) / 0.9);

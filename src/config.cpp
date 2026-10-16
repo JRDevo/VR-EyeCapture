@@ -158,8 +158,9 @@ KeyResult ApplyKey(Config& c, const std::wstring& key, std::wstring val) {
         if (!val.empty()) c.outputDir = val;
     } else if (key == L"codec") {
         const std::wstring l = Lower(val);
-        if (l == L"hevc" || l == L"h265" || l == L"h.265") c.hevc = true;
-        else if (l == L"h264" || l == L"h.264" || l == L"avc") c.hevc = false;
+        if (l == L"hevc" || l == L"h265" || l == L"h.265") c.codec = VideoCodec::Hevc;
+        else if (l == L"h264" || l == L"h.264" || l == L"avc") c.codec = VideoCodec::H264;
+        else if (l == L"av1") c.codec = VideoCodec::Av1;
         else ok = false;
     } else if (key == L"bitrate_mbps") {
         if (ParseUInt(val, u) && u <= 1000) c.bitrateMbps = u; else ok = false;
@@ -191,6 +192,15 @@ KeyResult ApplyKey(Config& c, const std::wstring& key, std::wstring val) {
         if (ParseBool(val, b)) c.keepMp4 = b; else ok = false;
     } else if (key == L"post_flat") {
         if (ParseBool(val, b)) c.postFlat = b; else ok = false;
+    } else if (key == L"record_for_youtube") {
+        if (ParseBool(val, b)) c.recordForYoutube = b; else ok = false;
+    } else if (key == L"yt8k_bitrate_mbps") {
+        if (ParseUInt(val, u) && u >= 20 && u <= 400) c.yt8kBitrateMbps = u; else ok = false;
+    } else if (key == L"yt8k_codec") {
+        const std::wstring l = Lower(val);
+        if (l == L"hevc" || l == L"h265" || l == L"h.265") c.yt8kCodec = VideoCodec::Hevc;
+        else if (l == L"av1") c.yt8kCodec = VideoCodec::Av1;
+        else ok = false;
     } else if (key == L"post_yt8k") {
         if (ParseBool(val, b)) c.postYt8k = b; else ok = false;
     } else if (key == L"post_when") {
@@ -198,6 +208,7 @@ KeyResult ApplyKey(Config& c, const std::wstring& key, std::wstring val) {
         if (l == L"now") c.postWhen = PostWhen::Now;
         else if (l == L"session_end") c.postWhen = PostWhen::SessionEnd;
         else if (l == L"game_exit") c.postWhen = PostWhen::GameExit;
+        else if (l == L"manual") c.postWhen = PostWhen::Manual;
         else ok = false;
     } else if (key == L"layout_3d") {
         const std::wstring l = Lower(val);
@@ -210,6 +221,7 @@ KeyResult ApplyKey(Config& c, const std::wstring& key, std::wstring val) {
         const std::wstring l = Lower(val);
         if (l == L"16:9") c.eyeCrop = EyeCrop::Wide169;
         else if (l == L"4:3") c.eyeCrop = EyeCrop::Std43;
+        else if (l == L"4:3pad") c.eyeCrop = EyeCrop::Pad43;
         else if (l == L"none") c.eyeCrop = EyeCrop::None;
         else { c.eyeCrop = EyeCrop::Wide169; ok = false; }   // unknown: 16:9 (the bad-value message names the key)
     } else if (key == L"ffmpeg_path") {

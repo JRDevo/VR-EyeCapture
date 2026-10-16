@@ -205,7 +205,7 @@ foreach ($ovCase in @(@{ api = 'd3d11'; on = $true }, @{ api = 'd3d12'; on = $tr
     $out = Join-Path $root "build\e2e_out\$name"
     if (Test-Path $out) { Remove-Item -Recurse -Force $out }
     Write-Host "`n=== $api / two, overlays, record_overlays = $(if ($on) { 1 } else { 0 })" -ForegroundColor Cyan
-    $env:XR_EYE_CAPTURE_CONFIG = 'projection=flat;record_overlays=' + $(if ($on) { '1' } else { '0' })
+    $env:XR_EYE_CAPTURE_CONFIG = 'projection=flat;head_smoothing=0;record_overlays=' + $(if ($on) { '1' } else { '0' })
     $o = & $exe --api $api --layout two --seconds 6 --record 4 --out-dir $out --overlays 2>&1 | Out-String
     if ($null -ne $prevCfg) { $env:XR_EYE_CAPTURE_CONFIG = $prevCfg } else { Remove-Item Env:\XR_EYE_CAPTURE_CONFIG -ErrorAction SilentlyContinue }
     $o.Trim().Split("`n") | Where-Object { $_ -match 'E2E_|mock runtime|FAIL' } | ForEach-Object { Write-Host "  $_" }

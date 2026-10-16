@@ -12,3 +12,7 @@ CMakeSettings.json
 /eye_capture.pdb
 /XR_APILAYER_JRDEVO_eye_capture.json
 /EyeCaptureTray.exe
+
+# The tray's saved conversion queue (tray/postprocess.cpp SaveQueue), next to EyeCaptureTray.exe
+/queue.json
+/queue.json.tmp

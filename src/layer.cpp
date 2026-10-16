@@ -43,6 +43,7 @@
 #include "overlay.h"
 #include "recorder.h"
 #include "shared_status.h"
+#include "yt_layout.h"
 
 #define LAYER_NAME "XR_APILAYER_JRDEVO_eye_capture"
 
@@ -205,8 +206,8 @@ void InitProcess() {
     LOGI("layer dll folder %s | config %s | output %s | hotkey %s | codec %s %u Mb/s | max_width %u | max_fps %u | "
          "audio %s%s%s | gamma %s",
          elog::Narrow(g_dllDir).c_str(), g_cfg.loadedFrom.empty() ? "(defaults)" : elog::Narrow(g_cfg.loadedFrom).c_str(),
-         elog::Narrow(g_cfg.outputDir).c_str(), elog::Narrow(g_cfg.hotkey.text).c_str(), g_cfg.hevc ? "HEVC" : "H.264",
-         g_cfg.bitrateMbps ? g_cfg.bitrateMbps : (g_cfg.hevc ? 120u : 80u), g_cfg.maxWidth, g_cfg.maxFps,
+         elog::Narrow(g_cfg.outputDir).c_str(), elog::Narrow(g_cfg.hotkey.text).c_str(), VideoCodecName(g_cfg.codec),
+         g_cfg.bitrateMbps ? g_cfg.bitrateMbps : VideoCodecDefaultMbps(g_cfg.codec), g_cfg.maxWidth, g_cfg.maxFps,
          g_cfg.audioEnabled ? "on" : "off", g_cfg.audioDevice.empty() ? "" : " device~",
          elog::Narrow(g_cfg.audioDevice).c_str(),
          g_cfg.gamma == GammaMode::Auto ? "auto" : g_cfg.gamma == GammaMode::Srgb ? "srgb" : "linear");
@@ -333,7 +334,7 @@ void StartRecording(SessionData* sd, const EyeView& L, const EyeView& R) {
 
     RecorderSettings rs;
     rs.path = g_cfg.outputDir + L"\\" + name;
-    rs.hevc = g_cfg.hevc;
+    rs.codec = g_cfg.codec;
     rs.bitrate = g_cfg.bitrateMbps * 1000000u;
     rs.fps = fps;
     rs.maxFps = g_cfg.maxFps;
@@ -342,6 +343,9 @@ void StartRecording(SessionData* sd, const EyeView& L, const EyeView& R) {
     rs.audioDevice = g_cfg.audioDevice;
     rs.head = g_cfg.head;
     rs.dome = g_cfg.dome;
+    rs.youtube = g_cfg.recordForYoutube;   // record_for_youtube: render the YouTube layout (layout_3d, eye_crop) directly
+    rs.layout3d = g_cfg.layout3d;
+    rs.eyeCrop = g_cfg.eyeCrop;
     rs.startFovValid = L.hasPose && R.hasPose;
     for (int i = 0; i < 4; ++i) { rs.startFov[0][i] = L.fov[i]; rs.startFov[1][i] = R.fov[i]; }
     rs.startEyeW[0] = L.w; rs.startEyeH[0] = L.h; rs.startEyeW[1] = R.w; rs.startEyeH[1] = R.h;
@@ -398,11 +402,14 @@ void ReloadConfigForRecording() {
     auto F = [](float f) { char b[32]; snprintf(b, sizeof(b), "%g", f); return std::string(b); };
     Config& c = g_cfg;
     note("output_dir", elog::Narrow(c.outputDir), elog::Narrow(n.outputDir));
-    note("codec", c.hevc ? "hevc" : "h264", n.hevc ? "hevc" : "h264");
+    note("codec", VideoCodecKey(c.codec), VideoCodecKey(n.codec));
     note("bitrate_mbps", U(c.bitrateMbps), U(n.bitrateMbps));
     note("fps", U(c.fps), U(n.fps));
     note("max_fps", U(c.maxFps), U(n.maxFps));
     note("max_width", U(c.maxWidth), U(n.maxWidth));
+    note("record_for_youtube", B(c.recordForYoutube), B(n.recordForYoutube));
+    note("layout_3d", YtPackingKey(c.layout3d), YtPackingKey(n.layout3d));
+    note("eye_crop", YtCropKey(c.eyeCrop), YtCropKey(n.eyeCrop));
     note("gamma", c.gamma == GammaMode::Auto ? "auto" : c.gamma == GammaMode::Srgb ? "srgb" : "linear",
          n.gamma == GammaMode::Auto ? "auto" : n.gamma == GammaMode::Srgb ? "srgb" : "linear");
     note("swap_eyes", B(c.swapEyes), B(n.swapEyes));
@@ -425,8 +432,9 @@ void ReloadConfigForRecording() {
     note("log_level", lv(c.logLevel), lv(n.logLevel));
 
     const bool outChanged = c.outputDir != n.outputDir;
-    c.outputDir = n.outputDir; c.hevc = n.hevc; c.bitrateMbps = n.bitrateMbps; c.fps = n.fps; c.maxFps = n.maxFps;
+    c.outputDir = n.outputDir; c.codec = n.codec; c.bitrateMbps = n.bitrateMbps; c.fps = n.fps; c.maxFps = n.maxFps;
     c.maxWidth = n.maxWidth; c.gamma = n.gamma; c.swapEyes = n.swapEyes; c.recordOverlays = n.recordOverlays;
+    c.recordForYoutube = n.recordForYoutube; c.layout3d = n.layout3d; c.eyeCrop = n.eyeCrop;   // record_for_youtube layout
     c.audioEnabled = n.audioEnabled;
     c.audioDevice = n.audioDevice; c.head = n.head; c.dome = n.dome; c.logLevel = n.logLevel;
     elog::SetLevel(c.logLevel);

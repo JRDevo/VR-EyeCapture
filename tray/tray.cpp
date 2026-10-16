@@ -3,8 +3,18 @@
 //
 // Tray icon: grey = no game, green = game running (ready), red = recording, amber = starting / finalizing / failed,
 // blue = converting a finished recording (post-processing, see tray/postprocess.h).
-// Right-click (or left-click) menu: Start / Stop recording, Open captures folder, Convert last recording now, Open log,
+// Left-click: the Settings window (all settings + the conversion queue / progress). Right-click menu: Start / Stop
+// recording, Open captures folder, Convert last recording now, Convert a recording... (standard Open dialog, one or more MP4s, queued forced like "Convert now",
+// each with config.ini's conversion settings as its format snapshot), Open log,
 // Settings..., Edit config, Register / Unregister for VR games..., Exit.
+// While a conversion runs, the menu starts with a greyed info line ("Converting <file> (8K) 42% - about 6 min left"),
+// "Pause conversion" / "Resume conversion" (suspends / resumes the ffmpeg; the ETA ignores paused time) and
+// "Cancel conversion" (ends the ffmpeg, deletes that step's partial output, keeps the MP4, skips the rest of the job;
+// queued jobs continue). See pp::Processor::TogglePause / Cancel. Exit while converting does the same cleanup (Stop).
+// Test hooks (the menu uses TrackPopupMenu(TPM_RETURNCMD), so WM_COMMAND cannot drive it): post to the message-only
+// window of class "OpenXREyeCaptureTray": WM_APP+3 = Settings, WM_APP+5 = pause / resume toggle, WM_APP+6 = cancel,
+// WM_APP+7 = "Convert last recording now" (the menu items call the same code).
+// Test mode (EYECAP_TRAY_TEST_SHM): balloons are logged ("tray: balloon [title] text"), never shown on the desktop.
 // Registration (tray/install.h): at start the tray removes its own HKCU duplicates and checks HKLM; when the layer is
 // not registered for this folder it offers to register it and runs itself elevated (one UAC prompt) with --register.
 // Tooltip: game, API, resolution, fps, frames dropped, elapsed, conversion progress. Talks to the layer through
@@ -12,11 +22,17 @@
 // post_when (config.ini, re-read when the file changes): now = convert at once; session_end = hold the conversion queue
 // while an OpenXR session is live (the layer releases the status block -- ownerPid 0, ECS_NONE -- when the game destroys
 // its last session, even if the process keeps running); game_exit (default) = also hold while the process that made a
-// queued recording is still alive. See UpdateHold() and pp::Processor::SetHold.
+// queued recording is still alive; manual = a hold that never clears: recordings are queued and wait until the user starts
+// them (Settings window "Conversions" -> Start / Start all / Run now, "Convert a recording...", "Convert last recording now").
+// Settings "Add to queue..." jobs wait for Start / Start all whatever post_when says (pp::Processor userHeld); so does every
+// job restored from queue.json after a tray restart.
+// See UpdateHold() and pp::Processor::SetHold. Switching to manual keeps the queue; its jobs simply stay held (a running
+// non-forced job is suspended, like any hold) and are listed in the Settings window's queue view.
 // Start it BEFORE the game: the layer decides at xrCreateSession whether to arm (config require_tray=0 = always arm).
 #include <windows.h>
 #include <objbase.h>
 #include <shellapi.h>
+#include <commdlg.h>
 #include <cmath>
 #include <map>
 #include <set>
@@ -34,9 +50,13 @@ const UINT WM_TRAY = WM_APP + 1;
 const UINT WM_PP = WM_APP + 2;     // the post-processing worker changed state / queued a notice
 const UINT WM_OPEN_SETTINGS = WM_APP + 3;   // also posted by tests/settings_test.exe to open the Settings window
 const UINT WM_CHECK_REG = WM_APP + 4;       // posted once at start: registration prompt (inside the message loop)
+const UINT WM_PAUSE_JOB = WM_APP + 5;       // pause / resume the running conversion (= the menu item; tests post it)
+const UINT WM_CANCEL_JOB = WM_APP + 6;      // cancel the running conversion (= the menu item; tests post it)
+const UINT WM_CONVERT_LAST = WM_APP + 7;    // "Convert last recording now" (= the menu item; tests post it)
 const UINT kTimer = 1;
 const UINT kTipTimer = 2;     // one-shot: end of the "settings saved" tooltip
-enum : UINT { ID_TOGGLE = 100, ID_FOLDER, ID_CONVERT, ID_LOG, ID_SETTINGS, ID_CONFIG, ID_EXIT, ID_REGISTER, ID_UNREGISTER };
+enum : UINT { ID_TOGGLE = 100, ID_FOLDER, ID_CONVERT, ID_LOG, ID_SETTINGS, ID_CONFIG, ID_EXIT, ID_REGISTER, ID_UNREGISTER,
+               ID_CONVERT_PICK, ID_JOB_INFO, ID_JOB_PAUSE, ID_JOB_CANCEL };
 const wchar_t kAppTitle[] = L"OpenXR-EyeCapture";
 
 HINSTANCE      g_inst;
@@ -72,6 +92,7 @@ bool           g_regBusy = false;                  // a registration prompt / el
 // post_when (tray/postprocess.h hold). Producers: the game processes that made a queued recording (game_exit waits for
 // them to exit). Handles, not pids, so a re-used pid can never keep the queue held.
 PostWhen       g_postWhen = PostWhen::GameExit;    // cached; reloaded with the input bindings when config.ini changes
+pp::JobFormat  g_savedFmt;                         // config.ini's conversion keys (same reload): shown for jobs without a snapshot
 struct Proc { DWORD pid = 0; HANDLE h = nullptr; };
 Proc           g_lastOwner;                        // the last live owner of the status block (ownerPid is 0 once released)
 std::vector<Proc> g_producers;
@@ -131,8 +152,48 @@ std::wstring NormPath(const std::wstring& p) {
 
 bool Exists(const std::wstring& p) { return GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES; }
 
+// ---- balloons. Every balloon goes through SetBalloon. Test mode (EYECAP_TRAY_TEST_SHM): logged only, never shown, so
+// test runs do not flood the desktop with pop-ups (tests match the log line).
+// Fills the balloon fields of g_nid and adds NIF_INFO; the caller's next NIM_MODIFY shows it. log = false: not logged.
+void SetBalloon(const std::wstring& title, const std::wstring& text, bool error, bool log = true) {
+    if (log) LOGI("tray: balloon [%s] %s", elog::Narrow(title).c_str(), elog::Narrow(text).c_str());
+    if (g_testMode) return;
+    g_nid.uFlags |= NIF_INFO;
+    wcsncpy_s(g_nid.szInfoTitle, title.c_str(), _TRUNCATE);
+    wcsncpy_s(g_nid.szInfo, text.c_str(), _TRUNCATE);
+    g_nid.dwInfoFlags = error ? NIIF_ERROR : NIIF_INFO;
+}
+
+// A balloon on its own (outside Refresh).
+void Balloon(const std::wstring& title, const std::wstring& text, bool error) {
+    g_nid.uFlags = 0;
+    SetBalloon(title, text, error);
+    if (g_nid.uFlags) Shell_NotifyIconW(NIM_MODIFY, &g_nid);
+}
+
+// " 42% - about 6 min left" for the running step ("" when the percent is unknown; no ETA while paused).
+std::wstring ProgressText(const pp::State& j) {
+    if (j.percent < 0) return L"";
+    std::wstring s = L" " + std::to_wstring(j.percent) + L"%";
+    if (!j.paused && j.etaSec >= 0) s += L" - " + pp::EtaText(j.etaSec);
+    return s;
+}
+
+void PauseJob(const char* from) {
+    bool paused = false;
+    if (g_pp.TogglePause(paused)) LOGI("tray: %s conversion (%s)", paused ? "pause" : "resume", from);
+    else LOGI("tray: pause / resume (%s): no conversion running", from);
+}
+
+void CancelJob(const char* from) {
+    if (g_pp.Cancel()) LOGI("tray: cancel conversion (%s)", from);
+    else LOGI("tray: cancel (%s): no conversion running", from);
+}
+
 // ---- post_when: hold the conversion queue while the game / its VR session is still running
-const char* PostWhenName(PostWhen w) { return w == PostWhen::Now ? "now" : w == PostWhen::SessionEnd ? "session_end" : "game_exit"; }
+const char* PostWhenName(PostWhen w) {
+    return w == PostWhen::Now ? "now" : w == PostWhen::SessionEnd ? "session_end" : w == PostWhen::Manual ? "manual" : "game_exit";
+}
 
 bool ProcAlive(HANDLE h) { return h && WaitForSingleObject(h, 0) == WAIT_TIMEOUT; }
 
@@ -171,7 +232,10 @@ void ClearProducers() {
     g_producers.clear();
 }
 
-const wchar_t* HoldReason() { return g_postWhen == PostWhen::SessionEnd ? L"when VR stops" : L"when the game closes"; }
+// Shown after "converts " / "resumes " in the tooltip, the menu and the Settings queue view.
+const wchar_t* HoldReason() {
+    return g_postWhen == PostWhen::SessionEnd ? L"when VR stops" : g_postWhen == PostWhen::Manual ? L"when you say (Settings)" : L"when the game closes";
+}
 
 // Computes the hold from post_when and the live status and hands it to the worker (it logs the on / off transitions).
 // Called every tick and right before a recording is queued, so a job can never start in the gap.
@@ -180,31 +244,73 @@ void UpdateHold() {
     bool hold = false;
     if (g_postWhen == PostWhen::SessionEnd) hold = sessionLive;
     else if (g_postWhen == PostWhen::GameExit) hold = ProducersAlive() || sessionLive;
+    else if (g_postWhen == PostWhen::Manual) hold = true;   // only forced jobs ever start
     g_pp.SetHold(hold, HoldReason());
 }
 
 // Queue a finished recording for post-processing (MP4 only; a no-op when post_mkv, post_flat and post_yt8k are all 0).
-// Non-forced requests are deduplicated by full path for the whole tray session (status message vs fallback scan).
-// Forced requests ("Convert last recording now") ignore post_when: they run at once.
-void QueueRecording(const std::wstring& mp4, bool force) {
-    Config cfg;
-    LoadConfig(g_exeDir, cfg);
-    if (!force && !cfg.postMkv && !cfg.postFlat && !cfg.postYt8k) {
-        LOGI("tray: recording %s saved; post_mkv, post_flat and post_yt8k are all 0 -- not converting", elog::Narrow(mp4).c_str());
-        return;
-    }
-    const std::wstring key = NormPath(mp4);
-    if (!force && g_queuedPaths.count(key)) {
-        LOGI("tray: %s was already queued -- skipping the duplicate", elog::Narrow(mp4).c_str());
-        return;
-    }
-    g_queuedPaths.insert(key);
-    if (!force) {
+// Automatic requests (not forced, no format, not held by the user) are deduplicated by full path for the whole tray session
+// (status message vs fallback scan); they have no format snapshot (config.ini at job start).
+// Forced requests ("Convert last recording now", "Convert a recording...", Settings "Start") ignore post_when: they run
+// next. post_when = manual: automatic recordings are queued and stay held (see UpdateHold) until one of those forces them.
+// fmt = the job's own format snapshot (pp::Processor). userHeld = Settings "Add to queue...": waits for Start / Start all.
+void QueueRecording(const std::wstring& mp4, bool force, const pp::JobFormat* fmt = nullptr, bool userHeld = false) {
+    const bool automatic = !force && !fmt && !userHeld;
+    if (automatic) {
+        Config cfg;
+        LoadConfig(g_exeDir, cfg);
+        if (!cfg.postMkv && !cfg.postFlat && !cfg.postYt8k) {
+            LOGI("tray: recording %s saved; post_mkv, post_flat and post_yt8k are all 0 -- not converting", elog::Narrow(mp4).c_str());
+            return;
+        }
+        const std::wstring key = NormPath(mp4);
+        if (g_queuedPaths.count(key)) {
+            LOGI("tray: %s was already queued -- skipping the duplicate", elog::Narrow(mp4).c_str());
+            return;
+        }
+        g_queuedPaths.insert(key);
         AddProducer();
         UpdateHold();   // before Enqueue: the worker must see the hold before it can pick the job
+    } else {
+        g_queuedPaths.insert(NormPath(mp4));   // the fallback scan must not queue it a second time
     }
-    if (g_pp.Enqueue(mp4, force)) LOGI("tray: queued %s for conversion%s", elog::Narrow(mp4).c_str(), force ? " (forced: ignores post_when)" : "");
-    else LOGI("tray: %s is already queued / running", elog::Narrow(mp4).c_str());
+    const std::wstring how = force ? L" (forced: ignores post_when)" : userHeld ? L" (waits for Start)" : L"";
+    const std::wstring what = fmt ? L" as " + pp::FormatText(*fmt) : L"";
+    if (g_pp.Enqueue(mp4, force, fmt, userHeld))
+        LOGI("tray: queued %s for conversion%s%s", elog::Narrow(mp4).c_str(), elog::Narrow(what).c_str(), elog::Narrow(how).c_str());
+    else LOGI("tray: %s is already queued / running%s", elog::Narrow(mp4).c_str(), elog::Narrow(what).c_str());
+}
+
+// True when the MP4 already has converted siblings. Names the tray makes: <stem>.mkv, <stem>_4x3.mkv / _4x3pad / _full.mkv (eye_crop tag),
+// <stem>_FLAT.mp4, <stem>_YT8K[_4x3|_4x3pad|_full].mkv, each possibly with " (2)", " (3)" ... before the extension. So: a file in the
+// same folder whose name starts with the stem followed by '.', '_' or ' ' (a different recording has a different timestamp in
+// its stem) and ends with .mkv (the MKV step: not "_YT8K...") or, with `others`, _FLAT...mp4 / _YT8K...mkv.
+bool HasConverted(const std::wstring& mp4, bool others) {
+    const size_t slash = mp4.find_last_of(L"\\/");
+    const std::wstring dir = slash == std::wstring::npos ? L"." : mp4.substr(0, slash);
+    const std::wstring stem = mp4.substr(slash == std::wstring::npos ? 0 : slash + 1, std::wstring::npos);
+    const std::wstring base = stem.size() > 4 ? stem.substr(0, stem.size() - 4) : stem;   // without ".mp4"
+    auto endsWith = [](const std::wstring& n, const wchar_t* tail) {
+        const size_t k = wcslen(tail);
+        return n.size() >= k && _wcsicmp(n.c_str() + n.size() - k, tail) == 0;
+    };
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((dir + L"\\" + base + L"*").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    bool found = false;
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        const std::wstring n = fd.cFileName;
+        if (n.size() <= base.size() || _wcsnicmp(n.c_str(), base.c_str(), base.size()) != 0) continue;
+        const wchar_t c = n[base.size()];
+        if (c != L'.' && c != L'_' && c != L' ') continue;
+        const bool yt8k = _wcsnicmp(n.c_str() + base.size(), L"_YT8K", 5) == 0;
+        const bool flat = _wcsnicmp(n.c_str() + base.size(), L"_FLAT", 5) == 0;
+        if (endsWith(n, L".mkv") && !yt8k) found = true;
+        else if (others && ((yt8k && endsWith(n, L".mkv")) || (flat && endsWith(n, L".mp4")))) found = true;
+    } while (!found && FindNextFileW(h, &fd));
+    FindClose(h);
+    return found;
 }
 
 // Fallback for a "saved <file>" message that never reached us (the game quit or crashed right after / during the
@@ -233,9 +339,7 @@ void ScanCaptures() {
         const std::wstring path = dir + L"\\" + n;
         const std::wstring key = NormPath(path);
         if (g_queuedPaths.count(key) || g_pending.count(key)) continue;
-        const std::wstring stem = path.substr(0, path.size() - 4);
-        if (Exists(stem + L".mkv")) continue;
-        if (!cfg.postMkv && (Exists(stem + L"_FLAT.mp4") || Exists(stem + L"_YT8K.mkv"))) continue;
+        if (HasConverted(path, !cfg.postMkv)) continue;   // .mkv (any eye_crop tag / " (2)"), or _FLAT / _YT8K when the MKV step is off
         Pending p;
         p.path = path;
         p.size = ((ULONGLONG)fd.nFileSizeHigh << 32) | fd.nFileSizeLow;
@@ -253,7 +357,7 @@ void PollPending() {
         Pending& p = it->second;
         WIN32_FILE_ATTRIBUTE_DATA a{};
         if (g_queuedPaths.count(it->first) || !GetFileAttributesExW(p.path.c_str(), GetFileExInfoStandard, &a) ||
-            Exists(p.path.substr(0, p.path.size() - 4) + L".mkv")) {
+            HasConverted(p.path, false)) {
             it = g_pending.erase(it);   // handled by the status path / converted / deleted meanwhile
             continue;
         }
@@ -365,7 +469,7 @@ void Refresh() {
     if (state == ECS_READY) idx = 1;
     else if (state == ECS_RECORDING) idx = 2;
     else if (state == ECS_STARTING || state == ECS_STOPPING || state == ECS_FAILED) idx = 3;
-    const bool waiting = job.held && job.queued > 0;   // queued, held by post_when
+    const bool waiting = job.queued > 0 && (job.held || job.userHeld > 0);   // queued, held by post_when or by the user
     if (job.busy && !job.paused && idx != 2 && idx != 3) idx = 4;   // converting (red recording / amber transitions keep priority)
     else if (idx == 0 && (job.busy || waiting)) idx = 4;            // paused / waiting while no game is live: still blue
 
@@ -388,21 +492,38 @@ void Refresh() {
         swprintf_s(tip, L"%s (%s): ready\n%s toggles recording", g_st.game, g_st.api, g_st.hotkey);
     }
     // conversion line: "converting <file> (MKV)..." while a job runs, "last: <file>.mkv ready" after
-    std::wstring jobLine;
-    if (job.busy && job.paused) {
+    // with progress: "converting <file> (8K) 42% - about 6 min left"; the log gets the line only when it changes other than
+    // by the percent / ETA (no log line per second)
+    std::wstring jobLine, jobKey;
+    const std::wstring prog = ProgressText(job);
+    if (job.busy && job.cancelling) {
+        jobLine = L"cancelling: " + job.file + L" (" + job.step + L")";
+    } else if (job.busy && job.userPaused) {
+        jobLine = L"paused: " + job.file + L" (" + job.step + L")" + prog + L" -- Resume in the tray menu";
+        jobKey = L"paused: " + job.file + L" (" + job.step + L")";
+        if (job.queued) { jobLine += L" (+" + std::to_wstring(job.queued) + L")"; jobKey += L" +q"; }
+    } else if (job.busy && job.paused) {
         jobLine = L"conversion paused: " + job.file + L" -- resumes " + job.holdReason;
         if (job.queued) jobLine += L" (+" + std::to_wstring(job.queued) + L" waiting)";
     } else if (job.busy) {
-        jobLine = L"converting " + job.file + L" (" + job.step + L")...";
-        if (job.queued) jobLine += L" +" + std::to_wstring(job.queued) + (job.held ? L" waiting" : L" queued");
+        jobLine = L"converting " + job.file + L" (" + job.step + L")" + (prog.empty() ? L"..." : prog);
+        jobKey = L"converting " + job.file + L" (" + job.step + L")" + (prog.empty() ? L"" : L" [progress]");
+        if (job.queued) {
+            const std::wstring q = L" +" + std::to_wstring(job.queued) + (job.held ? L" waiting" : L" queued");
+            jobLine += q;
+            jobKey += q;
+        }
+    } else if (waiting && job.userHeld == job.queued) {
+        jobLine = std::to_wstring(job.queued) + (job.queued == 1 ? L" recording waits" : L" recordings wait") + L" for you (Settings: Start)";
     } else if (waiting) {
         jobLine = std::to_wstring(job.queued) + (job.queued == 1 ? L" recording waiting" : L" recordings waiting") +
-                  L" -- converts " + job.holdReason;
+                  L" -- converts " + (job.held ? job.holdReason : std::wstring(L"when you start it (Settings)"));
     } else if (!job.lastLine.empty()) {
         jobLine = job.lastLine;
     }
-    static std::wstring s_prevJobLine;
-    if (jobLine != s_prevJobLine) { s_prevJobLine = jobLine; LOGI("tray: tooltip job line: %s", elog::Narrow(jobLine).c_str()); }
+    if (jobKey.empty()) jobKey = jobLine;
+    static std::wstring s_prevJobKey;
+    if (jobKey != s_prevJobKey) { s_prevJobKey = jobKey; LOGI("tray: tooltip job line: %s", elog::Narrow(jobLine).c_str()); }
     if (idx != g_iconIdx && (idx == 4 || g_iconIdx == 4))
         LOGI("tray: icon %s", idx == 4 ? (job.busy && !job.paused ? "blue (converting)" : "blue (waiting to convert)") : "no longer blue");
     wchar_t full[256];
@@ -424,16 +545,18 @@ void Refresh() {
     // balloon: a conversion result wins over "Recording saved"
     pp::Notice notice;
     if (g_pp.PopNotice(notice)) {
-        g_nid.uFlags |= NIF_INFO;
-        wcsncpy_s(g_nid.szInfoTitle, notice.title.c_str(), _TRUNCATE);
-        wcsncpy_s(g_nid.szInfo, notice.text.c_str(), _TRUNCATE);
-        g_nid.dwInfoFlags = notice.error ? NIIF_ERROR : NIIF_INFO;
-        LOGI("tray: balloon [%s] %s", elog::Narrow(notice.title).c_str(), elog::Narrow(notice.text).c_str());
+        SetBalloon(notice.title, notice.text, notice.error);
     } else if (g_live && g_prevState == ECS_STOPPING && state == ECS_READY && g_st.message[0]) {
-        g_nid.uFlags |= NIF_INFO;
-        wcsncpy_s(g_nid.szInfoTitle, L"Recording saved", _TRUNCATE);
-        wcsncpy_s(g_nid.szInfo, g_st.message, _TRUNCATE);
-        g_nid.dwInfoFlags = NIIF_INFO;
+        // a low-space stop says so in the message ("saved <file> -- stopped: E: almost full (1.9 GB free)"): logged + error icon.
+        // The message field is 160 characters and the reason follows the full path, so with a long output folder it can be cut:
+        // " -- stopped" alone also counts, and a cut text (not ending in "free)") gets a fixed balloon text instead.
+        const bool lowDisk = wcsstr(g_st.message, L" almost full") != nullptr || wcsstr(g_st.message, L" -- stopped") != nullptr;
+        const size_t ml = wcslen(g_st.message);
+        const bool cut = lowDisk && (ml < 5 || wcscmp(g_st.message + ml - 5, L"free)") != 0);
+        SetBalloon(lowDisk ? L"Recording stopped: disk almost full" : L"Recording saved",
+                   cut ? std::wstring(L"Recording stopped: the output drive is almost full.") : std::wstring(g_st.message), lowDisk, lowDisk);
+    } else if (g_live && state == ECS_FAILED && g_prevState != ECS_FAILED && g_st.message[0]) {
+        SetBalloon(L"Recording not started", g_st.message, true);   // e.g. the low-space guard (src/disk.h)
     }
     g_prevState = state;
     Shell_NotifyIconW(NIM_MODIFY, &g_nid);
@@ -475,12 +598,15 @@ void ApplyInputBindings(const char* why) {
     Config cfg;
     LoadConfig(g_exeDir, cfg);
     input::SetBindings(cfg.hotkey.bindings);
+    g_savedFmt = pp::FormatFromConfig(cfg);
     static bool s_postWhenLogged = false;
     if (!s_postWhenLogged || cfg.postWhen != g_postWhen) {
         s_postWhenLogged = true;
         g_postWhen = cfg.postWhen;
         LOGI("tray: post_when = %s (%s)", PostWhenName(g_postWhen), g_postWhen == PostWhen::Now ? "convert recordings right away"
-             : g_postWhen == PostWhen::SessionEnd ? "convert when no VR session is live" : "convert when the game that made the recording has closed");
+             : g_postWhen == PostWhen::SessionEnd ? "convert when no VR session is live"
+             : g_postWhen == PostWhen::Manual ? "never convert on its own; recordings wait until started from Settings / the tray menu"
+             : "convert when the game that made the recording has closed");
     }
     std::wstring list;
     for (const auto& b : cfg.hotkey.bindings)
@@ -528,15 +654,6 @@ void OpenSettings() {
 }
 
 // ---- registration UI ----
-void Balloon(const std::wstring& title, const std::wstring& text, bool error) {
-    g_nid.uFlags = NIF_INFO;
-    wcsncpy_s(g_nid.szInfoTitle, title.c_str(), _TRUNCATE);
-    wcsncpy_s(g_nid.szInfo, text.c_str(), _TRUNCATE);
-    g_nid.dwInfoFlags = error ? NIIF_ERROR : NIIF_INFO;
-    Shell_NotifyIconW(NIM_MODIFY, &g_nid);
-    LOGI("tray: balloon [%s] %s", elog::Narrow(title).c_str(), elog::Narrow(text).c_str());
-}
-
 // Yes / No question. Test mode (EYECAP_TRAY_TEST_SHM): logged and answered No, so tests never block on a dialog and
 // never reach the UAC prompt.
 bool Ask(const std::wstring& text) {
@@ -700,11 +817,179 @@ void StartupRegCheck() {
     if (!RegOk()) RegisterFlow(true);
 }
 
+// The captures folder: the live game's, else config.ini's output_dir.
+std::wstring CapturesDir() {
+    std::wstring dir = g_live ? g_st.outputDir : L"";
+    if (dir.empty()) {
+        Config cfg;
+        LoadConfig(g_exeDir, cfg);
+        dir = cfg.outputDir;
+    }
+    return dir;
+}
+
+// "Convert last recording now" (tray menu, WM_APP+7): the most recent recording -- the last one this tray queued (also a
+// held one: forcing upgrades it), else the newest *.mp4 in the captures folder -- queued forced.
+void ConvertLast(const char* from) {
+    std::wstring file = g_pp.LastQueued();
+    if (file.empty() || GetFileAttributesW(file.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        const std::wstring dir = CapturesDir();
+        WIN32_FIND_DATAW fd;
+        HANDLE h = FindFirstFileW((dir + L"\\*.mp4").c_str(), &fd);
+        FILETIME newest{};
+        file.clear();
+        if (h != INVALID_HANDLE_VALUE) {
+            do {
+                const std::wstring n = fd.cFileName;
+                if (n.size() >= 9 && _wcsicmp(n.c_str() + n.size() - 9, L"_FLAT.mp4") == 0) continue;
+                if (file.empty() || CompareFileTime(&fd.ftLastWriteTime, &newest) > 0) { file = dir + L"\\" + n; newest = fd.ftLastWriteTime; }
+            } while (FindNextFileW(h, &fd));
+            FindClose(h);
+        }
+    }
+    if (file.empty() || GetFileAttributesW(file.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        LOGI("tray: convert now (%s): no MP4 found to convert", from);
+        Balloon(L"Nothing to convert", L"No MP4 found. (Converted recordings have their MP4 removed unless keep_mp4 = 1.)", false);
+    } else {
+        LOGI("tray: convert now requested for %s (%s)", elog::Narrow(file).c_str(), from);
+        QueueRecording(file, true);
+    }
+    Refresh();
+}
+
+// The MP4s the user picks: the standard multi-select Open dialog in the captures folder (`title`). Test mode
+// (EYECAP_TRAY_TEST_SHM) with EYECAP_TRAY_TEST_PICK=<file>: no dialog, the picked paths are that file's lines (UTF-8, read at
+// every pick, so a test can change them between clicks).
+std::vector<std::wstring> PickMp4s(HWND owner, const char* from, const wchar_t* title) {
+    std::vector<std::wstring> files;
+    wchar_t pickFile[MAX_PATH] = L"";
+    if (g_testMode && GetEnvironmentVariableW(L"EYECAP_TRAY_TEST_PICK", pickFile, MAX_PATH) > 0) {
+        HANDLE h = CreateFileW(pickFile, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+        std::string text;
+        if (h != INVALID_HANDLE_VALUE) {
+            char b[4096];
+            DWORD got = 0;
+            while (ReadFile(h, b, sizeof(b), &got, nullptr) && got) text.append(b, got);
+            CloseHandle(h);
+        }
+        if (text.size() >= 3 && (unsigned char)text[0] == 0xEF && (unsigned char)text[1] == 0xBB && (unsigned char)text[2] == 0xBF) text.erase(0, 3);
+        size_t pos = 0;
+        while (pos < text.size()) {
+            size_t e = text.find('\n', pos);
+            if (e == std::string::npos) e = text.size();
+            std::string ln = text.substr(pos, e - pos);
+            pos = e + 1;
+            while (!ln.empty() && (ln.back() == '\r' || ln.back() == ' ')) ln.pop_back();
+            if (!ln.empty()) files.push_back(elog::Widen(ln));
+        }
+        LOGI("tray: %s (%s): EYECAP_TRAY_TEST_PICK -> %zu file(s), no dialog (test)", elog::Narrow(title).c_str(), from, files.size());
+        return files;
+    }
+    const std::wstring dir = CapturesDir();
+    std::vector<wchar_t> buf(64 * 1024, L'\0');
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = owner;
+    ofn.lpstrFilter = L"MP4 recordings (*.mp4)\0*.mp4\0";   // recordings only: PickAndQueue refuses anything else
+    ofn.lpstrFile = buf.data();
+    ofn.nMaxFile = (DWORD)buf.size();
+    ofn.lpstrInitialDir = dir.c_str();
+    ofn.lpstrTitle = title;
+    ofn.Flags = OFN_EXPLORER | OFN_ALLOWMULTISELECT | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY;
+    if (!GetOpenFileNameW(&ofn)) {
+        const DWORD err = CommDlgExtendedError();
+        if (err) LOGW("tray: %s (%s): Open dialog failed (error 0x%lX)", elog::Narrow(title).c_str(), from, (unsigned long)err);
+        return files;
+    }
+    // One file: the buffer holds its full path. Several: the folder, then each file name, then an empty string.
+    const std::wstring first = buf.data();
+    const wchar_t* p = buf.data() + first.size() + 1;
+    if (!*p) files.push_back(first);
+    // a drive root comes back as "E:\" (with its separator): no second backslash, so Enqueue's path dedupe still matches
+    const std::wstring folder = !first.empty() && (first.back() == L'\\' || first.back() == L'/') ? first : first + L"\\";
+    for (; *p; p += wcslen(p) + 1) files.push_back(folder + p);
+    return files;
+}
+
+// "Convert a recording..." (tray menu, and the Settings window's button) / "Add to queue..." (Settings window): one or more
+// MP4s, each queued with the format snapshot `fmt` (tray menu: config.ini's current values; Settings: the values the window
+// shows). start = forced (runs next, ignores post_when); else held by the user until Start / Start all.
+void PickAndQueue(HWND owner, const char* from, const pp::JobFormat& fmt, bool start) {
+    const std::vector<std::wstring> files = PickMp4s(owner, from, start ? L"Convert a recording" : L"Add recordings to the queue");
+    auto endsWith = [](const std::wstring& n, const wchar_t* tail) {
+        const size_t k = wcslen(tail);
+        return n.size() >= k && _wcsicmp(n.c_str() + n.size() - k, tail) == 0;
+    };
+    std::wstring rejected;   // file names of the refused picks, one balloon for all of them
+    for (const auto& f : files) {
+        // Only recordings: a conversion treats its input as an SBS / dome MP4 and, with keep_mp4 = 0, deletes it afterwards,
+        // so a converted .mkv / _FLAT.mp4 (or any other file) picked here would be destroyed.
+        if (!endsWith(f, L".mp4") || endsWith(f, L"_FLAT.mp4")) {
+            const size_t sl = f.find_last_of(L"\\/");
+            LOGW("tray: %s (%s): %s is not a recording (only .mp4 recordings, not _FLAT.mp4) -- not queued",
+                 start ? "convert a recording" : "add to queue", from, elog::Narrow(f).c_str());
+            rejected += (rejected.empty() ? L"" : L", ") + (sl == std::wstring::npos ? f : f.substr(sl + 1));
+            continue;
+        }
+        LOGI("tray: %s (%s): picked %s", start ? "convert a recording" : "add to queue", from, elog::Narrow(f).c_str());
+        QueueRecording(f, start, &fmt, !start);
+    }
+    if (!rejected.empty()) Balloon(kAppTitle, L"Not a recording: " + rejected, true);
+    Refresh();
+}
+
+// The Settings window's "Conversions" group and its "Convert a recording..." / "Add to queue..." buttons (tray/settings.h QueueHooks).
+void InstallQueueHooks() {
+    settings::QueueHooks h;
+    h.state = [] { return g_pp.GetState(); };
+    h.queued = [] {
+        std::vector<pp::QueuedJob> v = g_pp.Queued();
+        for (auto& j : v) if (!j.ownFormat) j.fmt = g_savedFmt;   // what it would convert with if it started now
+        return v;
+    };
+    h.pickFiles = [](HWND owner, const pp::JobFormat& fmt, bool start) { PickAndQueue(owner, "settings", fmt, start); };
+    h.togglePause = [] { PauseJob("settings"); Refresh(); };
+    h.cancel = [] { CancelJob("settings"); Refresh(); };
+    h.start = [](unsigned long long id) {
+        if (!g_pp.StartJob(id)) LOGI("tray: start (settings): job %llu is no longer waiting", id);
+        else LOGI("tray: start (settings): job %llu", id);
+        Refresh();
+    };
+    h.startAll = [] {
+        LOGI("tray: start all (settings): %zu job(s) forced", g_pp.StartAll());
+        Refresh();
+    };
+    h.remove = [](unsigned long long id) {
+        if (!g_pp.Remove(id)) LOGI("tray: remove (settings): job %llu is no longer waiting", id);
+        Refresh();
+    };
+    settings::SetQueueHooks(h);
+}
+
 void ShowMenu() {
     if (g_regBusy) return;   // a registration question / UAC prompt is open
     if (g_regEnabled) QueryReg(false);
     Refresh();
     HMENU m = CreatePopupMenu();
+    {
+        // a conversion runs: greyed info line + Pause / Resume + Cancel at the top
+        const pp::State job = g_pp.GetState();
+        if (job.busy) {
+            std::wstring info;
+            if (job.cancelling) info = L"Cancelling: " + job.file + L" (" + job.step + L")";
+            else if (job.userPaused) info = L"Paused: " + job.file + L" (" + job.step + L")" + ProgressText(job);
+            else if (job.paused) info = L"Waiting: " + job.file + L" (" + job.step + L")" + ProgressText(job) + L" -- converts " + job.holdReason;
+            else info = L"Converting " + job.file + L" (" + job.step + L")" + ProgressText(job);
+            if (job.queued) info += L" (+" + std::to_wstring(job.queued) + L" queued)";
+            std::wstring esc;   // '&' would be a menu mnemonic
+            for (wchar_t ch : info) { esc += ch; if (ch == L'&') esc += L'&'; }
+            AppendMenuW(m, MF_STRING | MF_GRAYED, ID_JOB_INFO, esc.c_str());
+            const UINT can = job.cancelling ? MF_GRAYED : 0;
+            AppendMenuW(m, MF_STRING | can, ID_JOB_PAUSE, job.userPaused ? L"Resume conversion" : L"Pause conversion");
+            AppendMenuW(m, MF_STRING | can, ID_JOB_CANCEL, L"Cancel conversion");
+            AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+        }
+    }
     const uint32_t state = g_live ? g_st.state : ECS_NONE;
     const bool rec = state == ECS_RECORDING || state == ECS_STARTING;
     std::wstring label = rec ? L"Stop recording" : L"Start recording";
@@ -713,6 +998,7 @@ void ShowMenu() {
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING, ID_FOLDER, L"Open captures folder");
     AppendMenuW(m, MF_STRING, ID_CONVERT, L"Convert last recording now");
+    AppendMenuW(m, MF_STRING, ID_CONVERT_PICK, L"Convert a recording...");
     AppendMenuW(m, MF_STRING, ID_LOG, L"Open log");
     AppendMenuW(m, MF_STRING, ID_SETTINGS, L"Settings...");
     AppendMenuW(m, MF_STRING, ID_CONFIG, L"Edit config");
@@ -740,38 +1026,21 @@ void ShowMenu() {
         OpenPath(dir, L"explore");
         break;
     }
-    case ID_CONVERT: {
-        // The most recent recording: the last one this tray saw / converted, else the newest *.mp4 in the captures folder.
-        std::wstring file = g_pp.LastQueued();
-        if (file.empty() || GetFileAttributesW(file.c_str()) == INVALID_FILE_ATTRIBUTES) {
-            std::wstring dir = g_live ? g_st.outputDir : L"";
-            if (dir.empty()) { LoadConfig(g_exeDir, cfg); dir = cfg.outputDir; }
-            WIN32_FIND_DATAW fd;
-            HANDLE h = FindFirstFileW((dir + L"\\*.mp4").c_str(), &fd);
-            FILETIME newest{};
-            file.clear();
-            if (h != INVALID_HANDLE_VALUE) {
-                do {
-                    const std::wstring n = fd.cFileName;
-                    if (n.size() >= 9 && _wcsicmp(n.c_str() + n.size() - 9, L"_FLAT.mp4") == 0) continue;
-                    if (file.empty() || CompareFileTime(&fd.ftLastWriteTime, &newest) > 0) { file = dir + L"\\" + n; newest = fd.ftLastWriteTime; }
-                } while (FindNextFileW(h, &fd));
-                FindClose(h);
-            }
-        }
-        if (file.empty() || GetFileAttributesW(file.c_str()) == INVALID_FILE_ATTRIBUTES) {
-            LOGI("tray: convert now: no MP4 found to convert");
-            g_nid.uFlags = NIF_INFO;
-            wcsncpy_s(g_nid.szInfoTitle, L"Nothing to convert", _TRUNCATE);
-            wcsncpy_s(g_nid.szInfo, L"No MP4 found. (Converted recordings have their MP4 removed unless keep_mp4 = 1.)", _TRUNCATE);
-            g_nid.dwInfoFlags = NIIF_INFO;
-            Shell_NotifyIconW(NIM_MODIFY, &g_nid);
-        } else {
-            LOGI("tray: convert now requested for %s", elog::Narrow(file).c_str());
-            QueueRecording(file, true);
-        }
+    case ID_CONVERT:
+        ConvertLast("menu");
         break;
-    }
+    case ID_CONVERT_PICK:
+        LoadConfig(g_exeDir, cfg);
+        PickAndQueue(g_wnd, "menu", pp::FormatFromConfig(cfg), true);   // config.ini's current conversion settings
+        break;
+    case ID_JOB_PAUSE:
+        PauseJob("menu");
+        Refresh();
+        break;
+    case ID_JOB_CANCEL:
+        CancelJob("menu");
+        Refresh();
+        break;
     case ID_LOG:
         OpenPath(g_live && g_st.logPath[0] ? std::wstring(g_st.logPath) : g_exeDir + L"\\logs\\eye_capture.log");
         break;
@@ -812,12 +1081,26 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_PP:
         Refresh();
+        settings::NotifyQueueChanged();   // the Settings window's queue view (no-op when it is closed)
         return 0;
     case WM_OPEN_SETTINGS:
         OpenSettings();
         return 0;
+    case WM_PAUSE_JOB:   // = menu "Pause / Resume conversion" (tests post it)
+        PauseJob("WM_APP+5");
+        Refresh();
+        return 0;
+    case WM_CANCEL_JOB:  // = menu "Cancel conversion" (tests post it)
+        CancelJob("WM_APP+6");
+        Refresh();
+        return 0;
+    case WM_CONVERT_LAST:   // = menu "Convert last recording now" (tests post it)
+        ConvertLast("WM_APP+7");
+        return 0;
     case WM_TRAY:
-        if (LOWORD(lp) == WM_RBUTTONUP || LOWORD(lp) == WM_LBUTTONUP || LOWORD(lp) == WM_CONTEXTMENU) ShowMenu();
+        // left click: the Settings window (conversion queue / progress, all settings); right click: the menu
+        if (LOWORD(lp) == WM_LBUTTONUP) { if (!g_regBusy) OpenSettings(); }
+        else if (LOWORD(lp) == WM_RBUTTONUP || LOWORD(lp) == WM_CONTEXTMENU) ShowMenu();
         return 0;
     case WM_DESTROY:
         KillTimer(h, kTimer);
@@ -1073,10 +1356,11 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     }
     // "Start with Windows" (HKCU Run value, tray/install.h): keep the entry pointed at this folder; runs in normal mode too
     if (install::SyncAutostart(g_exeDir))
-        LOGI("tray: start-with-Windows entry pointed at another folder, updated to %s", elog::Narrow(install::AutostartCommand(g_exeDir)).c_str());
+        LOGI("tray: start-with-Windows entry updated (moved folder or missing approval record): %s", elog::Narrow(install::AutostartCommand(g_exeDir)).c_str());
     LOGI("tray: start with Windows: %s", install::AutostartEnabled() ? "on" : "off");
     // controller / wheel hotkeys (Pad: / Joy: bindings): the tray polls them and sends ECC_TOGGLE to the game
     ApplyInputBindings("start");
+    InstallQueueHooks();   // before the Settings window can open
     input::Start(OnInputFire);
     Refresh();
 

@@ -3,7 +3,7 @@
 
     Produces dist\OpenXR-EyeCapture-v<version>.zip containing:
         eye_capture.dll, XR_APILAYER_JRDEVO_eye_capture.json, EyeCaptureTray.exe, config.ini,
-        scripts\make_mkv.ps1, README.md, THIRD_PARTY.md
+        scripts\make_mkv.ps1, scripts\make_thumbnail.ps1 (+ scripts\thumbnail_overlay.png), README.md, THIRD_PARTY.md
     Users only unzip and run EyeCaptureTray.exe: it registers the layer itself (one UAC prompt; tray/install.cpp) and
     unregisters it from its tray menu. scripts\install.ps1 / uninstall.ps1 are developer scripts and stay out of the zip.
 
@@ -57,7 +57,9 @@ $files = @(
     @{ src = (Join-Path $root 'README.md'); name = 'README.md' },
     @{ src = (Join-Path $root 'THIRD_PARTY.md'); name = 'THIRD_PARTY.md' },
     @{ src = (Join-Path $root 'LICENSE.md'); name = 'LICENSE.md' },
-    @{ src = (Join-Path $root 'scripts\make_mkv.ps1'); name = 'scripts\make_mkv.ps1' }
+    @{ src = (Join-Path $root 'scripts\make_mkv.ps1'); name = 'scripts\make_mkv.ps1' },
+    @{ src = (Join-Path $root 'scripts\make_thumbnail.ps1'); name = 'scripts\make_thumbnail.ps1' },
+    @{ src = (Join-Path $root 'docs\images\thumbnail_overlay.png'); name = 'scripts\thumbnail_overlay.png' }
 )
 foreach ($f in $files) {
     if (-not (Test-Path $f.src)) { Fail "missing: $($f.src)" }

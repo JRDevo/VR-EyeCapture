@@ -74,7 +74,7 @@ add_custom_command(TARGET eye_capture POST_BUILD
 # --- tray control app (required: the layer is dormant without it; it also registers the layer, tray/install.cpp) ---
 add_executable(EyeCaptureTray WIN32 tray/tray.cpp tray/postprocess.cpp tray/settings.cpp tray/install.cpp tray/input.cpp)
 target_compile_options(EyeCaptureTray PRIVATE ${EYE_WARN_FLAGS})
-target_link_libraries(EyeCaptureTray PRIVATE eye_capture_core comctl32 dinput8 dxguid)
+target_link_libraries(EyeCaptureTray PRIVATE eye_capture_core comctl32 comdlg32 dinput8 dxguid)
 target_include_directories(EyeCaptureTray PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tray)
 
 # --- tests ---

@@ -11,12 +11,15 @@
 
 # OpenXR-EyeCapture — stereo recorder for any OpenXR game
 
+![OpenXR-EyeCapture](docs/images/logo_banner.png)
+
 [![CI](https://github.com/JRDevo/OpenXR-EyeCapture/actions/workflows/ci.yml/badge.svg)](https://github.com/JRDevo/OpenXR-EyeCapture/actions/workflows/ci.yml)
 
 Records **both eye images** of an OpenXR game, at exactly the resolution and quality the headset receives, into a
 **side-by-side (left | right) 3D MP4** with the game's audio. Press a hotkey (or use the tray icon) to start and stop.
-The MP4 carries the standard stereo flag (`st3d`, left-right) for 3D players; for YouTube the tray app also converts every
-recording to a `.mkv` with the Matroska stereo tag, which YouTube reliably recognises as 3D (see "Upload to YouTube").
+The MP4 carries the standard stereo flag (`st3d`, left-right) for 3D players; for YouTube the tray app also converts each
+recording to a `.mkv` with the Matroska stereo tag, which YouTube reliably recognises as 3D (see "Upload to YouTube") --
+automatically, or only when you say so (`post_when = manual`).
 
 It is an **OpenXR API layer**: it sits between the game and the OpenXR runtime, so it works the same with
 Virtual Desktop (VDXR), SteamVR, Oculus / Meta Link, or any other runtime. Nothing is injected into the game and no
@@ -41,12 +44,17 @@ Desktop. Any other OpenXR game that renders with Direct3D 11 or Direct3D 12 shou
 - **Tray app with a Settings window** — every option has a help text, no `config.ini` editing needed.
 - **One-click registration** — the tray registers the layer for you (one UAC prompt); **Register** / **Unregister** are in its menu.
 - **Tray menu** — Start / Stop recording, Open captures folder, Convert last recording now, Settings..., Open log,
+  Pause / Resume / Cancel conversion (with its progress and time left) while one runs,
   Edit config, Register for VR games... / Unregister from VR games..., Exit.
 - **Tray icon colours** — grey, green, red, amber, blue; the tooltip shows game, resolution, fps, dropped frames and elapsed time.
 - **Start with Windows** — optional, off by default (Settings window → Advanced).
 - **Command line** — `--start | --stop | --toggle | --status` for scripts and Stream Deck buttons.
 - **Automatic MKV conversion** — with the Matroska 3D tag that YouTube recognises. By default it waits until the game has
-  closed, so converting never costs frame rate while you play (`post_when`: right away / when VR stops / when the game closes).
+  closed, so converting never costs frame rate while you play (`post_when`: right away / when VR stops / when the game closes /
+  only when you say so). The Settings window shows the running conversion and the waiting ones (each with its format), with
+  Pause, Cancel, Start, Start all and Remove. **Add to queue...** queues recordings that wait until you start them, each
+  with the Export settings shown at that moment, so one recording can be queued several times (16:9 and 4:3, HEVC and AV1).
+  The queue is kept when the tray app closes.
 - **Optional 8K YouTube copy** (`post_yt8k`) — a far sharper 3D picture on YouTube.
 - **Optional flat 2D copy** (`post_flat`) — for viewers without a headset.
 - **Head-motion smoothing and symmetric view** — for comfortable 3D.
@@ -66,7 +74,8 @@ Desktop. Any other OpenXR game that renders with Direct3D 11 or Direct3D 12 shou
 Everything runs from one small icon in the Windows tray (next to the clock). The icon colour tells you the state:
 **grey** = no VR game running, **green** = game running and ready, **red** = recording, **amber** = starting, finishing
 the file or an error, **blue** = converting a finished recording. Hover the icon for the details (game, resolution,
-fps, dropped frames, recording time, conversion progress).
+fps, dropped frames, recording time, conversion progress). **Left-click** the icon to open the Settings window (with the
+conversion queue); **right-click** it for the menu.
 
 ### The tray menu (right-click the icon)
 
@@ -74,29 +83,35 @@ fps, dropped frames, recording time, conversion progress).
 
 | Item | What it does |
 |---|---|
+| *Converting <file> (8K) 42% - about 6 min left* | Shown greyed at the top while a conversion runs: the file, the step (MKV, flat or 8K), how far that step is and roughly how long it still takes (paused time is not counted). |
+| **Pause conversion** / **Resume conversion** | Only while a conversion runs. Pauses the running ffmpeg (it uses no CPU / GPU while paused; the tooltip says "paused") and continues it later. |
+| **Cancel conversion** | Only while a conversion runs. Stops it and deletes the half-written file of that step (`<name>.part`). The MP4 is always kept (even with `keep_mp4 = 0`), files finished earlier in the same conversion stay, and recordings waiting behind it still convert. A balloon says "Conversion cancelled: <file>". |
 | **Start recording** / **Stop recording** | Starts or stops a recording in the running VR game. Same as your hotkey (shown next to it). Greyed out while no game is running. |
 | **Open captures folder** | Opens the folder with your recordings (`captures\` unless you set another one). |
-| **Convert last recording now** | Converts the newest recording at once (the YouTube `.mkv`, the 8K copy, the flat copy, whatever you switched on), even if conversion is set to wait until the game closes. |
+| **Convert last recording now** | Converts the newest recording at once (the YouTube `.mkv`, the 8K copy, the flat copy, whatever you switched on), even if conversion is set to wait until the game closes or to "When I say". |
+| **Convert a recording...** | Opens a file dialog in the captures folder; every MP4 you pick (several with Ctrl / Shift) is converted at once, one after another, whatever the Convert setting says. Only recordings are accepted: a converted file (`.mkv`, `_FLAT.mp4`) or any other file is refused with a "Not a recording" balloon, so it can never be re-converted and deleted. The same button is in the Settings window. |
 | **Open log** | Opens the recorder's log, `logs\eye_capture.log` (the tray's own log is `logs\tray.log` next to it). Useful when something does not work, and for bug reports. |
 | **Settings...** | Opens the Settings window (below). |
 | **Edit config** | Opens `config.ini` in Notepad, for the few keys the window does not show. |
 | **Register for VR games...** / **Unregister from VR games...** | Tells Windows that VR games may load the recorder (one administrator prompt), or removes that again. Needed once. |
-| **Exit** | Closes the tray app. Games started after that are not recorded. A conversion that is still waiting is dropped; the MP4 stays. |
+| **Exit** | Closes the tray app. Games started after that are not recorded. A running conversion is cancelled (its half-written file is deleted) and a waiting one is dropped; the MP4 stays. |
 
 ### The Settings window (tray menu -> Settings...)
 
 ![The Settings window](docs/images/settings.png)
 
-Point at any setting and the **"What does this do?"** box at the bottom explains it. **Save** applies to the next recording.
+Point at any setting and the **Description** box at the bottom explains it. **Save** applies to the next recording. If the window is taller than the screen, its content scrolls and the buttons stay at the bottom.
 
 | Part | What is in it |
 |---|---|
-| **Recording** | **Hotkey**: the key that starts / stops a recording. "Press a key..." records a key, mouse button, Xbox controller button or wheel button for you; "Add another..." adds a second one. **Codec** (HEVC = best), **Bitrate** (0 = automatic), **Max fps** (0 = the game's own rate), **Output folder**, **Record audio** (and which audio device), **Record overlays** (mod menus and in-game panels in the video). |
-| **3D** | **Projection**: flat side-by-side 3D (normal) or the experimental VR180 / VR360 dome. **3D layout**: how the two eyes are packed for YouTube (top / bottom half is what YouTube likes). **Fill** and **Fade**: dome mode only. **Symmetric field of view**: lines both eyes up so the 3D is comfortable (leave on). **Swap eyes**: if left and right look swapped. **Roll lock**: keeps the horizon level. **Head smoothing**: calms small head shakes (0 = off). **Output FOV scale**: zooms in a little to hide the edges. |
-| **In-headset indicator** | A small red dot that you see in the headset while recording, never in the video. Size, opacity and where it floats. |
-| **After recording** | **Make for YouTube**: the plain 3D `.mkv` or the sharper 8K `.mkv` (slower to make). **Keep the original .mp4**. **Convert recordings**: right away, when VR stops, or when the game closes (so it does not cost frame rate while you play). **Crop each eye**: 16:9 (wide; plays in the Quest YouTube app and gets 8K), 4:3 (taller view) or none (full view, but tall videos may crash the Quest YouTube player). **Also make a flat 2D copy** for people without a headset. |
+| **Recording** | **Hotkey**: the key that starts / stops a recording. **Capture...** records a key, mouse button, Xbox controller button or wheel button for you; **Add...** adds a further one. **Output folder** (**Browse...** picks a folder on any drive; the line below shows that drive's free space, e.g. "E: 812 GB free"). **Audio** (record system audio, and optionally which audio device). **Overlays**: include overlay layers (menus, mod panels) in the video. |
+| **Video** | **Codec** (H.265 / HEVC is recommended; AV1 needs a GPU with an AV1 encoder, e.g. NVIDIA RTX 40 / 50, and falls back to HEVC without one). **Bitrate**: Default (120 Mbit/s), 150, 200, 250 or 300 Mbit/s, with the file size per hour next to it (250 Mbit/s = about 113 GB per hour; suggested: 250 at 60 fps, 120 at 30 fps; a value set in config.ini shows as Custom). **Resolution**: Native, 3840 px (4K), 2560 px (2K) or 1920 px (1080p) -- the width of the whole side-by-side video; smaller = less GPU work while recording and smaller files. **Frame rate limit** in fps (0 = unlimited, the game's own rate). |
+| **Stereo 3D** | **Projection**: flat stereo (side by side, normal) or the experimental VR180 / VR360 dome. **Dome fill** and **Fade after**: dome mode only (greyed while Projection is Flat). **Options**: *Symmetric field of view* lines both eyes up so the 3D is comfortable (leave on), *Swap eyes* if left and right look swapped, *Level horizon (roll lock)* keeps the horizon level. **Head smoothing**: calms small head shakes (0 = off). **Field of view scale**: zooms in a little to hide the edges. |
+| **Recording Indicator** | A small red dot that you see in the headset while recording, never in the video. Size, opacity and where it floats. |
+| **Export** | **YouTube output**: the plain 3D MKV, the sharper 8K 3D MKV (slower to make), both, or none. **8K bitrate**: 100, 150 (default) or 200 Mbit/s for the 8K file (NVIDIA encoder). **8K codec**: HEVC (default) or AV1 (RTX 40 / 50; sharper at the same bitrate, falls back to HEVC). **Convert**: immediately, when the VR session ends, when the game exits (so it does not cost frame rate while you play), or *When I say* (never on its own). **Convert a recording...**: pick MP4s to convert next. **Add to queue...**: pick MP4s that wait in the Conversions list until you click Start / Start all. Both use the Export settings the window shows at that moment (saved or not) for those files. **Also create a 2D (flat) video** for people without a headset. **Keep original MP4**. **Output layout**: how the two eyes are packed for YouTube (top/bottom, half height is what YouTube likes; greyed for VR180 / VR360). **Eye crop**: 16:9 widescreen (recommended; plays in the Quest YouTube app and gets 8K), 4:3 (taller view), 4:3 padded to 16:9 (the taller view with black side bars, 7680x4320 so it still gets 8K) or none (full eye, but tall videos may crash the Quest YouTube player). **Record directly in the YouTube layout (no re-encode)** (`record_for_youtube`): the recording itself is made in that output layout and eye crop at the 8K size, so the tray only copies it into the `.mkv` (seconds) and that `.mkv` is the upload; the 8K bitrate / codec are greyed then (no separate 8K file), and the full side-by-side picture is not kept. Flat projection only. |
+| **Conversions** | Live view of the conversion queue (refreshes twice a second). **Running**: the file, its format, the step (MKV, flat or 8K), percent, time left, or why it waits; a progress bar; **Pause** / **Resume** and **Cancel** (when the running conversion waits for the Convert setting, Pause reads **Run now** and starts it). **Waiting**: the conversions in the order they run, each as `<file> - <format> - <state>`, e.g. `rec.mp4 - 8K AV1 100M, 4:3, tb_half - waiting for you`. States: *next*, *waiting for you* (added with Add to queue, or restored after a restart: waits for Start), *waiting: converts when the game closes* (the Convert setting), *queued*. Automatic recordings show *(current settings)*: they use the saved settings as they are when their conversion starts. Select one or several (Ctrl / Shift) and click **Start** (they run next, in order), **Start all** (every waiting one, in list order), or **Remove** (the MP4 stays). The list is saved in `queue.json` next to the tray app; after a restart every entry comes back as *waiting for you*. |
 | **Advanced** | **Log level** (how much goes into the log) and **Start with Windows** (starts the tray app when you log in). |
-| Buttons | **Open config.ini**, **Restore defaults** (fills in the defaults, nothing saved until Save), **Save**, **Cancel**. |
+| Buttons | **Open config.ini**, **Restore Defaults** (fills in the defaults, nothing saved until Save), **Save**, **Cancel**. |
 
 ## ⬇ Download
 
@@ -115,6 +130,8 @@ OpenXR is a trademark of The Khronos Group.
   OpenGL is not supported. Unsupported games run normally, just without recording.
 - A GPU with a hardware HEVC (H.265) encoder: NVIDIA GTX 10xx or newer, AMD RX 400 or newer, Intel 7th gen or newer.
   HEVC is needed for wide frames: a Quest 3 at high settings is about 6000 x 3200 side by side, beyond H.264 limits.
+  Optional: `codec = av1` records AV1 on GPUs with a hardware AV1 encoder (NVIDIA RTX 40 / 50 series; tested on an RTX 5090:
+  8192 x 4348 at 90 fps with no dropped frames).
 
 ## Install
 
@@ -165,8 +182,9 @@ If the game crashes or is killed while recording, the MP4 is lost (it is only fi
 
 **Tray icon**: grey = no VR game, green = ready, red = recording, amber = starting / finalizing / failed,
 blue = converting a finished recording, or recordings waiting to be converted while no game is running (see "Upload to YouTube").
-Right-click: Start / Stop recording, Open captures folder, Convert last recording now, Open log, Edit config, Exit. The tooltip shows game,
-resolution, fps, dropped frames and elapsed time, and "converting <file> (MKV)..." / "last: <file>.mkv ready". `EyeCaptureTray.exe --start | --stop | --toggle | --status` does the
+Left-click: the Settings window. Right-click: Start / Stop recording, Open captures folder, Convert last recording now, Open log, Edit config, Exit, and while a
+conversion runs Pause / Resume / Cancel conversion. The tooltip shows game, resolution, fps, dropped frames and elapsed time, and
+"converting <file> (MKV) 42% - about 6 min left" / "paused: <file> ..." / "last: <file>.mkv ready". `EyeCaptureTray.exe --start | --stop | --toggle | --status` does the
 same from a script or a Stream Deck button (`--start` / `--toggle` print an error if the tray app is not running);
 `--status` also prints `registered=yes|no|stale` and `autostart=yes|no`. `EyeCaptureTray.exe --inputs [seconds]` lists the
 Xbox controllers and wheels / joysticks the tray can see and, for 15 s (or the given seconds), prints the `hotkey` text of
@@ -174,10 +192,10 @@ every button you press.
 
 ## Upload to YouTube
 
-**The tray app converts every recording to a `.mkv` automatically; upload the `.mkv`.** YouTube only reliably recognises
+**The tray app converts every recording to a `.mkv` (automatically, unless Convert is set to "When I say"); upload the `.mkv`.** YouTube only reliably recognises
 the 3D tag as the Matroska `stereo_mode` tag (it ignored the MP4 `st3d` box), so when a recording is saved
 the tray (it must be running, which it is anyway for the layer to be active) writes the `.mkv` with ffmpeg. The recording
-itself is always a full side-by-side MP4; the **3D layout** (`layout_3d`, Settings: "3D layout" in the 3D group) decides what
+itself is a full side-by-side MP4 (unless it was recorded in the YouTube layout, see below); the **Output layout** (`layout_3d`, Settings: "Output layout" in the Export group) decides what
 the `.mkv` contains. YouTube only handles `tb_half` correctly (it reads every 3D upload as half-format), so that is the
 default: the `.mkv` is **re-encoded** (NVENC HEVC 150 Mbit/s, x265 without NVENC; same frame rate, at most 8192 on the long
 side, no upscaling) with each eye squeezed to half height, left eye on top, tagged `top_bottom`. With `layout_3d = sbs_full`
@@ -185,17 +203,50 @@ the `.mkv` is the plain fast remux of the recording (`left_right`, no re-encode,
 YouTube then processes it as a 3D video; viewers in a headset (YouTube VR) get 3D.
 Processing of large files takes a while; the 3D version can appear later than the first standard-definition version.
 
-- **When** it converts is `post_when` (Settings: "Convert recordings" under After recording). Converting re-encodes on the
+**Record for YouTube** (`record_for_youtube = 1`): the layer records straight in the YouTube layout, so no re-encode is
+needed afterwards. While recording, both eyes get the symmetric view (`symmetric_fov` is switched on for that recording if
+it is off), each eye is centre-cropped to `eye_crop` (16:9 by default), scaled so the frame's short side is 4320 and packed
+per `layout_3d` (default `tb_half`: left eye on top, each eye half height) -- on a Quest 3 that is the 7680x4320 8K frame
+the tray's 8K step would make (4:3: 5760x4320; 4:3pad: 7680x4320 with black bars beside the 4:3 picture). The MP4 gets the matching `st3d` box and a small `<name>.json` next to it
+that tells the tray it is already in the upload layout. What you lose: there is no full side-by-side recording to go back
+to -- the crop, the layout and the size are baked into the picture (change `eye_crop` / `layout_3d` before you record).
+8K needs `codec = hevc` (default) or `av1`; with `h264` the frame is capped at 4096 wide, and `max_width` also caps it
+(the whole frame is scaled down). YouTube plays at most 60 fps, so `max_fps = 60` is a good match for this mode. Flat
+recordings only (VR180 / VR360 ignore it). If the game reports no usable field of view at the start, the recording is made
+the normal side-by-side way (logged).
+
+- **When** it converts is `post_when` (Settings: "Convert" in the Export group). Converting re-encodes on the
   GPU / CPU, so during a game it can cost frame rate:
-  - `game_exit` (default, "When the game closes"): the recording waits until the game that made it has exited and no VR
+  - `game_exit` (default, "When the game exits"): the recording waits until the game that made it has exited and no VR
     game is running. The tooltip says "1 recording waiting -- converts when the game closes".
-  - `session_end` ("When VR stops"): waits until no game has a VR session open (the game left VR or closed). If a VR
+  - `session_end` ("When the VR session ends"): waits until no game has a VR session open (the game left VR or closed). If a VR
     session starts while a conversion runs, that ffmpeg is paused (suspended) and continues when VR stops
     ("conversion paused: <file> -- resumes when VR stops").
-  - `now` ("Right away"): as soon as the recording is saved.
-  **Tray menu > Convert last recording now** always starts at once, whatever `post_when` says. Exiting the tray cancels a
-  waiting or paused conversion (the MP4 stays; use "Convert last recording now" later).
-- While it runs the tray icon is **blue** and the tooltip says "converting <file> (MKV)..."; afterwards the tooltip says
+  - `now` ("Immediately"): as soon as the recording is saved.
+  - `manual` ("When I say"): never on its own. Finished recordings wait in the queue (tooltip: "1 recording waiting --
+    converts when you say (Settings)"; the MP4 stays) until you start one: Settings > Conversions > select it > **Start**
+    (or **Start all**), or **Convert a recording...** (Settings window or tray menu), or **Convert last recording now**. Recordings
+    that were already waiting when you switch to `manual` stay waiting; a conversion that was running pauses ("Run now"
+    in the Settings window continues it). Switching back to another value lets the waiting ones convert by that rule.
+  **Tray menu > Convert last recording now** and **Convert a recording...** always start at once (next), whatever `post_when` says.
+  **Settings > Add to queue...** is the opposite: those recordings always wait for **Start** / **Start all**, even with `post_when = now`.
+  Exiting the tray cancels a running conversion (its partial file is deleted, the MP4 stays); the queue (with that conversion
+  first) is saved in `queue.json` next to the tray app and comes back at the next start with every entry *waiting for you*
+  (entries whose MP4 is gone are dropped). The files that conversion had already finished are remembered: when it runs again
+  it only makes the missing ones, with the same settings, instead of making a second copy ("x (2).mkv") of the rest.
+  A conversion writes each file as `<name>.part` and renames it only after it was checked, so a file with its final name is
+  always complete; a `.part` left behind by a logoff, shutdown or crash is deleted when the tray starts again (or when that
+  recording is converted). If the tray app crashes or is killed, its ffmpeg is ended with it.
+- **Several versions of one recording**: each queued conversion carries its own format, a snapshot of the conversion
+  settings (`post_mkv`, `post_yt8k`, `post_flat`, `keep_mp4`, `layout_3d`, `eye_crop`, `yt8k_codec`, `yt8k_bitrate_mbps`)
+  taken when it is added: from the Settings window as it is shown (saved or not) for "Add to queue..." / "Convert a
+  recording..." there, from `config.ini` for the tray menu's "Convert a recording...". Automatic recordings and "Convert last
+  recording now" have no snapshot: they use `config.ini` as it is when the conversion starts (so a settings change while a
+  recording waits for the game to close still applies). Queue the same MP4 again after changing the Export settings to get
+  e.g. a 16:9 and a 4:3 copy, or an HEVC and an AV1 8K file; the same file with the same format is not queued twice. With
+  `keep_mp4 = 0` the MP4 is deleted only by the last conversion that needs it (while another one for the same MP4 waits, it stays).
+- While it runs the tray icon is **blue** and the tooltip says "converting <file> (MKV) 42% - about 6 min left" (the percent
+  needs `ffprobe`, which ships next to ffmpeg); the tray menu can pause, resume or cancel it. Afterwards the tooltip says
   "last: <file>.mkv ready" and a balloon says "Ready for YouTube: <file>.mkv". One recording at a time, in order.
 - The MP4 is deleted only after the MKV is verified (`keep_mp4 = 1` keeps both): a remux must exist and be larger than 90%
   of the MP4; a re-encoded `.mkv` must exist, not be empty and (with `ffprobe`, which ships next to ffmpeg) have the MP4's
@@ -207,21 +258,43 @@ Processing of large files takes a while; the 3D version can appear later than th
   and the MP4 stays as it is.
 - Dome recordings (`_VR180` / `_VR360`): always a plain remux (`layout_3d` does not apply), the MKV keeps the VR180 / 360
   metadata (`stereo_mode` is `top_bottom` for VR360). See "VR180 / VR360 dome mode".
+- Recordings made with **Record directly in the YouTube layout** (`record_for_youtube = 1`; the recording's `<name>.json`
+  says `"youtube":1` with its packing and eye crop) are already in the upload format, so the tray treats them as converted:
+  the `.mkv` is always the plain remux (`-c copy`, seconds, tagged `top_bottom` / `left_right` from the sidecar) named
+  `<name>.mkv` without a crop tag, whatever `layout_3d` / `eye_crop` say now (they are baked into the picture). The 8K step
+  is skipped ("already in the YouTube 8K layout") and no `_YT8K` file is made; with `keep_mp4 = 0` the MP4 is deleted after
+  the remux was verified. `post_flat = 1` still works: the `_FLAT.mp4` takes the left eye from the top / left part and
+  un-squeezes it before the usual 16:9 crop. The balloon says "Ready for YouTube: <name>.mkv": upload that file.
 - Only recordings that finish while the tray runs are converted; older ones: `scripts\make_mkv.ps1 <file.mp4>` (the manual
   path, a plain remux, so it ignores `layout_3d`) or "Convert last recording now".
+- **Thumbnail:** `scripts\make_thumbnail.ps1 <recording.mp4|.mkv>` writes `<recording>_thumb.jpg` (1280 x 720) next to it:
+  one frame of the left eye, cropped to 16:9, with a "3D" badge, the OpenXR-EyeCapture logo and the game's name (from the
+  file name) as the title. `-Title "..."`, `-Subtitle "..."` (one grey line under the title), `-At 25%` / `-At 90` / `-At 00:01:30`
+  pick the text and the frame; `-Layout` overrides the side-by-side / top-bottom detection (sidecar `.json` or the MKV's
+  `stereo_mode` tag; a re-encoded `sbs_half` MKV cannot be told apart from a full one, pass `-Layout sbs_half` if it looks
+  squeezed). Upload the `.jpg` as the video's thumbnail in YouTube Studio.
+
+  ![Thumbnail template](docs/images/thumbnail_template.png)
 - `post_flat = 1` also writes `<name>_FLAT.mp4` (normal 2D video: left eye, 16:9 centre crop, 3840 wide, NVENC HEVC or x264;
   same as `scripts\make_flat.ps1`) for viewers without a headset. The tray log is `logs\tray.log` (each ffmpeg command line,
   duration and result).
-- `post_yt8k = 1` (Settings: "Make for YouTube" including the 8K file) also writes `<name>_YT8K.mkv`: by default a half top-bottom 3D
+- `post_yt8k = 1` (Settings: "YouTube output" including the 8K 3D MKV) also writes `<name>_YT8K.mkv`: by default a half top-bottom 3D
   file (left eye on top). Each eye keeps its own aspect with the short side at 4320 (long side capped at 8192) and is
   squeezed to half height, so the whole frame has one eye's aspect. YouTube reads 3D uploads as half-format (it takes the
   frame's aspect as one eye's aspect), so the picture is not stretched. Capped to 60 fps, NVENC HEVC 150 Mbit/s (x265
-  without NVENC, much slower), tagged `stereo_mode=top_bottom`. YouTube shrinks a 4640 / 5804 wide side-by-side upload to
+  without NVENC, much slower; `yt8k_codec = av1` / Settings "8K codec" AV1 uses `av1_nvenc` on RTX 40 / 50 instead), tagged `stereo_mode=top_bottom`. YouTube shrinks a 4640 / 5804 wide side-by-side upload to
   its 4K tier (1920 per eye) at a low bitrate; the 8K file keeps the 8K tier and about 3x the bitrate, so the 3D is far
   sharper on a headset. **Upload the `_YT8K.mkv`** instead of the `.mkv`. Flat 3D recordings only (VR180 / VR360 are
   skipped). The balloon names both files ("YouTube 8K: ..."). The 3D layout of this copy is the same
-  `layout_3d` as for the `.mkv` (Settings: "3D layout" in the 3D group): `tb_half` (default, YouTube's format), `sbs_half`,
+  `layout_3d` as for the `.mkv` (Settings: "Output layout" in the Export group): `tb_half` (default, YouTube's format), `sbs_half`,
   `sbs_full` or `tb_full`; see the table below.
+- File names with `eye_crop`: with the default `16:9` the names are as above. With `4:3`, `4:3pad` or `none` the re-encoded files get a tag
+  before the extension (`<name>_4x3.mkv` / `<name>_4x3pad.mkv` / `<name>_full.mkv`, `<name>_YT8K_4x3.mkv` / `<name>_YT8K_4x3pad.mkv` /
+  `<name>_YT8K_full.mkv`, `<name>_YT8K_4x3pad_AV1.mkv`); a plain remux
+  and `_FLAT.mp4` are never tagged. So you can convert one recording with two crops and keep both. An 8K file made with AV1
+  (`yt8k_codec = av1` and `av1_nvenc` really made it) also gets `_AV1` after the crop tag (`<name>_YT8K_AV1.mkv`,
+  `<name>_YT8K_4x3_AV1.mkv`); when the AV1 encoder is not available and HEVC made it, it keeps the plain name. The tray never
+  overwrites a file: if the name exists it writes `<name> (2).mkv`, `(3)` ...
 
 ## Settings — `config.ini`
 
@@ -238,35 +311,35 @@ from <path>: changed bitrate_mbps=20->60, ...`.
 Screenshot and a short tour: [What it looks like](#the-settings-window-tray-menu---settings).
 
 Tray menu -> **Settings...** edits the same file (the `%APPDATA%` copy if it exists, else the one next to the tray app;
-the path is shown at the top of the window): recording (hotkey with "Press a key..." and "Add another..." buttons that
-also take a mouse side button, an Xbox controller button or a wheel / joystick button, codec, bitrate, max fps,
-output folder, audio, record overlays), 3D (projection, 3D layout, fill, symmetric fov, swap eyes, roll lock, head-smoothing slider, output fov scale),
-the in-headset indicator, what happens after a recording, and an Advanced group with the log level and the **Start with Windows** checkbox
+the path is shown at the top of the window): Recording (hotkey with "Capture..." and "Add..." buttons that
+also take a mouse side button, an Xbox controller button or a wheel / joystick button, output folder, audio, overlay layers), Video (codec, bitrate, resolution, frame rate limit), Stereo 3D (projection, dome fill (greyed for flat), symmetric field of view, swap eyes, roll lock, head-smoothing slider, field of view scale),
+the recording indicator (with a small live preview circle that shows roughly where the dot appears in your view as you type), Export (what happens after a recording: YouTube output, output layout, eye crop, recording directly in the YouTube layout, with a live picture of the files it will make: the recording, the output layout and eye crop, and the size in pixels of each file), and an Advanced group with the log level and the **Start with Windows** checkbox
 (`require_tray` is a config.ini-only key: the tray is required anyway). **Start with Windows** is a registry entry for your
 Windows account (one `Run` value, see Install), not a config.ini key; it is off by default and applied on **Save**. **Save** rewrites only the lines
 whose value changed, in place: comments, blank lines, section headers and keys the window does not know stay as they are
 (a missing key is added at the end of its section). A value the parser would reject is refused with a message and nothing
 is written. After a save the tray tooltip says "settings saved" for 5 s and `logs\tray.log` lists the changed keys. The
 change applies to the next recording, no game restart needed; the exceptions are the keyboard / mouse **hotkey**,
-**require_tray** and the **indicator** settings, which need a game restart (controller / wheel hotkeys apply at once). "Open config.ini" opens the file, "Restore defaults" fills the window with
-the built-in defaults (nothing is written until Save). Every control has a plain-English description: hover it for a tooltip,
-or read the "What does this do?" panel at the bottom of the window (it also follows the keyboard focus). The vr180 / vr360
+**require_tray** and the **indicator** settings, which need a game restart (controller / wheel hotkeys apply at once). "Open config.ini" opens the file, "Restore Defaults" fills the window with
+the built-in defaults (nothing is written until Save). Every control has a description: hover it for a tooltip,
+or read the "Description" panel at the bottom of the window (it also follows the keyboard focus). The vr180 / vr360
 projections are labelled "experimental" in the window.
 
 | Key | Default | Meaning |
 |---|---|---|
 | `hotkey` | `Ctrl+Shift+F10` | Start / stop. One or more, separated by commas; any of them works. **Keys**: `Ctrl`, `Shift`, `Alt` + `F1`..`F24`, `A`..`Z`, `0`..`9`, `Numpad0`..`9`, `Home`, `End`, `Insert`, `Delete`, `PageUp`, `PageDown`, `Pause`, `ScrollLock`, `CapsLock`, media keys (`MediaPlayPause`, `VolumeUp` ...), punctuation (`Semicolon`, `Comma` ...), any other key as `Key0xNN`; modifiers must match exactly. **Mouse**: `MouseMiddle`, `MouseX1`, `MouseX2`. Keys and mouse buttons are read when the game starts. **Xbox controller**: `Pad:A`, `Pad:Back+Start` (hold both), `Pad2:LB` (2nd pad only). **Wheel / joystick**: `Joy:*:Button3` (any device), `Joy:T300RS:Button5+Button6` (device name contains `T300RS`), `POVUp` / `POVDown` / `POVLeft` / `POVRight` for the hat. Controller and wheel buttons are read by the tray and apply at once. `EyeCaptureTray.exe --inputs` lists your devices and prints the name of each button you press. `none` = tray only. Example: `ScrollLock, Pad:Back+Start`. |
-| `output_dir` | *(empty)* = `captures` next to the DLL | Where MP4s go. |
-| `codec` | `hevc` | `hevc` or `h264` (H.264 is limited to 4096 px wide; wider frames are scaled down). |
-| `bitrate_mbps` | `0` = 120 (HEVC) / 80 (H.264) | Video bitrate. |
+| `output_dir` | *(empty)* = `captures` next to the DLL | Where MP4s go; the converted files (MKV, 8K, flat) go next to them, on the same drive. Nothing large is written to C: (or `%TEMP%`) unless this folder is on C:. **Low-space guard**: a recording does not start with less than 10 GB free on that drive, a conversion not with less than 10 GB + the estimated size of the files it makes (from the recording's length and the bitrates: an 8K copy of a 30-minute recording at 150 Mbit/s is about 31 GB) (log line + balloon "Recording not started" / "Not enough disk space ... needs about N GB"), and a recording is stopped and saved when the drive drops below 2 GB free (balloon "Recording stopped: disk almost full"). |
+| `codec` | `hevc` | `hevc`, `h264` or `av1` (H.264 is limited to 4096 px wide; wider frames are scaled down). `av1` = hardware AV1 through the GPU's Media Foundation AV1 encoder (NVIDIA RTX 40 / 50): about the HEVC quality at 2/3 of the bitrate, up to 8192 px; above 1 Gpixel/s (8K at 72 / 90 fps) the encoder runs at its faster quality setting (`CODECAPI_AVEncCommonQualityVsSpeed` 25) because its default speed cannot keep up (measured on an RTX 5090: ~51 fps at 8192x4348). No AV1 encoder: the recording is HEVC (logged `AV1 unavailable -- fell back to HEVC`). The tray converts AV1 recordings like any other (the MKV remux copies the AV1 stream). |
+| `bitrate_mbps` | `0` = 120 (HEVC) / 80 (H.264) / 80 (AV1) | Video bitrate in Mbit/s (max 1000). 1 Mbit/s = about 0.45 GB per hour: 120 = 54 GB/h, 150 = 68, 200 = 90, 250 = 113, 300 = 135. Suggested: 250 at 60 fps or more, 120 at 30 fps. Settings: "Bitrate" (Default / 150 / 200 / 250 / 300; other values show as Custom and are kept). |
 | `fps` | `90` | Fallback frame rate if it cannot be measured (it normally is: the game's real frame rate). |
 | `max_fps` | `0` | 0 = every frame the game renders; e.g. `60` drops frames above 60 fps. |
-| `max_width` | `0` | 0 = native resolution; otherwise the side-by-side frame is scaled down to this width. |
+| `max_width` | `0` | Resolution: 0 = native resolution; otherwise the whole side-by-side frame (both eyes) is this wide, e.g. `3840` (4K), `2560` (2K), `1920` (1080p); the height follows the picture. The symmetric-view / head-smoothing pass is drawn at this size, so a smaller value also means less GPU work while recording. Settings: "Resolution" in the Video group (a hand-set value shows as Custom and is kept). |
+| `record_for_youtube` | `0` | `[capture]`: `1` = record straight in the YouTube layout (symmetric view, `eye_crop`, short side 4320, packed per `layout_3d`, `st3d` + `<name>.json`), so the tray only remuxes to `.mkv`; no full side-by-side source is kept. With `eye_crop = 4:3pad` the black side bars are rendered too (each eye's picture centred in its 16:9 area). Capped by the codec limit and `max_width`. Flat recordings only. See "Upload to YouTube". |
 | `gamma` | `auto` | `auto` from the swapchain format; `srgb` / `linear` only if colours look washed out or too dark. |
 | `audio_enabled` | `1` | Record the sound (what plays on the playback device). |
 | `audio_device` | *(empty)* = default playback device | Part of the device name, e.g. `Virtual Desktop Audio`. |
 | `record_overlays` | `1` | `[capture]`: also record the game's / other mods' overlay layers (OpenXR quad, cylinder, equirect and cube layers: menus, the DLAA injector's VR panel and fps box, panoramas), composited into each eye where and how the headset shows them. `0` = only the game's 3D view. See "Overlays in the recording". |
-| `vr_indicator` | `1` | Small recording dot in the headset (never in the video). See "In-headset indicator". |
+| `vr_indicator` | `1` | Small recording dot in the headset (never in the video). See "In-headset indicator" below (Settings group "Recording Indicator"). |
 | `indicator_x` / `_y` / `_z` | `0.22` / `-0.16` / `-0.8` | Dot position in metres relative to your head (right / up / forward is negative z). |
 | `indicator_size` | `0.02` | Dot size in metres, `0.0005` .. `0.5` (below about `0.001` it is smaller than one headset pixel). |
 | `indicator_opacity` | `1.0` | Maximum opacity of the dot (0..1). |
@@ -280,10 +353,12 @@ projections are labelled "experimental" in the window.
 | `post_mkv` | `1` | Tray app: after each recording, write `<name>.mkv` with the Matroska 3D tag (what YouTube reads): a plain remux with `layout_3d = sbs_full` (and for VR180 / VR360), otherwise a re-encode in the `layout_3d` layout at the recording's own size, same frame rate. |
 | `keep_mp4` | `0` | Tray app: `0` = delete the MP4 once the MKV (and the flat / 8K files, if requested) is verified (remux: exists and > 90% of the MP4; re-encode: exists, not empty, duration within 1 s / 2% of the MP4's); `1` = keep both. |
 | `post_flat` | `0` | Tray app: also write `<name>_FLAT.mp4`, a normal 2D video (left eye, 16:9 centre crop, 3840 wide). |
-| `post_yt8k` | `0` | Tray app: also write `<name>_YT8K.mkv`, a half top-bottom 3D copy for YouTube (each eye keeps its aspect, short side 4320, squeezed to half height; YouTube reads 3D as half-format, so it is not stretched), capped to 60 fps, NVENC HEVC 150 Mbit/s. YouTube then keeps its 8K tier and bitrate (a 4640 / 5804 wide file lands in the 4K tier, 1920 per eye). Upload the `_YT8K.mkv`. Flat 3D recordings only. |
+| `post_yt8k` | `0` | Tray app: also write `<name>_YT8K.mkv`, a half top-bottom 3D copy for YouTube (each eye keeps its aspect, short side 4320, squeezed to half height; YouTube reads 3D as half-format, so it is not stretched), capped to 60 fps, NVENC HEVC at `yt8k_bitrate_mbps` (default 150 Mbit/s). YouTube then keeps its 8K tier and bitrate (a 4640 / 5804 wide file lands in the 4K tier, 1920 per eye). Upload the `_YT8K.mkv`. Flat 3D recordings only. |
+| `yt8k_bitrate_mbps` | `150` | Tray app: bitrate of the `_YT8K.mkv` with NVENC (VBR; peak 4/3 of it, buffer 2x: 150 = `-b:v 150M -maxrate 200M -bufsize 300M`), preset p5. 20 - 400; Settings "8K bitrate": 100 / 150 / 200. The x265 fallback (no NVENC) is constant quality (crf 18) and ignores it. With `yt8k_codec = av1` the same value goes to `av1_nvenc`; AV1 needs less for the same quality (about 100 with AV1 = 150 with HEVC). |
+| `yt8k_codec` | `hevc` | Tray app: encoder of the `_YT8K.mkv`: `hevc` (`hevc_nvenc`) or `av1` (`av1_nvenc -preset p5 -tune hq -multipass qres -tier 1 -highbitdepth 0`, same VBR maths; 8-bit 4:2:0 AV1 in Matroska, which YouTube accepts). Needs NVENC AV1 (RTX 40 / 50); otherwise it falls back to `hevc_nvenc`, then x265 (logged). An AV1 file is named `<name>_YT8K[_4x3\|_full]_AV1.mkv`; a fallback-encoded one keeps the plain name. Settings "8K codec". |
 | `layout_3d` | `tb_half` | Tray app, `[dome]` section next to `projection`: 3D layout of the files made from a FLAT recording: the `.mkv` and the `_YT8K.mkv` (the recording itself always stays full side by side; VR180 / VR360 have fixed layouts and ignore it). Left eye first, both eyes identical geometry, `stereo_mode` tag written. `tb_half` = top-bottom, half: frame = one eye's aspect, each eye squeezed to half height (YouTube's format; `top_bottom`). `sbs_half` = side by side, half: each eye squeezed to half width (`left_right`). `sbs_full` = side by side, full: each eye at its own aspect, frame = 2x eye aspect (`left_right`; YouTube shows it stretched, for headset players / 3D TVs; the `.mkv` is then the plain remux). `tb_full` = top-bottom, full: each eye at its own aspect, frame = eye aspect / 2 (`top_bottom`). Every layout except `sbs_full` makes the `.mkv` a re-encode at its native size (long side capped at 8192, source frame rate kept; slower than a remux); the `_YT8K.mkv` has short side 4320. Unknown value: warning in the log, `tb_half`. |
-| `eye_crop` | `16:9` | Tray app, `[post_processing]`: before the `.mkv` / `_YT8K.mkv` is made from a FLAT recording, centre-crop each eye vertically (same cut for both, never stretched) to this aspect when the eye is taller: `16:9` (default; 8K frame 7680x4320, plays on the Quest YouTube player and gets YouTube's 8K tier), `4:3` (5760x4320 for 8K) or `none` (full eye; a tall top-bottom video can crash the Quest YouTube player and YouTube caps it at 2160p). An eye already wider than the aspect is not cropped. With a crop, `layout_3d = sbs_full` is re-encoded too (only `sbs_full` + `none` is the plain remux). Settings: "Crop each eye" in the After recording group. Unknown value: warning in the log, `16:9`. |
-| `post_when` | `game_exit` | Tray app: when a finished recording is converted. `now` = right away; `session_end` = once no OpenXR session is live (a running conversion is paused while a VR session is live and resumed afterwards); `game_exit` = once the game process that made it has exited and no OpenXR game is live. "Convert last recording now" always runs at once. Re-read when `config.ini` changes (no tray restart). |
+| `eye_crop` | `16:9` | Tray app, `[post_processing]`: before the `.mkv` / `_YT8K.mkv` is made from a FLAT recording, centre-crop each eye vertically (same cut for both, never stretched) to this aspect when the eye is taller: `16:9` (default; 8K frame 7680x4320, plays on the Quest YouTube player and gets YouTube's 8K tier), `4:3` (5760x4320 for 8K; at 5760 px wide YouTube likely uses its 4K tier, so `16:9` is the recommended choice for YouTube 8K), `4:3pad` (the 4:3 crop, then black bars left and right up to 16:9, nothing stretched: the 8K file is 7680x4320 with the 4:3 picture 5760 px wide in the middle, so it keeps the taller view and gets YouTube's 8K tier; an eye already 16:9 or wider gets no bars) or `none` (full eye; a tall top-bottom video can crash the Quest YouTube player and YouTube caps it at 2160p). An eye already wider than the aspect is not cropped. With a crop, `layout_3d = sbs_full` is re-encoded too (only `sbs_full` + `none` is the plain remux). Settings: "Eye crop" in the Export group. Unknown value: warning in the log, `16:9`. |
+| `post_when` | `game_exit` | Tray app: when a finished recording is converted. `now` = right away; `session_end` = once no OpenXR session is live (a running conversion is paused while a VR session is live and resumed afterwards); `game_exit` = once the game process that made it has exited and no OpenXR game is live; `manual` = never on its own: recordings wait in the queue until you start them (Settings window: Conversions > Start / Start all, or Convert a recording...). "Convert last recording now" / "Convert a recording..." always run at once (next); Settings "Add to queue..." entries always wait for Start, whatever `post_when` says. Re-read when `config.ini` changes (no tray restart). |
 | `ffmpeg_path` | *(empty)* = auto | Tray app: full path of `ffmpeg.exe`. Empty = `PATH`, then WinGet packages, then an `ffmpeg` folder next to the tray app. |
 | `require_tray` | `1` | `1` = the layer is only active while `EyeCaptureTray.exe` is running (checked when the game creates its VR session). `0` = always active. |
 | `log_level` | `info` | `none` (no logging at all), `error`, `warn`, `info`, `debug`. |

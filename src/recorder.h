@@ -1,5 +1,5 @@
 // recorder -- one MP4 recording: shared SBS ring (via an IFrameSource) -> RGBA->NV12 on the GPU (D3D11 video
-// processor) -> hardware HEVC / H.264 through the Media Foundation sink writer, + WASAPI loopback -> AAC, then the
+// processor) -> hardware HEVC / H.264 / AV1 through the Media Foundation sink writer, + WASAPI loopback -> AAC, then the
 // 'st3d' box. Used unchanged by the layer and by tests/encoder_selftest.
 //
 // Threads:
@@ -7,7 +7,7 @@
 //                    Never waits: a full ring (or a slot still busy on the GPU) drops the frame and counts it.
 //   * worker thread: everything else (device + ring creation, sink writer, per-frame [linear->sRGB pre-pass],
 //                    [head-motion smoothing re-projection | VR180 / VR360 dome pass], NV12 conversion and WriteSample,
-//                    finalize, st3d (+ sv3d and a <name>.json sidecar for dome recordings).
+//                    finalize, st3d (+ sv3d and a <name>.json sidecar for dome recordings; the sidecar also for YouTube-mode ones).
 //                    One worker per recording.
 //   * audio thread : AudioCapture -> WriteSample on the audio stream.
 // The encoder device is private (created on the game's adapter); Media Foundation never touches the game's device.
@@ -25,11 +25,13 @@
 #include "frame_source.h"
 #include "head_smoothing.h"
 #include "overlay.h"
+#include "video_codec.h"
+#include "yt_layout.h"
 
 struct RecorderSettings {
     std::wstring path;               // output .mp4
-    bool         hevc = true;
-    unsigned     bitrate = 0;        // bits/s; 0 = 120 Mb/s HEVC, 80 Mb/s H.264
+    VideoCodec   codec = VideoCodec::Hevc;   // AV1: hardware MFT only; falls back to HEVC when it cannot be set up
+    unsigned     bitrate = 0;        // bits/s; 0 = 120 Mb/s HEVC, 80 Mb/s H.264, 80 Mb/s AV1 (VideoCodecDefaultMbps)
     unsigned     fps = 90;           // nominal frame rate written to the stream (timestamps are the real ones)
     unsigned     maxFps = 0;         // 0 = keep every submitted frame
     unsigned     maxWidth = 0;       // 0 = native
@@ -37,6 +39,12 @@ struct RecorderSettings {
     std::wstring audioDevice;
     HeadSmoothingSettings head;      // head-motion smoothing + symmetric fov (both off: re-projection stage bypassed)
     DomeSettings dome;               // projection = vr180 / vr360: dome output instead of the flat re-projection
+    // record_for_youtube (yt_layout.h): flat recordings only -- the re-projection stage (symmetric fov, forced on) renders
+    // both eyes cropped (eyeCrop), scaled (short side 4320; XR_EYE_CAPTURE_TEST_YT_SHORT overrides it) and packed (layout3d)
+    // into the recorded frame; st3d top-bottom / left-right and a <name>.json sidecar ("youtube":1) so the tray only remuxes.
+    bool         youtube = false;
+    Layout3d     layout3d = Layout3d::TbHalf;
+    EyeCrop      eyeCrop = EyeCrop::Wide169;
     // The two views' fov (angleLeft, angleRight, angleUp, angleDown) and image sizes at record start: symmetric_fov
     // fixes the output frustum and size of the whole recording from these.
     bool         startFovValid = false;

@@ -12,6 +12,8 @@
                        hudraw   as raw, plus layer_e2e --hud: a green quad in a VIEW space (head-locked, like the DLAA
                                 injector's panel) and a magenta quad in the LOCAL space (world-locked)
                        hudsmooth as smooth, plus --hud
+                       small    as raw with max_width = 1280: the re-projection renders straight at 1280 wide (2 x 2
+                                bilinear taps per output pixel), the video processor does not scale
     Each video is decoded (ffmpeg, Y plane), the marker is located in each eye per frame (weighted centroid of
     Y > 150) and converted to camera angles with the left eye's output fov (symmetric x scale, or the raw left fov). Video time -> motion time through the
     layer's "first video frame ... displayTime" log line and layer_e2e's E2E_T0_NS.
@@ -26,6 +28,9 @@
       edges   raw, rawasym, smooth: no black pixels (Y < 30) in a 3 px border of either eye, in the jitter phase AND over
               the whole recording (turn and catch-up included); smooth: the layer's summary reports 0 uncovered frames
               and the edge guard acted (> 0 frames). noguard (edge_guard = 0) is info only: black edges are expected.
+      small   the MP4 is 1280 wide (even height, the 2328x1440 aspect), the layer logs "re-projection rendered at 1280x..."
+              and its summary line reports that size; the marker follows the mock pose (RMS < 0.3 deg: one output pixel is
+              about 0.13 deg here), same x in both eyes (<= 1 px), no black border pixels.
       hud     (RGB decode; per eye: green / magenta / white centroids) hudraw and hudsmooth: the VIEW-space quad is in
               every frame of both eyes and its centroid stays within 1 px of its median over the WHOLE recording (jitter,
               turn, catch-up) -- with smoothing it follows the smoothed camera (OverlayHeadLock), a steady HUD; the
@@ -172,10 +177,13 @@ $cases = @(
     @{ name = 'smooth';  cfg = 'projection=flat;head_smoothing=0.6;output_fov_scale=0.9';              k = 0.9; tans = $symTans },
     @{ name = 'noguard'; cfg = 'projection=flat;head_smoothing=0.6;output_fov_scale=0.9;edge_guard=0'; k = 0.9; tans = $symTans },
     @{ name = 'hudraw';    cfg = 'projection=flat;head_smoothing=0';                        k = 1.0; tans = $symTans; hud = $true },
-    @{ name = 'hudsmooth'; cfg = 'projection=flat;head_smoothing=0.6;output_fov_scale=0.9'; k = 0.9; tans = $symTans; hud = $true }
+    @{ name = 'hudsmooth'; cfg = 'projection=flat;head_smoothing=0.6;output_fov_scale=0.9'; k = 0.9; tans = $symTans; hud = $true },
+    @{ name = 'small';   cfg = 'projection=flat;head_smoothing=0;max_width=1280';                      k = 1.0; tans = $symTans }
 )
 if ($OnlyHud) { $cases = @($cases | Where-Object { $_.hud }) }
 $hudData = @{}
+$dims = @{}
+$logs = @{}
 $prevTray = $env:XR_EYE_CAPTURE_REQUIRE_TRAY; $prevCfg = $env:XR_EYE_CAPTURE_CONFIG; $prevIpc = $env:XR_EYE_CAPTURE_TRAY_IPC
 $env:XR_EYE_CAPTURE_REQUIRE_TRAY = '0'
 $env:XR_EYE_CAPTURE_TRAY_IPC = '0'   # a running tray must not post-process (and delete) the test recordings
@@ -211,6 +219,7 @@ foreach ($c in $cases) {
     $probe = & $ffprobe -v error -print_format json -show_streams $file | Out-String | ConvertFrom-Json
     $v = $probe.streams | Where-Object { $_.codec_type -eq 'video' } | Select-Object -First 1
     $W = [int]$v.width; $H = [int]$v.height; $eyeW = [int]($W / 2)
+    $dims[$c.name] = @($W, $H); $logs[$c.name] = $log
     $pts = & $ffprobe -v error -select_streams v:0 -show_entries packet=pts_time -of csv=p=0 $file | Where-Object { $_ -match '\d' } |
         ForEach-Object { [double]($_.Trim().TrimEnd(',')) } | Sort-Object
     $k = $c.k
@@ -289,8 +298,9 @@ function Settle($rows) {
 }
 
 Write-Host "`n=== checks" -ForegroundColor Cyan
-foreach ($name in @('raw', 'rawasym')) {
+foreach ($name in @('raw', 'rawasym', 'small')) {
     if (-not $data.ContainsKey($name)) { continue }
+    $lim = if ($name -eq 'small') { 0.3 } else { 0.15 }
     $se = 0; $cnt = 0; $missing = 0
     foreach ($r in $data[$name]) {
         if ([double]::IsNaN($r.x)) { $missing++; continue }
@@ -298,9 +308,9 @@ foreach ($name in @('raw', 'rawasym')) {
         $se += [math]::Pow($r.x - $e[0], 2) + [math]::Pow($r.y - $e[1], 2); $cnt++
     }
     $rms = [math]::Sqrt($se / [math]::Max(1, $cnt))
-    Check ($rms -lt 0.15 -and $missing -eq 0) ("{3}: marker follows the mock head pose exactly (RMS error {0:N3} deg over {1} frames, marker missing in {2})" -f $rms, $cnt, $missing, $name)
+    Check ($rms -lt $lim -and $missing -eq 0) ("{3}: marker follows the mock head pose exactly (RMS error {0:N3} deg over {1} frames, marker missing in {2})" -f $rms, $cnt, $missing, $name)
 }
-foreach ($name in @('raw', 'rawasym', 'smooth')) {
+foreach ($name in @('raw', 'rawasym', 'smooth', 'small')) {
     if (-not $data.ContainsKey($name)) { continue }
     $d = @($data[$name] | Where-Object { -not [double]::IsNaN($_.dx) } | ForEach-Object { $_.dx })
     $mean = ($d | Measure-Object -Average).Average
@@ -324,7 +334,7 @@ foreach ($name in @('smooth', 'noguard')) {
     Check ($st[0] -le 0.5) ("{0}: settles {1:N2} s after the turn ends (<= 0.5 s within 1 deg)" -f $name, $st[0])
     Check ([math]::Abs($st[1] - 30) -le 0.5 -and [math]::Abs($st[2]) -le 0.5) ("{0}: final rest position {1:N2} / {2:N2} deg (want 30 / 0)" -f $name, $st[1], $st[2])
 }
-foreach ($name in @('raw', 'rawasym', 'smooth', 'noguard')) {
+foreach ($name in @('raw', 'rawasym', 'smooth', 'noguard', 'small')) {
     if (-not $data.ContainsKey($name)) { continue }
     $j = @($data[$name] | Where-Object { $_.t -ge 1.0 -and $_.t -le 3.9 })
     $bf = @($j | Where-Object { $_.black -gt 0 }).Count
@@ -343,6 +353,16 @@ if ($summ.ContainsKey('smooth')) {
     Check ($sm.uncovered -eq 0) ("smooth: layer summary reports 0 frames with uncovered output (got {0})" -f $sm.uncovered)
     Check ($sm.guarded -gt 0) ("smooth: the edge guard acted ({0} frames)" -f $sm.guarded)
 } elseif (-not $OnlyHud) { Check $false 'smooth: re-projection summary line in the log' }
+if (-not $OnlyHud) {
+    if ($dims.ContainsKey('small') -and $logs.ContainsKey('small')) {
+        $sw = $dims['small'][0]; $sh = $dims['small'][1]
+        $mR = [regex]::Match($logs['small'], 're-projection rendered at (\d+)x(\d+) \(left (\d+) \| right (\d+); max_width 1280;[^\r\n]*?(\d)x\d bilinear taps')
+        $want = if ($dims.ContainsKey('raw')) { [math]::Round(1280.0 * $dims['raw'][1] / $dims['raw'][0]) } else { -1 }
+        Check ($sw -eq 1280 -and $sh % 2 -eq 0 -and ($want -lt 0 -or [math]::Abs($sh - $want) -le 2)) ("small: MP4 is {0}x{1} (want 1280 x ~{2}, even)" -f $sw, $sh, $want)
+        Check ($mR.Success -and [int]$mR.Groups[1].Value -eq $sw -and [int]$mR.Groups[2].Value -eq $sh -and [int]$mR.Groups[5].Value -ge 2) ("small: layer log: {0}" -f $(if ($mR.Success) { $mR.Value } else { 're-projection rendered at ... (max_width 1280) line missing' }))
+        Check ($summ.ContainsKey('small') -and $summ['small'].line -match ("re-projection {0}x{1}: GPU" -f $sw, $sh)) "small: the re-projection summary reports the ${sw}x${sh} render size"
+    } else { Check $false 'small: recording' }
+}
 if ($summ.ContainsKey('noguard')) { Write-Host ("  info noguard: layer summary {0} frames uncovered, guard {1}" -f $summ['noguard'].uncovered, $summ['noguard'].guarded) }
 function Median($v) { $s = @($v | Sort-Object); if ($s.Count -eq 0) { return [double]::NaN }; return $s[[int][math]::Floor($s.Count / 2)] }
 function StdDev($v) {

@@ -15,11 +15,18 @@
 // "Start with Windows" (optional, off by default) is a separate, per-user registry state, NOT a config.ini key:
 //   HKCU\Software\Microsoft\Windows\CurrentVersion\Run, value "OpenXR-EyeCapture" (REG_SZ) = "<exeDir>\EyeCaptureTray.exe"
 //   (quoted, no arguments). No admin rights needed. Rules:
-//   - enabled = the value exists (whatever its data); SetAutostart(true) writes it, SetAutostart(false) deletes it
-//     (a missing value counts as success);
+//   - newer Windows 11 builds start a Run entry at sign-in only when it also has an enabled approval record:
+//     HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run, same value name, REG_BINARY of 12 bytes,
+//     first byte even (2) = enabled, odd (3) = disabled by the user in Task Manager / Settings. SetAutostart(true) writes
+//     02 00 00 00 + 8 zero bytes, SetAutostart(false) deletes it;
+//   - enabled = the Run value exists (whatever its data) AND the approval record is missing or has an even first byte;
+//     a record the user disabled reads as off (the Settings checkbox shows unchecked; checking it again rewrites 02);
+//     SetAutostart(true) writes the Run value, then the record (all or nothing: when the record cannot be written the Run
+//     value is put back as it was), SetAutostart(false) deletes both (a missing value counts as success);
 //   - SyncAutostart rewrites an enabled entry whose data is not the expected command for this exe folder (the folder
-//     was moved); it never turns the option on by itself;
-//   - tests redirect the Run key to a subkey of HKCU with SetAutostartTestKey, so a real Run key is never touched.
+//     was moved) or that has no approval record yet (an older install); it never turns the option on by itself;
+//   - tests redirect the Run key to a subkey of HKCU with SetAutostartTestKey (the approval key becomes <subkey>"Approved"),
+//     so a real Run / StartupApproved key is never touched.
 #pragma once
 #include <string>
 
@@ -59,9 +66,13 @@ void SetTestRoots(const std::wstring& lmPath, const std::wstring& cuPath);
 const wchar_t* AutostartValueName();   // "OpenXR-EyeCapture"
 // The command the Run value should hold for exeDir: "<exeDir>\EyeCaptureTray.exe" (quoted, no arguments).
 std::wstring AutostartCommand(const std::wstring& exeDir);
-// True when the Run value exists (any data); *storedCommand (optional) gets the data (empty when not enabled).
+// True when the Run value exists (any data) AND its StartupApproved record is missing or enabled: a record the user disabled
+// (Task Manager / Settings) returns false. *storedCommand (optional) gets the Run value's data whenever the value exists,
+// also when the user disabled it; it is empty only when there is no Run value.
 bool AutostartEnabled(std::wstring* storedCommand = nullptr);
-// on: writes the Run value for exeDir. off: deletes it (already missing = success). False + err on a Win32 error.
+// on: writes the Run value for exeDir and an enabled StartupApproved record; all or nothing: when the record cannot be
+// written, the Run value is put back as it was (deleted again if it did not exist) and false is returned.
+// off: deletes both (already missing = success). False + err on a Win32 error.
 bool SetAutostart(bool on, const std::wstring& exeDir, std::wstring& err);
 // If enabled and the stored command differs from AutostartCommand(exeDir) (case-insensitive), rewrites it. Returns true
 // only when it rewrote the value; a no-op (false) when not enabled or already right.

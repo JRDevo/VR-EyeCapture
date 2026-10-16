@@ -55,6 +55,22 @@ struct SymmetricFov {
 // fov = angleLeft, angleRight, angleUp, angleDown (radians); w / h = the eye's source image size.
 SymmetricFov ComputeSymmetricFov(const float fovL[4], const float fovR[4], uint32_t wL, uint32_t hL, uint32_t wR, uint32_t hR);
 
+// Re-projection output size for max_width and the encoder's size limit: the stage renders its side-by-side output
+// (left eye wL | right eye wR, height h) directly at the recorded size, so the video processor does not scale and the
+// re-projection pass only shades the pixels that are recorded. One factor f = min(1, maxW / (wL + wR), maxH / h)
+// (0 = no limit); when f < 1 each eye width is rounded DOWN to even (>= 2), so the frame is never wider
+// than maxW, and the height to the nearest even (never above maxH). taps = bilinear taps per axis per output pixel against minification aliasing: 1 up to 1.2x, then
+// ceil(1 / (2 f)) clamped to 2..4 (each bilinear tap averages about 2 x 2 source pixels; the in-game 12240 -> 8192
+// at 1.49x gets 2 x 2, like the video processor's multi-tap downscale it replaces).
+struct StageFit {
+    uint32_t eyeW[2] = {0, 0};
+    uint32_t h = 0;
+    double   factor = 1.0;   // output / native, <= 1
+    uint32_t taps = 1;
+    bool     scaled = false;
+};
+StageFit FitStageOutput(uint32_t wL, uint32_t wR, uint32_t h, uint32_t maxW, uint32_t maxH);
+
 // head_smoothing -> filter time constant in seconds: 0.05 * 30^((s - 0.1) / 0.9)
 // (0.1 -> 0.05 s, 0.3 -> 0.11 s, 0.5 -> 0.23 s, 0.6 -> 0.33 s, 0.7 -> 0.48 s, 0.8 -> 0.70 s, 1.0 -> 1.5 s).
 double HeadSmoothingTimeConstant(float smoothing);

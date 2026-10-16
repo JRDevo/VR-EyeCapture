@@ -14,6 +14,7 @@
 #include <cstring>
 #include <vector>
 #include "audio_capture.h"
+#include "disk.h"
 #include "log.h"
 #include "st3d.h"
 
@@ -41,35 +42,63 @@ const char kLinearToSrgbCs[] =
 // timewarp). One full-screen triangle over the whole SBS texture; the pixel shader picks the eye by x. For an output
 // pixel: ray in the smoothed (output) camera from the scaled fov -> C (actual-eye-from-smoothed rotation) -> project
 // with the eye's actual fov -> sample that eye's half of the source bilinearly; outside it = black. The output is
-// W x H (same layout as the source) or, with symmetric_fov, 2 x eyeW x eyeH of the common symmetric frustum. Source SRV and
-// target RTV are the same typed UNORM / float format, so no gamma conversion happens. See head_smoothing.h.
+// W x H (same layout as the source) or, with symmetric_fov, 2 x eyeW x eyeH of the common symmetric frustum -- either one
+// scaled down to the recorded size when max_width / the codec limit asks for less (FitStageOutput). record_for_youtube
+// (yt_layout.h): the two eyes of the symmetric frustum, vertically cropped (eye_crop), scaled and packed side by side or
+// top / bottom into the YouTube frame -- the eye is picked by its destination rectangle (eye 1 = pos >= its x0 AND y0;
+// for side-by-side y0 = 0, i.e. the old pick by x); eye_crop = 4:3pad renders the picture into a narrower rectangle
+// (dst) centred in the eye's area, the rest of the area (uv outside 0..1) black. Source SRV and target RTV are the same typed UNORM / float format,
+// so no gamma conversion happens. See head_smoothing.h.
 const char kReprojVs[] =
     "float4 main(uint id : SV_VertexID) : SV_Position {\n"
     "    float2 p = float2((id << 1) & 2, id & 2);\n"
     "    return float4(p * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);\n"
     "}\n";
+// misc.w = bilinear taps per axis (FitStageOutput): 1 = one bilinear sample (native size); n > 1 (the stage renders
+// smaller than the source, max_width): an n x n grid over the output pixel's footprint in the source, from the same
+// mapping evaluated one output pixel to the right / below, so a 4096 px eye shrunk to 640 px does not alias / shimmer.
+// The footprint is per axis (dx, dy), so a layout that minifies one axis only (tb_half squeezes the height) is covered too.
 const char kReprojPs[] =
     "struct Eye { float4 r0, r1, r2, outTan, srcTan, src, dst; };\n"   // src / dst: x0, y0, w, h in pixels
-    "cbuffer P : register(b0) { Eye eye[2]; float4 misc; };\n"     // misc: 1/srcW, 1/srcH, right eye x0 in the output, 0
+    "cbuffer P : register(b0) { Eye eye[2]; float4 misc; float4 misc2; };\n"   // misc: 1/srcW, 1/srcH, eye 1 x0 in the output, taps; misc2.x: eye 1 y0
     "Texture2D<float4> src : register(t0);\n"
     "SamplerState smp : register(s0);\n"
+    "float3 Ray(Eye E, float2 pos) {\n"   // output pixel -> ray in the actual eye camera
+    "    float2 uv = (pos - E.dst.xy) / E.dst.zw;\n"
+    "    float3 d = float3(lerp(E.outTan.x, E.outTan.y, uv.x), lerp(E.outTan.z, E.outTan.w, uv.y), -1.0);\n"
+    "    return float3(dot(E.r0.xyz, d), dot(E.r1.xyz, d), dot(E.r2.xyz, d));\n"
+    "}\n"
+    "float2 SrcUv(Eye E, float3 a) {\n"   // ray (a.z < 0) -> normalized position in the eye's source image
+    "    float2 t = a.xy / -min(a.z, -1e-6);\n"
+    "    return float2((t.x - E.srcTan.x) / (E.srcTan.y - E.srcTan.x), (E.srcTan.z - t.y) / (E.srcTan.z - E.srcTan.w));\n"
+    "}\n"
     "float4 main(float4 pos : SV_Position) : SV_Target {\n"
     "    const float4 black = float4(0.0, 0.0, 0.0, 1.0);\n"
-    "    Eye E = eye[pos.x >= misc.z ? 1 : 0];\n"
+    "    Eye E = eye[(pos.x >= misc.z && pos.y >= misc2.x) ? 1 : 0];\n"
     "    float2 uv = (pos.xy - E.dst.xy) / E.dst.zw;\n"
-    "    if (uv.y > 1.0) return black;\n"
-    "    float3 d = float3(lerp(E.outTan.x, E.outTan.y, uv.x), lerp(E.outTan.z, E.outTan.w, uv.y), -1.0);\n"
-    "    float3 a = float3(dot(E.r0.xyz, d), dot(E.r1.xyz, d), dot(E.r2.xyz, d));\n"
+    "    if (any(uv < 0.0) || any(uv > 1.0)) return black;\n"   // outside the eye's picture (4:3pad bars; past the last row)
+    "    float3 a = Ray(E, pos.xy);\n"
     "    if (a.z > -1e-6) return black;\n"
-    "    float2 t = a.xy / -a.z;\n"
-    "    float2 s = float2((t.x - E.srcTan.x) / (E.srcTan.y - E.srcTan.x), (E.srcTan.z - t.y) / (E.srcTan.z - E.srcTan.w));\n"
+    "    float2 s = SrcUv(E, a);\n"
     "    if (any(s < 0.0) || any(s > 1.0)) return black;\n"
-    "    float2 p = clamp(E.src.xy + s * E.src.zw, E.src.xy + 0.5, E.src.xy + E.src.zw - 0.5);\n"
-    "    return float4(src.SampleLevel(smp, p * misc.xy, 0).rgb, 1.0);\n"
+    "    float2 lo = E.src.xy + 0.5, hi = E.src.xy + E.src.zw - 0.5;\n"
+    "    float2 p = E.src.xy + s * E.src.zw;\n"
+    "    if (misc.w < 1.5) return float4(src.SampleLevel(smp, clamp(p, lo, hi) * misc.xy, 0).rgb, 1.0);\n"
+    "    float2 dx = (SrcUv(E, Ray(E, pos.xy + float2(1.0, 0.0))) - s) * E.src.zw;\n"   // footprint in source pixels
+    "    float2 dy = (SrcUv(E, Ray(E, pos.xy + float2(0.0, 1.0))) - s) * E.src.zw;\n"
+    "    const int n = (int)misc.w;\n"
+    "    float3 c = float3(0.0, 0.0, 0.0);\n"
+    "    [loop] for (int j = 0; j < n; ++j) {\n"
+    "        [loop] for (int i = 0; i < n; ++i) {\n"
+    "            float2 o = (float2(i, j) + 0.5) / n - 0.5;\n"
+    "            c += src.SampleLevel(smp, clamp(p + o.x * dx + o.y * dy, lo, hi) * misc.xy, 0).rgb;\n"
+    "        }\n"
+    "    }\n"
+    "    return float4(c / (n * n), 1.0);\n"
     "}\n";
 
 struct RpEye { float r0[4], r1[4], r2[4], outTan[4], srcTan[4], src[4], dst[4]; };
-struct RpConstants { RpEye eye[2]; float misc[4]; };
+struct RpConstants { RpEye eye[2]; float misc[4]; float misc2[4]; };
 static_assert(sizeof(RpConstants) % 16 == 0, "constant buffer size");
 
 // VR180 / VR360 dome (see dome.h). Same full-screen triangle; the eye is picked by its destination rectangle (SBS for
@@ -260,8 +289,9 @@ struct Recorder::Impl {
     UINT W = 0, H = 0, leftW = 0, outW = 0, outH = 0, fps = 90;
     DXGI_FORMAT fmt = DXGI_FORMAT_UNKNOWN;
     bool srgb = true;
-    bool hevc = true;
+    VideoCodec codec = VideoCodec::Hevc;   // the codec actually used (after a fallback)
     UINT bitrate = 0;
+    UINT av1Speed = 0;                     // AV1: CODECAPI_AVEncCommonQualityVsSpeed set (0 = encoder default; see CreateWriter)
 
     // private encoder device (kept across recordings while the adapter is the same)
     ComPtr<ID3D11Device> enc;
@@ -303,6 +333,21 @@ struct Recorder::Impl {
     std::atomic<bool> stage{false};    // re-projection stage on (head smoothing and / or symmetric fov); Start / worker init
     SymmetricFov sym;                  // symmetric_fov output (valid = on for this recording)
     UINT vpW = 0, vpH = 0, outRightX = 0;   // stage output = video processor input size; right eye x0 in it
+    // flat re-projection rendered at the recorded size (max_width / codec limit, FitStageOutput): native stage output,
+    // per-eye native and rendered widths, bilinear taps per axis (1 = the single tap of the native size)
+    UINT rpNativeW = 0, rpNativeH = 0, rpTaps = 1;
+    UINT rpNativeEyeW[2] = {0, 0}, rpEyeW[2] = {0, 0};
+    bool rpScaled = false;
+    // record_for_youtube (yt_layout.h): this recording is rendered in the YouTube layout (flat, symmetric fov only)
+    bool yt = false;                   // on for this recording
+    bool ytForcedSym = false;          // symmetric_fov = 0 was overridden for it
+    int  ytWarn = 0;                   // asked for but off: 1 = dome projection, 2 = no usable view fov at record start
+    bool ytTb = false;                 // top / bottom (tb_half, tb_full) else side by side
+    int  ytShort = kYtShortSide;       // frame short side asked for (XR_EYE_CAPTURE_TEST_YT_SHORT overrides it)
+    bool ytShortEnv = false;
+    YtFit ytFit;                       // per-eye and frame size (after the codec / max_width limits)
+    double ytTanV = 0;                 // output vertical tan after the crop (= sym.tanV * ch / eyeH)
+    UINT outBottomY = 0;               // eye 1 y0 in the stage output (top / bottom layouts; 0 = side by side)
     HeadSmoother smoother;
     ComPtr<ID3D11VertexShader> rpVs;
     ComPtr<ID3D11PixelShader> rpPs;
@@ -372,6 +417,7 @@ struct Recorder::Impl {
 
     void Run();
     bool Init();
+    bool FitOutputSize();
     bool InitVideoProcessor();
     bool InitLinearPass();
     bool InitReprojection(DXGI_FORMAT vpFmt);
@@ -379,9 +425,10 @@ struct Recorder::Impl {
     void Reproject(ID3D11ShaderResourceView* const* srvs, UINT nSrv, ID3D11RenderTargetView* const* rtvs, UINT nRtv,
                    const void* cb, size_t cbSize);
     void DomeConstantsFor(const Item& it, DomeConstants& dc);
+    std::wstring SidecarPath() const;
     void WriteSidecar(const std::string& file);
     void ReadTimings();
-    HRESULT CreateWriter(bool useHevc, bool hardware, std::string& why);
+    HRESULT CreateWriter(VideoCodec c, bool hardware, std::string& why);
     void LogTransforms();
     void Process(const Item& it);
     void FreeSlot(UINT slot, uint64_t freeValue, bool updateValue);
@@ -408,7 +455,7 @@ bool Recorder::Start(IFrameSource* src, const RecorderSettings& s, UINT w, UINT 
     m.W = w; m.H = h; m.leftW = leftWidth; m.fmt = fmt; m.srgb = srgbEncoded;
     m.fps = s.fps ? s.fps : 90;
     if (s.maxFps && s.maxFps < m.fps) m.fps = s.maxFps;
-    m.hevc = s.hevc;
+    m.codec = s.codec;
     m.stopReq = false;
     m.t0 = INT64_MIN;
     m.lastTs = INT64_MIN;
@@ -430,14 +477,62 @@ bool Recorder::Start(IFrameSource* src, const RecorderSettings& s, UINT w, UINT 
     m.ovLayersIn = 0; m.ovNotReady = 0; m.ovFull = 0; m.ovSetupFailed = 0; m.ovBehind = 0; m.ovFrames = 0; m.ovDraws = 0;
     m.ovLoggedFull = m.ovLoggedFirst = false;
     m.sym = SymmetricFov();
-    if (!m.dome.valid && s.head.symmetricFov && s.startFovValid)
+    // record_for_youtube: flat recordings only, and it needs the symmetric frustum (turns symmetric_fov on for this recording)
+    const bool ytWanted = s.youtube && !m.dome.valid;
+    if (!m.dome.valid && (s.head.symmetricFov || ytWanted) && s.startFovValid)
         m.sym = ComputeSymmetricFov(s.startFov[0], s.startFov[1], s.startEyeW[0], s.startEyeH[0], s.startEyeW[1], s.startEyeH[1]);
+    m.yt = ytWanted && m.sym.valid;
+    m.ytWarn = (s.youtube && m.dome.valid) ? 1 : (ytWanted && !m.sym.valid) ? 2 : 0;
+    m.ytForcedSym = m.yt && !s.head.symmetricFov;
     m.stage = m.dome.valid || s.head.Enabled() || m.sym.valid;
     m.smoother.Configure(s.head);   // also resets the filter: every recording starts at the actual head pose
     m.smoother.SetSymmetricOutput(m.sym.valid ? m.sym.tanH : 0.0, m.sym.valid ? m.sym.tanV : 0.0);
     m.vpW = m.dome.valid ? m.dome.frameW : m.sym.valid ? 2 * m.sym.eyeW : w;
     m.vpH = m.dome.valid ? m.dome.frameH : m.sym.valid ? m.sym.eyeH : h;
     m.outRightX = m.dome.valid ? m.dome.eyeW : m.sym.valid ? m.sym.eyeW : leftWidth;
+    // Flat re-projection (symmetric_fov / head smoothing): render the stage output at the size that is recorded
+    // (max_width, the codec limit) instead of rendering it at full size and letting the video processor scale it -- the
+    // pass then shades only the recorded pixels. The shader works in normalized coordinates of each eye's output
+    // rectangle, so only the rectangles shrink; overlays are composited into the ring (source size) before it. The dome
+    // keeps its own size (dome_width) and is scaled by the video processor as before.
+    m.rpNativeW = m.vpW; m.rpNativeH = m.vpH; m.rpTaps = 1; m.rpScaled = false;
+    m.rpNativeEyeW[0] = m.rpEyeW[0] = m.outRightX;
+    m.rpNativeEyeW[1] = m.rpEyeW[1] = m.vpW - m.outRightX;
+    m.ytTb = false; m.ytShort = kYtShortSide; m.ytShortEnv = false; m.ytFit = YtFit(); m.ytTanV = 0; m.outBottomY = 0;
+    if (m.yt) {
+        // YouTube layout: the symmetric eye (sym.eyeW x sym.eyeH at the source density) centre-cropped to eye_crop, scaled
+        // and packed exactly as the tray's 8K step would (PredictYtLayout), then the codec / max_width limits (FitYtLayout).
+        // The pass renders straight into that frame (vpW x vpH = the encoder size): the video processor does not scale.
+        wchar_t ev[16];
+        const DWORD n = GetEnvironmentVariableW(L"XR_EYE_CAPTURE_TEST_YT_SHORT", ev, 16);
+        if (n > 0 && n < 16) {
+            const int v = _wtoi(ev);
+            if (v >= 2 && v <= 16384) { m.ytShort = v; m.ytShortEnv = true; }
+        }
+        const YtLayout yl = PredictYtLayout((int)m.sym.eyeW, (int)m.sym.eyeH, s.layout3d, s.eyeCrop, m.ytShort);
+        m.ytFit = FitYtLayout(yl, s.layout3d, VideoCodecMaxSide(s.codec), s.maxWidth);
+        m.ytTb = YtTopBottom(s.layout3d);
+        m.ytTanV = m.sym.tanV * (double)yl.ch / (double)m.sym.eyeH;   // the crop: a symmetric subset of the vertical range
+        m.smoother.SetSymmetricOutput(m.sym.tanH, m.ytTanV);          // edge guard / coverage test on the cropped frustum
+        m.vpW = (UINT)m.ytFit.fw; m.vpH = (UINT)m.ytFit.fh;
+        m.outRightX = m.ytTb ? 0u : (UINT)m.ytFit.sw;
+        m.outBottomY = m.ytTb ? (UINT)m.ytFit.sh : 0u;
+        m.rpEyeW[0] = m.rpEyeW[1] = (UINT)m.ytFit.sw;
+        m.rpTaps = YtTaps((int)m.sym.eyeW, yl.ch, m.ytFit.vw, m.ytFit.sh);   // the picture's width (4:3pad: < sw)
+    }
+    if (m.stage && !m.dome.valid && !m.yt) {
+        const UINT codecMax = VideoCodecMaxSide(s.codec);
+        const UINT maxW = s.maxWidth ? std::min<UINT>(s.maxWidth, codecMax) : codecMax;
+        const StageFit fit = FitStageOutput(m.rpNativeEyeW[0], m.rpNativeEyeW[1], m.vpH, maxW, codecMax);
+        if (fit.scaled) {
+            m.rpScaled = true;
+            m.rpEyeW[0] = fit.eyeW[0]; m.rpEyeW[1] = fit.eyeW[1];
+            m.rpTaps = fit.taps;
+            m.vpW = fit.eyeW[0] + fit.eyeW[1];
+            m.vpH = fit.h;
+            m.outRightX = fit.eyeW[0];
+        }
+    }
     m.smFrames = m.smGuarded = m.smUncovered = m.smCatch = m.smNoPose = m.smResets = m.gpuN = 0;
     m.smCorrSum = m.smCorrMax = m.gpuSum = m.gpuMax = m.cpuSum = m.cpuMax = 0;
     m.queue.clear();
@@ -624,6 +719,20 @@ void Recorder::Impl::FreeSlot(UINT slot, uint64_t freeValue, bool updateValue) {
 }
 
 void Recorder::Impl::Run() {
+    {
+        // low-space guard (src/disk.h): never start a recording on an almost full drive
+        unsigned long long freeB = 0;
+        if (disk::FreeBytes(s.path, freeB) && freeB < disk::MinFreeToStart()) {
+            const std::string d = elog::Narrow(disk::DriveName(s.path));
+            const std::string msg = "not started: " + (d.empty() ? std::string("the output drive") : d) + " has only " +
+                                    elog::Narrow(disk::SizeText(freeB)) + " free (needs " +
+                                    elog::Narrow(disk::SizeText(disk::MinFreeToStart())) + "; free space or pick another output folder)";
+            LOGE("recorder: %s -- %s", msg.c_str(), elog::Narrow(s.path).c_str());
+            SetMessage(msg);
+            owner->state_ = RecState::Failed;
+            return;
+        }
+    }
     const HRESULT coHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     const HRESULT mfHr = MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET);
     const std::string file = elog::Narrow(s.path);
@@ -632,6 +741,7 @@ void Recorder::Impl::Run() {
         LOGE("recorder: start FAILED for %s (%s) -- see the lines above", file.c_str(), message.c_str());
         Cleanup();
         DeleteFileW(s.path.c_str());
+        DeleteFileW(SidecarPath().c_str());   // never a sidecar without its MP4
         if (SUCCEEDED(mfHr)) MFShutdown();
         if (SUCCEEDED(coHr)) CoUninitialize();
         owner->state_ = RecState::Failed;
@@ -642,6 +752,8 @@ void Recorder::Impl::Run() {
     LOGI("recorder: RECORDING -> %s", file.c_str());
 
     // main loop
+    std::string lowDisk;              // set when the recording was stopped because the drive is almost full
+    ULONGLONG lastDiskCheck = GetTickCount64();
     for (;;) {
         Item it{};
         {
@@ -652,6 +764,19 @@ void Recorder::Impl::Run() {
             queue.pop_front();
         }
         Process(it);
+        // low-space guard: every 2 s; below MinFreeToContinue the recording stops like a hotkey stop (finalized, saved)
+        const ULONGLONG nowTick = GetTickCount64();
+        if (lowDisk.empty() && nowTick - lastDiskCheck >= 2000) {
+            lastDiskCheck = nowTick;
+            unsigned long long freeB = 0;
+            if (disk::FreeBytes(s.path, freeB) && freeB < disk::MinFreeToContinue()) {
+                const std::string d = elog::Narrow(disk::DriveName(s.path));
+                lowDisk = "stopped: " + (d.empty() ? std::string("drive") : d) + " almost full (" + elog::Narrow(disk::SizeText(freeB)) + " free)";
+                LOGW("recorder: %s -- stopping the recording (threshold %s)", lowDisk.c_str(),
+                     elog::Narrow(disk::SizeText(disk::MinFreeToContinue())).c_str());
+                owner->Stop();
+            }
+        }
     }
     // stop: let the game thread leave SubmitFrame, then drain what it queued
     owner->state_ = RecState::Stopping;
@@ -693,16 +818,23 @@ void Recorder::Impl::Run() {
         PatchStereoSpherical(s.path, v180 ? 2 /*left-right*/ : 1 /*top-bottom*/, true, bounds, st3dReport);
         WriteSidecar(file);
     } else if (fileOk) {
-        PatchSt3d(s.path, 2 /*left-right*/, st3dReport);
+        PatchSt3d(s.path, yt && ytTb ? 1 /*top-bottom*/ : 2 /*left-right*/, st3dReport);
+        if (yt) WriteSidecar(file);   // record_for_youtube: tells the tray the file is already in the YouTube layout
     } else {
         DeleteFileW(s.path.c_str());
+        DeleteFileW(SidecarPath().c_str());
     }
-    char sum[700];
+    char layoutText[96];
+    if (dome.valid) snprintf(layoutText, sizeof(layoutText), "%s dome", DomeProjectionName(s.dome.projection));
+    else if (yt) snprintf(layoutText, sizeof(layoutText), "YouTube %s (eye_crop %s, st3d %s)", YtPackingKey(s.layout3d),
+                          YtCropKey(s.eyeCrop), ytTb ? "top-bottom" : "left-right");
+    else snprintf(layoutText, sizeof(layoutText), "SBS");
+    char sum[800];
     snprintf(sum, sizeof(sum),
-             "recording summary: %s | %s | %ux%u %s @%u fps nominal | frames written %llu, dropped %llu "
+             "recording summary: %s | %s | %ux%u %s @%u fps nominal | layout %s | frames written %llu, dropped %llu "
              "(ring full %llu, gpu busy %llu, encoder stall %llu), duplicates %llu, over max_fps %llu | duration %.2f s | "
              "audio %s (%llu frames = %.2f s) | finalize %s | %s",
-             fileOk ? "OK" : "FAILED", file.c_str(), outW, outH, hevc ? "HEVC" : "H.264", fps,
+             fileOk ? "OK" : "FAILED", file.c_str(), outW, outH, VideoCodecName(codec), fps, layoutText,
              (unsigned long long)frames,
              (unsigned long long)(dropRing.load() + dropGpu.load() + dropPool.load()),
              (unsigned long long)dropRing.load(), (unsigned long long)dropGpu.load(), (unsigned long long)dropPool.load(),
@@ -737,7 +869,9 @@ void Recorder::Impl::Run() {
              (unsigned long long)smResets, vpW, vpH, gpuN ? gpuSum / gpuN : 0.0, gpuMax, (unsigned long long)gpuN,
              cpuSum / n, cpuMax);
     }
-    SetMessage(fileOk ? std::string("saved ") + file : std::string("recording failed (no frames or finalize error)"));
+    // "saved <file>" is what the tray looks for; a low-space stop appends its reason (the tray reads the file name from `file`)
+    SetMessage(fileOk ? std::string("saved ") + file + (lowDisk.empty() ? std::string() : " -- " + lowDisk)
+                      : std::string("recording failed (no frames or finalize error)") + (lowDisk.empty() ? std::string() : " -- " + lowDisk));
     owner->state_ = RecState::Idle;
 }
 
@@ -756,25 +890,12 @@ bool Recorder::Impl::Init() {
     if (!encCtx4) { SetMessage("no ID3D11DeviceContext4"); return false; }
 
     // --- output size (from the re-projection output when symmetric_fov changes it) ---
-    outW = vpW; outH = vpH;
-    auto scaleTo = [&](UINT maxW, UINT maxH) {
-        if (outW > maxW) { outH = (UINT)((uint64_t)outH * maxW / outW); outW = maxW; }
-        if (outH > maxH) { outW = (UINT)((uint64_t)outW * maxH / outH); outH = maxH; }
-    };
-    if (s.maxWidth) scaleTo(s.maxWidth, 16384);
-    const UINT codecMax = hevc ? 8192 : 4096;
-    if (outW > codecMax || outH > codecMax) {
-        LOGW("recorder: %ux%u exceeds the %s limit of %u -- scaling down (set max_width or use codec = hevc)", outW, outH,
-             hevc ? "HEVC" : "H.264", codecMax);
-        scaleTo(codecMax, codecMax);
-    }
-    outW &= ~1u; outH &= ~1u;
-    if (outW < 64 || outH < 64) { SetMessage("frame too small"); return false; }
-    bitrate = s.bitrate ? s.bitrate : (hevc ? 120000000u : 80000000u);
+    if (!FitOutputSize()) return false;
+    bitrate = s.bitrate ? s.bitrate : VideoCodecDefaultMbps(codec) * 1000000u;
 
     LOGI("recorder: init %s -- SBS %ux%u (left %u) %s %s -> %ux%u %s %.0f Mb/s, %u fps nominal, GOP %u",
          GfxApiName(src->Api()), W, H, leftW, DxgiFormatName(fmt), srgb ? "sRGB-encoded" : "linear", outW, outH,
-         hevc ? "HEVC" : "H.264", bitrate / 1e6, fps, fps * 2);
+         VideoCodecName(codec), bitrate / 1e6, fps, fps * 2);
 
     if (dome.valid) {
         const char* pn = DomeProjectionName(s.dome.projection);
@@ -797,14 +918,69 @@ bool Recorder::Impl::Init() {
         const float* fl = s.startFov[0];
         const float* fr = s.startFov[1];
         LOGI("recorder: symmetric fov: source L[%+.1f,%+.1f]x[%+.1f,%+.1f] R[%+.1f,%+.1f]x[%+.1f,%+.1f] -> output "
-             "\xC2\xB1%.1f\xC2\xB0 x \xC2\xB1%.1f\xC2\xB0 per eye%s, %ux%u per eye (SBS %ux%u, from %ux%u)",
+             "\xC2\xB1%.1f\xC2\xB0 x \xC2\xB1%.1f\xC2\xB0 per eye%s, %ux%u per eye at the source density (SBS %ux%u, from %ux%u)",
              fl[0] * D, fl[1] * D, fl[3] * D, fl[2] * D, fr[0] * D, fr[1] * D, fr[3] * D, fr[2] * D,
              std::atan(sym.tanH) * D, std::atan(sym.tanV) * D,
-             s.head.Enabled() ? " (x output_fov_scale while smoothing)" : "", sym.eyeW, sym.eyeH, vpW, vpH, W, H);
+             s.head.Enabled() ? " (x output_fov_scale while smoothing)" : "", sym.eyeW, sym.eyeH, rpNativeW, rpNativeH, W, H);
     } else if (s.head.symmetricFov) {
         LOGW("recorder: symmetric fov: no usable view fov at record start -- recording the raw eye images");
     } else {
         LOGI("recorder: symmetric fov off (symmetric_fov = 0): raw eye images");
+    }
+    if (ytWarn == 1)
+        LOGW("recorder: record_for_youtube ignored: projection %s records its own dome layout", DomeProjectionName(s.dome.projection));
+    else if (ytWarn == 2)
+        LOGW("recorder: record_for_youtube: no usable view fov at record start -- recording the normal SBS layout instead "
+             "(no YouTube layout, no sidecar; the tray converts it as usual)");
+    if (yt) {
+        const double D = 180.0 / 3.14159265358979323846;
+        const YtLayout& yl = ytFit.native;
+        if (ytForcedSym)
+            LOGI("recorder: record_for_youtube: symmetric_fov = 0 overridden -- the YouTube layout needs the symmetric frustum "
+                 "(on for this recording)");
+        if (ytShortEnv)
+            LOGI("recorder: XR_EYE_CAPTURE_TEST_YT_SHORT = %d: YouTube frame short side %d instead of %d (test override)",
+                 ytShort, ytShort, kYtShortSide);
+        char lim[160] = "";
+        if (ytFit.Scaled()) {
+            char why[96];
+            if (ytFit.byWidth && ytFit.byCodec)
+                snprintf(why, sizeof(why), "max_width %u, %s limit %u", s.maxWidth, VideoCodecName(s.codec), VideoCodecMaxSide(s.codec));
+            else if (ytFit.byWidth) snprintf(why, sizeof(why), "max_width %u", s.maxWidth);
+            else snprintf(why, sizeof(why), "%s limit %u", VideoCodecName(s.codec), VideoCodecMaxSide(s.codec));
+            snprintf(lim, sizeof(lim), " -> scaled to %dx%d (each eye %dx%d; %s)", ytFit.fw, ytFit.fh, ytFit.sw, ytFit.sh, why);
+        }
+        char pad[160] = "";
+        if (yl.pw > yl.cw)   // 4:3pad: the bars, in eye units and in the frame
+            snprintf(pad, sizeof(pad), " -> black bars left and right to %dx%d (picture %d wide at x %d of each eye)", yl.pw, yl.ch,
+                     yl.vw, yl.vx);
+        LOGI("recorder: YouTube layout: eye %ux%u -> crop %s %dx%d%s -> %s frame %dx%d (each eye %dx%d; short side %d, long side "
+             "<= 8192)%s, st3d %s -- output \xC2\xB1%.1f\xC2\xB0 x \xC2\xB1%.1f\xC2\xB0 per eye%s",
+             sym.eyeW, sym.eyeH, YtCropKey(s.eyeCrop), yl.cw, yl.ch, pad, YtPackingKey(s.layout3d), yl.fw, yl.fh, yl.sw, yl.sh,
+             ytShort, lim, ytTb ? "top-bottom" : "left-right", std::atan(sym.tanH) * D, std::atan(ytTanV) * D,
+             s.head.Enabled() ? " (x output_fov_scale while smoothing)" : "");
+    }
+    if (stage && yt) {
+        const YtLayout& yl = ytFit.native;
+        char pad[96] = "";
+        if (ytFit.vw < ytFit.sw)   // 4:3pad
+            snprintf(pad, sizeof(pad), "; picture %dx%d at x +%d in each, black bars left and right", ytFit.vw, ytFit.sh, ytFit.vx);
+        LOGI("recorder: re-projection rendered at %ux%u (YouTube %s: left eye at 0,0 | right eye at %u,%u, %dx%d each%s; from %dx%d "
+             "per eye, %.2fx wide, %.2fx tall; %ux%u bilinear taps per output pixel) -- the video processor does not scale",
+             vpW, vpH, YtPackingKey(s.layout3d), outRightX, outBottomY, ytFit.sw, ytFit.sh, pad, yl.cw, yl.ch,
+             (double)ytFit.vw / std::max(1, yl.cw), (double)ytFit.sh / std::max(1, yl.ch), rpTaps, rpTaps);
+    } else if (stage && !dome.valid) {
+        if (rpScaled) {
+            char why[96];
+            if (s.maxWidth && rpNativeW > s.maxWidth) snprintf(why, sizeof(why), "max_width %u", s.maxWidth);
+            else snprintf(why, sizeof(why), "max_width %u, %s limit %u", s.maxWidth, VideoCodecName(codec), VideoCodecMaxSide(codec));
+            LOGI("recorder: re-projection rendered at %ux%u (left %u | right %u; %s; native %ux%u, %.2fx smaller per axis, "
+                 "%ux%u bilinear taps per output pixel) -- the video processor does not scale",
+                 vpW, vpH, rpEyeW[0], rpEyeW[1], why, rpNativeW, rpNativeH, (double)rpNativeW / std::max<UINT>(1, vpW),
+                 rpTaps, rpTaps);
+        } else {
+            LOGI("recorder: re-projection rendered at %ux%u (native size; max_width %u)", vpW, vpH, s.maxWidth);
+        }
     }
     if (dome.valid) {
         // smoothing is not used in dome mode (logged above)
@@ -846,29 +1022,65 @@ bool Recorder::Impl::Init() {
         if (SUCCEEDED(hr)) hr = devMgr->ResetDevice(enc.Get(), resetToken);
         if (FAILED(hr)) { LOGE("recorder: IMFDXGIDeviceManager failed hr=0x%08lx", (unsigned long)hr); SetMessage("DXGI device manager failed"); return false; }
     }
-    struct Attempt { bool hevc; bool hw; };
-    std::vector<Attempt> attempts = {{hevc, true}};
-    if (hevc && outW <= 4096 && outH <= 4096) attempts.push_back({false, true});
-    attempts.push_back({hevc, false});
-    if (hevc && outW <= 4096 && outH <= 4096) attempts.push_back({false, false});
+    // Attempts in order. AV1 is hardware only (no software AV1 MFT is fast enough for VR frames): AV1 hw, then the HEVC
+    // list. HEVC: hw, H.264 hw (only <= 4096), HEVC sw, H.264 sw (only <= 4096). H.264: hw, sw. HEVC and AV1 both take
+    // 8192, so a fallback from AV1 keeps the size fitted above. XR_EYE_CAPTURE_TEST_NO_AV1 (tests only) makes the AV1
+    // attempt fail in CreateWriter (after AddStream), as if the GPU had no AV1 encoder.
+    struct Attempt { VideoCodec c; bool hw; };
+    const VideoCodec want = codec;
+    const bool h264Fits = outW <= 4096 && outH <= 4096;
+    std::vector<Attempt> attempts;
+    if (want == VideoCodec::Av1) attempts.push_back({VideoCodec::Av1, true});
+    if (want == VideoCodec::H264) {
+        attempts.push_back({VideoCodec::H264, true});
+        attempts.push_back({VideoCodec::H264, false});
+    } else {
+        attempts.push_back({VideoCodec::Hevc, true});
+        if (h264Fits) attempts.push_back({VideoCodec::H264, true});
+        attempts.push_back({VideoCodec::Hevc, false});
+        if (h264Fits) attempts.push_back({VideoCodec::H264, false});
+    }
     HRESULT hr = E_FAIL;
     for (const Attempt& a : attempts) {
         std::string why;
-        if (a.hevc != hevc) { bitrate = s.bitrate ? s.bitrate : 80000000u; }
-        hr = CreateWriter(a.hevc, a.hw, why);
+        bitrate = s.bitrate ? s.bitrate : VideoCodecDefaultMbps(a.c) * 1000000u;   // the default follows the codec tried
+        hr = CreateWriter(a.c, a.hw, why);
         if (SUCCEEDED(hr)) {
-            if (a.hevc != hevc) LOGW("recorder: HEVC unavailable -- fell back to H.264");
-            hevc = a.hevc;
+            if (a.c != want)
+                LOGW("recorder: %s unavailable -- fell back to %s (%s transforms, %.0f Mb/s)", VideoCodecName(want),
+                     VideoCodecName(a.c), a.hw ? "hardware" : "software", bitrate / 1e6);
+            codec = a.c;
             break;
         }
-        LOGW("recorder: sink writer attempt %s %s failed at %s hr=0x%08lx", a.hevc ? "HEVC" : "H.264",
+        LOGW("recorder: sink writer attempt %s %s failed at %s hr=0x%08lx", VideoCodecName(a.c),
              a.hw ? "hardware" : "software", why.c_str(), (unsigned long)hr);
+        if (a.c == VideoCodec::Av1)
+            LOGW("recorder: no usable hardware AV1 encoder (needs AV1 encoding on the GPU, e.g. NVIDIA RTX 40 / 50) -- trying HEVC");
         DeleteFileW(s.path.c_str());
     }
     if (FAILED(hr)) { SetMessage("no usable video encoder"); return false; }
     LogTransforms();
     if (FAILED(devMgr->OpenDeviceHandle(&devHandle))) devHandle = nullptr;
     if (stopReq.load()) LOGW("recorder: stop requested during start");
+    return true;
+}
+
+// Encoded size outW x outH from the video processor input vpW x vpH: max_width, then the codec limit, even.
+bool Recorder::Impl::FitOutputSize() {
+    outW = vpW; outH = vpH;
+    auto scaleTo = [&](UINT maxW, UINT maxH) {
+        if (outW > maxW) { outH = (UINT)((uint64_t)outH * maxW / outW); outW = maxW; }
+        if (outH > maxH) { outW = (UINT)((uint64_t)outW * maxH / outH); outH = maxH; }
+    };
+    if (s.maxWidth) scaleTo(s.maxWidth, 16384);
+    const UINT codecMax = VideoCodecMaxSide(codec);
+    if (outW > codecMax || outH > codecMax) {
+        LOGW("recorder: %ux%u exceeds the %s limit of %u -- scaling down (set max_width or use codec = hevc)", outW, outH,
+             VideoCodecName(codec), codecMax);
+        scaleTo(codecMax, codecMax);
+    }
+    outW &= ~1u; outH &= ~1u;
+    if (outW < 64 || outH < 64) { SetMessage("frame too small"); return false; }
     return true;
 }
 
@@ -945,9 +1157,20 @@ bool Recorder::Impl::InitVideoProcessor() {
         if (FAILED(hr)) { LOGE("recorder: input view on the linear pre-pass texture hr=0x%08lx", (unsigned long)hr); SetMessage("video processor input view"); return false; }
     }
     if (stage && !InitReprojection(vpFmt)) {
-        if (dome.valid || vpW != W || vpH != H) { SetMessage("re-projection setup failed"); return false; }   // VP sized for its output
+        // raw layout (no dome / symmetric fov) rendered at the recorded size: the plain path can still record
+        const bool rawScaled = !dome.valid && !sym.valid && rpScaled;
+        if (dome.valid || yt || ((vpW != W || vpH != H) && !rawScaled)) { SetMessage("re-projection setup failed"); return false; }   // VP sized for its output
         LOGW("recorder: head smoothing disabled for this recording (re-projection setup failed)");
         stage = false;
+        if (rawScaled) {   // the VP was set up for the scaled stage output: back to W x H in, scaled by the VP as before
+            rpView.Reset(); rpRtv.Reset(); rpTex.Reset();
+            vpW = W; vpH = H; outRightX = leftW;
+            rpScaled = false; rpTaps = 1;
+            rpEyeW[0] = rpNativeEyeW[0]; rpEyeW[1] = rpNativeEyeW[1];
+            if (!FitOutputSize()) return false;
+            LOGW("recorder: plain recording instead: %ux%u -> %ux%u, scaled by the video processor", W, H, outW, outH);
+            return InitVideoProcessor();   // stage is off now, so no second re-projection attempt
+        }
     }
     const bool vpFromRing = srgb && !stage;   // otherwise the VP reads the pre-pass / re-projection output
     bool direct = true;
@@ -1200,23 +1423,39 @@ void Recorder::Impl::DomeConstantsFor(const Item& it, DomeConstants& dc) {
     dc.dome[3] = (float)(s.dome.featherDeg * 3.14159265358979323846 / 180.0);
 }
 
-// <name>.json next to the MP4: what the tray needs to tag the upload (dome recordings only; no sidecar = flat SBS).
-void Recorder::Impl::WriteSidecar(const std::string& file) {
+// <name>.json next to the MP4 (s.path with its extension replaced).
+std::wstring Recorder::Impl::SidecarPath() const {
     std::wstring base = s.path;
     const size_t dot = base.find_last_of(L'.'), slash = base.find_last_of(L"\\/");
     if (dot != std::wstring::npos && (slash == std::wstring::npos || dot > slash)) base.resize(dot);
-    const std::wstring json = base + L".json";
-    const bool v180 = s.dome.projection == DomeProjection::Vr180;
+    return base + L".json";
+}
+
+// <name>.json next to the MP4: what the tray needs to tag the upload. Dome recordings and record_for_youtube recordings
+// only; no sidecar = flat SBS. One line:
+//   dome:    {"projection":"vr180","layout":"left_right","eyes":2,"width":4356,"height":2178,"dome_width":2178}
+//   YouTube: {"projection":"flat","layout":"top_bottom","packing":"tb_half","eye_crop":"16:9","eyes":2,"width":7680,"height":4320,"youtube":1}
+void Recorder::Impl::WriteSidecar(const std::string& file) {
+    const std::wstring json = SidecarPath();
     FILE* f = nullptr;
     if (_wfopen_s(&f, json.c_str(), L"wb") != 0 || !f) {
         LOGW("recorder: could not write the sidecar %s", elog::Narrow(json).c_str());
         return;
     }
-    fprintf(f, "{\"projection\":\"%s\",\"layout\":\"%s\",\"eyes\":2,\"width\":%u,\"height\":%u,\"dome_width\":%u}\n",
-            DomeProjectionName(s.dome.projection), v180 ? "left_right" : "top_bottom", outW, outH, v180 ? outW / 2 : outW);
+    char line[256];
+    if (dome.valid) {
+        const bool v180 = s.dome.projection == DomeProjection::Vr180;
+        snprintf(line, sizeof(line), "{\"projection\":\"%s\",\"layout\":\"%s\",\"eyes\":2,\"width\":%u,\"height\":%u,\"dome_width\":%u}",
+                 DomeProjectionName(s.dome.projection), v180 ? "left_right" : "top_bottom", outW, outH, v180 ? outW / 2 : outW);
+    } else {
+        snprintf(line, sizeof(line),
+                 "{\"projection\":\"flat\",\"layout\":\"%s\",\"packing\":\"%s\",\"eye_crop\":\"%s\",\"eyes\":2,\"width\":%u,\"height\":%u,\"youtube\":1}",
+                 ytTb ? "top_bottom" : "left_right", YtPackingKey(s.layout3d), YtCropKey(s.eyeCrop), outW, outH);
+    }
+    fprintf(f, "%s\n", line);
     fclose(f);
-    LOGI("recorder: sidecar %s (%s, %ux%u) for %s", elog::Narrow(json).c_str(), DomeProjectionName(s.dome.projection), outW,
-         outH, file.c_str());
+    LOGI("recorder: sidecar %s (%s, %ux%u) for %s: %s", elog::Narrow(json).c_str(),
+         dome.valid ? DomeProjectionName(s.dome.projection) : "flat, YouTube layout", outW, outH, file.c_str(), line);
 }
 
 void Recorder::Impl::ReadTimings() {
@@ -1279,7 +1518,7 @@ void Recorder::Impl::Reproject(ID3D11ShaderResourceView* const* srvs, UINT nSrv,
     if (tq) { encCtx->End(tq->end.Get()); encCtx->End(tq->disjoint.Get()); tq->pending = true; }
 }
 
-HRESULT Recorder::Impl::CreateWriter(bool useHevc, bool hardware, std::string& why) {
+HRESULT Recorder::Impl::CreateWriter(VideoCodec c, bool hardware, std::string& why) {
     std::lock_guard<std::mutex> lk(wm);
     writer.Reset();
     DeleteFileW(s.path.c_str());
@@ -1303,16 +1542,22 @@ HRESULT Recorder::Impl::CreateWriter(bool useHevc, bool hardware, std::string& w
     ComPtr<IMFMediaType> out, in;
     MFCreateMediaType(&out);
     out->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-    out->SetGUID(MF_MT_SUBTYPE, useHevc ? MFVideoFormat_HEVC : MFVideoFormat_H264);
+    out->SetGUID(MF_MT_SUBTYPE, c == VideoCodec::Av1 ? MFVideoFormat_AV1 : c == VideoCodec::Hevc ? MFVideoFormat_HEVC : MFVideoFormat_H264);
     out->SetUINT32(MF_MT_AVG_BITRATE, bitrate);
     MFSetAttributeSize(out.Get(), MF_MT_FRAME_SIZE, outW, outH);
     MFSetAttributeRatio(out.Get(), MF_MT_FRAME_RATE, fps, 1);
     MFSetAttributeRatio(out.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
     out->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
-    out->SetUINT32(MF_MT_MPEG2_PROFILE, useHevc ? (UINT32)eAVEncH265VProfile_Main_420_8 : (UINT32)eAVEncH264VProfile_High);
+    out->SetUINT32(MF_MT_MPEG2_PROFILE, c == VideoCodec::Av1    ? (UINT32)eAVEncAV1VProfile_Main_420_8
+                                        : c == VideoCodec::Hevc ? (UINT32)eAVEncH265VProfile_Main_420_8
+                                                                : (UINT32)eAVEncH264VProfile_High);
     setColour(out.Get());
     hr = w->AddStream(out.Get(), &vStream);
     if (FAILED(hr)) { why = "AddStream(video)"; return hr; }
+    if (c == VideoCodec::Av1) {   // tests only: fail the AV1 attempt like a GPU without an AV1 encoder (real fallback path)
+        wchar_t noAv1[8];
+        if (GetEnvironmentVariableW(L"XR_EYE_CAPTURE_TEST_NO_AV1", noAv1, 8) > 0) { why = "test: XR_EYE_CAPTURE_TEST_NO_AV1"; return E_FAIL; }
+    }
 
     MFCreateMediaType(&in);
     in->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
@@ -1328,9 +1573,34 @@ HRESULT Recorder::Impl::CreateWriter(bool useHevc, bool hardware, std::string& w
     enc->SetUINT32(CODECAPI_AVEncCommonRateControlMode, eAVEncCommonRateControlMode_UnconstrainedVBR);
     enc->SetUINT32(CODECAPI_AVEncCommonMeanBitRate, bitrate);
     enc->SetUINT32(CODECAPI_AVEncMPVGOPSize, fps * 2);
+    // AV1 speed. Measured on an RTX 5090 (NVIDIA AV1 Encoder MFT, 5 s of 8K test content fed in real time): at the MFT's
+    // default quality / speed it encodes only ~51 fps at 8192x4348 (~1.8 Gpixel/s), so a 72 / 90 Hz recording would drop
+    // about a third of its frames; CODECAPI_AVEncCommonQualityVsSpeed <= 25 keeps 90 fps even at 8192x4632 (30 is the slow
+    // setting again). So above 1 Gpixel/s (any 8K frame at 72 / 90 fps, 5760x3240 at 60) AV1 asks for 25: the slowest
+    // setting that measured fast enough, with headroom for the game's own GPU load. Smaller frames keep the default
+    // (4096x2304 at 90 fps = 0.85 Gpixel/s kept up at the default).
+    av1Speed = 0;
+    if (c == VideoCodec::Av1 && (double)outW * outH * fps > 1.0e9) {
+        av1Speed = 25;
+        enc->SetUINT32(CODECAPI_AVEncCommonQualityVsSpeed, av1Speed);
+    }
     hr = w->SetInputMediaType(vStream, in.Get(), enc.Get());
+    if (FAILED(hr) && av1Speed) {   // keep the speed setting: without it 8K AV1 cannot keep VR frame rates
+        LOGW("recorder: encoder rejected the VBR/bitrate/GOP parameters (hr=0x%08lx) -- retrying with only quality vs speed %u "
+             "and the GOP size", (unsigned long)hr, av1Speed);
+        ComPtr<IMFAttributes> speed;
+        MFCreateAttributes(&speed, 2);
+        speed->SetUINT32(CODECAPI_AVEncCommonQualityVsSpeed, av1Speed);
+        speed->SetUINT32(CODECAPI_AVEncMPVGOPSize, fps * 2);
+        hr = w->SetInputMediaType(vStream, in.Get(), speed.Get());
+    }
     if (FAILED(hr)) {
         LOGW("recorder: encoder rejected the VBR/GOP parameters (hr=0x%08lx) -- using its defaults", (unsigned long)hr);
+        if (av1Speed) {
+            LOGW("recorder: the AV1 speed setting (quality vs speed %u) was not accepted -- 8K at VR frame rates may drop frames",
+                 av1Speed);
+            av1Speed = 0;
+        }
         hr = w->SetInputMediaType(vStream, in.Get(), nullptr);
     }
     if (FAILED(hr)) { why = "SetInputMediaType(video NV12)"; return hr; }
@@ -1360,7 +1630,10 @@ HRESULT Recorder::Impl::CreateWriter(bool useHevc, bool hardware, std::string& w
     hr = w->BeginWriting();
     if (FAILED(hr)) { why = "BeginWriting"; return hr; }
     writer = w;
-    LOGI("recorder: sink writer ready (%s, %s transforms%s)", useHevc ? "HEVC" : "H.264", hardware ? "hardware" : "software",
+    if (av1Speed)
+        LOGI("recorder: AV1 %ux%u at %u fps = %.2f Gpixel/s (> 1) -- encoder quality vs speed %u (its default speed cannot keep "
+             "up with 8K at VR frame rates)", outW, outH, fps, (double)outW * outH * fps / 1e9, av1Speed);
+    LOGI("recorder: sink writer ready (%s, %s transforms%s)", VideoCodecName(c), hardware ? "hardware" : "software",
          hasAudio ? (aacBytes >= 32000 ? ", AAC 256 kb/s" : aacBytes >= 24000 ? ", AAC 192 kb/s" : ", AAC <192 kb/s") : ", no audio");
     return S_OK;
 }
@@ -1481,14 +1754,24 @@ void Recorder::Impl::Process(const Item& it) {
             const ItemEye& ie = it.eye[e];
             re.src[0] = (float)ie.x0; re.src[1] = 0.0f;
             re.src[2] = (float)std::max<UINT>(1, ie.w); re.src[3] = (float)std::max<UINT>(1, ie.h);
-            if (sym.valid) {
-                re.dst[0] = (float)(e == 0 ? 0 : sym.eyeW); re.dst[1] = 0.0f;
-                re.dst[2] = (float)sym.eyeW; re.dst[3] = (float)sym.eyeH;
+            if (yt) {   // YouTube layout: eye 0 left / top, eye 1 right / below (swap_eyes swapped the views before SubmitFrame);
+                        // dst = the picture (4:3pad: vw wide at +vx, the bars around it black; else the eye's whole area)
+                re.dst[0] = (float)((ytTb ? 0 : e * ytFit.sw) + ytFit.vx); re.dst[1] = (float)(ytTb ? e * ytFit.sh : 0);
+                re.dst[2] = (float)ytFit.vw; re.dst[3] = (float)ytFit.sh;
+            } else if (sym.valid) {
+                re.dst[0] = (float)(e == 0 ? 0 : rpEyeW[0]); re.dst[1] = 0.0f;
+                re.dst[2] = (float)rpEyeW[e]; re.dst[3] = (float)vpH;
+            } else if (rpScaled) {   // raw layout, scaled: the source rectangle mapped into this eye's output rectangle
+                const double sx = (double)rpEyeW[e] / std::max<UINT>(1, rpNativeEyeW[e]), sy = (double)vpH / std::max<UINT>(1, H);
+                const double nx0 = e == 0 ? 0.0 : (double)rpNativeEyeW[0], ox0 = e == 0 ? 0.0 : (double)rpEyeW[0];
+                re.dst[0] = (float)(ox0 + (re.src[0] - nx0) * sx); re.dst[1] = 0.0f;
+                re.dst[2] = (float)(re.src[2] * sx); re.dst[3] = (float)(re.src[3] * sy);
             } else {
                 for (int c = 0; c < 4; ++c) re.dst[c] = re.src[c];
             }
         }
-        rc.misc[0] = 1.0f / (float)W; rc.misc[1] = 1.0f / (float)H; rc.misc[2] = (float)outRightX; rc.misc[3] = 0.0f;
+        rc.misc[0] = 1.0f / (float)W; rc.misc[1] = 1.0f / (float)H; rc.misc[2] = (float)outRightX; rc.misc[3] = (float)rpTaps;
+        rc.misc2[0] = (float)outBottomY;   // 0 = side by side: the eye pick is the old pos.x >= misc.z
         cpuTicks += QpcNow100ns() - c0;
     }
 

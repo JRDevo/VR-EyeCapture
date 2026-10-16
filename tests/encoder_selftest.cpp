@@ -4,13 +4,16 @@
 // frame goes through exactly the call the layer makes in xrEndFrame (Recorder::SubmitFrame).
 //
 //   encoder_selftest [--api d3d11|d3d12] [--layout two|array|wide|msaa] [--eye 1920x1080] [--seconds 5] [--fps 90]
-//                    [--format srgb|unorm] [--codec hevc|h264] [--out file.mp4] [--no-audio] [--no-tone]
+//                    [--format srgb|unorm] [--codec hevc|h264|av1] [--out file.mp4] [--no-audio] [--no-tone]
 //                    [--max-width N] [--max-fps N]
 //                    [--head-smoothing S] [--fov-scale K] [--follow-deg D] [--roll-lock] [--no-edge-guard] [--no-symmetric]
+//                    [--youtube tb_half|sbs_half|sbs_full|tb_full] [--eye-crop 16:9|4:3|4:3pad|none]
 // Head smoothing: every view is submitted with an identity pose and a +-0.8 rad fov, so with --fov-scale 1 the
 // re-projection is an exact identity mapping and verify_mp4.ps1's pixel checks (grey steps, eye id) still apply:
 // that proves the stage keeps the colour path (sRGB data and the linear pre-pass) unchanged. symmetric_fov is on by
 // default (as in config.ini); with a symmetric source fov it is the same identity mapping. --no-symmetric = raw path.
+// --youtube <layout_3d> (record_for_youtube): the recorder renders the YouTube layout (eye_crop --eye-crop, default 16:9;
+// frame short side 4320 unless XR_EYE_CAPTURE_TEST_YT_SHORT is set) -- verify_mp4.ps1 -Packing samples the packed eyes.
 // Exit code 0 = file written with >= 90 % of the frames.
 #include <windows.h>
 #include <d3d11_4.h>
@@ -37,6 +40,9 @@ struct Args {
     std::wstring out;
     bool audio = true, tone = true;
     HeadSmoothingSettings head;
+    bool youtube = false;
+    Layout3d layout3d = Layout3d::TbHalf;
+    EyeCrop eyeCrop = EyeCrop::Wide169;
 };
 
 std::wstring ExeDir() {
@@ -94,6 +100,22 @@ int main(int argc, char** argv) {
         else if (k == "--roll-lock") a.head.rollLock = true;
         else if (k == "--no-edge-guard") a.head.edgeGuard = false;
         else if (k == "--no-symmetric") a.head.symmetricFov = false;
+        else if (k == "--youtube") {
+            const std::string v = next();
+            a.youtube = true;
+            if (v == "tb_half") a.layout3d = Layout3d::TbHalf;
+            else if (v == "sbs_half") a.layout3d = Layout3d::SbsHalf;
+            else if (v == "sbs_full") a.layout3d = Layout3d::SbsFull;
+            else if (v == "tb_full") a.layout3d = Layout3d::TbFull;
+            else { printf("bad --youtube %s\n", v.c_str()); return 2; }
+        } else if (k == "--eye-crop") {
+            const std::string v = next();
+            if (v == "16:9") a.eyeCrop = EyeCrop::Wide169;
+            else if (v == "4:3") a.eyeCrop = EyeCrop::Std43;
+            else if (v == "4:3pad") a.eyeCrop = EyeCrop::Pad43;
+            else if (v == "none") a.eyeCrop = EyeCrop::None;
+            else { printf("bad --eye-crop %s\n", v.c_str()); return 2; }
+        }
         else { printf("unknown argument %s\n", k.c_str()); return 2; }
     }
     const bool d3d12 = a.api == "d3d12";
@@ -101,8 +123,10 @@ int main(int argc, char** argv) {
     elog::Init(dir + L"\\encoder_selftest.log", true);
     elog::SetLevel(LogLevel::Debug);
     if (a.out.empty()) a.out = dir + L"\\selftest_" + elog::Widen(a.api + "_" + a.layout + "_" + a.format + "_" + a.codec) + L".mp4";
-    LOGI("=== encoder_selftest: api=%s layout=%s eye=%ux%u format=%s codec=%s %.1f s @ %u fps -> %s", a.api.c_str(),
-         a.layout.c_str(), a.eyeW, a.eyeH, a.format.c_str(), a.codec.c_str(), a.seconds, a.fps, elog::Narrow(a.out).c_str());
+    LOGI("=== encoder_selftest: api=%s layout=%s eye=%ux%u format=%s codec=%s %.1f s @ %u fps%s%s%s%s -> %s", a.api.c_str(),
+         a.layout.c_str(), a.eyeW, a.eyeH, a.format.c_str(), a.codec.c_str(), a.seconds, a.fps, a.youtube ? " youtube " : "",
+         a.youtube ? YtPackingKey(a.layout3d) : "", a.youtube ? " eye_crop " : "", a.youtube ? YtCropKey(a.eyeCrop) : "",
+         elog::Narrow(a.out).c_str());
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
 
     ComPtr<IDXGIAdapter1> adapter = PickAdapter();
@@ -233,12 +257,15 @@ int main(int argc, char** argv) {
 
     RecorderSettings rs;
     rs.path = a.out;
-    rs.hevc = a.codec != "h264";
+    rs.codec = a.codec == "h264" ? VideoCodec::H264 : a.codec == "av1" ? VideoCodec::Av1 : VideoCodec::Hevc;
     rs.fps = a.fps;
     rs.audio = a.audio;
     rs.maxWidth = a.maxWidth;
     rs.maxFps = a.maxFps;
     rs.head = a.head;
+    rs.youtube = a.youtube;
+    rs.layout3d = a.layout3d;
+    rs.eyeCrop = a.eyeCrop;
     rs.startFovValid = true;
     for (int e = 0; e < 2; ++e) {
         for (int i = 0; i < 4; ++i) rs.startFov[e][i] = eyes[e].fov[i];

@@ -23,7 +23,9 @@ Root g_cu{HKEY_CURRENT_USER, kImplicitKey};
 const wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 const wchar_t kRunValue[] = L"OpenXR-EyeCapture";
 const wchar_t kTrayExe[] = L"EyeCaptureTray.exe";
+const wchar_t kApprovedKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run";
 std::wstring g_runKey = kRunKey;   // HKCU subkey holding the Run value (tests redirect it)
+std::wstring g_approvedKey = kApprovedKey;   // HKCU subkey holding the StartupApproved record (tests redirect it too)
 
 bool ParseRoot(const std::wstring& path, Root& out) {
     struct Prefix { const wchar_t* text; HKEY hive; };
@@ -278,7 +280,51 @@ std::wstring AutostartCommand(const std::wstring& exeDir) {
     return L"\"" + ExeDirFull(exeDir) + L"\\" + kTrayExe + L"\"";
 }
 
-void SetAutostartTestKey(const std::wstring& hkcuSubkey) { g_runKey = hkcuSubkey.empty() ? std::wstring(kRunKey) : hkcuSubkey; }
+void SetAutostartTestKey(const std::wstring& hkcuSubkey) {
+    g_runKey = hkcuSubkey.empty() ? std::wstring(kRunKey) : hkcuSubkey;
+    g_approvedKey = hkcuSubkey.empty() ? std::wstring(kApprovedKey) : hkcuSubkey + L"Approved";
+}
+
+namespace {
+enum class Approval { Missing, Enabled, Disabled };
+
+// StartupApproved\Run record: REG_BINARY, first byte even = enabled, odd = disabled by the user (Task Manager / Settings).
+Approval ReadApproval() {
+    HKEY k = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, g_approvedKey.c_str(), 0, KEY_QUERY_VALUE | kView, &k) != ERROR_SUCCESS) return Approval::Missing;
+    BYTE data[16] = {};
+    DWORD type = 0, size = sizeof(data);
+    const LSTATUS e = RegQueryValueExW(k, kRunValue, nullptr, &type, data, &size);
+    RegCloseKey(k);
+    if (e == ERROR_MORE_DATA) return Approval::Enabled;   // longer than a normal record: leave it alone
+    if (e != ERROR_SUCCESS || type != REG_BINARY || size < 1) return Approval::Missing;
+    return (data[0] & 1) ? Approval::Disabled : Approval::Enabled;
+}
+
+bool WriteApproval(std::wstring& err) {
+    const std::wstring what = L"HKCU\\" + g_approvedKey;
+    HKEY k = nullptr;
+    LSTATUS e = RegCreateKeyExW(HKEY_CURRENT_USER, g_approvedKey.c_str(), 0, nullptr, 0, KEY_SET_VALUE | kView, nullptr, &k, nullptr);
+    if (e != ERROR_SUCCESS) { err = L"cannot open " + what + L": " + Win32Text(e); return false; }
+    const BYTE rec[12] = {2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};   // enabled, no disable timestamp
+    e = RegSetValueExW(k, kRunValue, 0, REG_BINARY, rec, sizeof(rec));
+    RegCloseKey(k);
+    if (e != ERROR_SUCCESS) { err = L"cannot write " + std::wstring(kRunValue) + L" to " + what + L": " + Win32Text(e); return false; }
+    return true;
+}
+
+bool DeleteApproval(std::wstring& err) {
+    const std::wstring what = L"HKCU\\" + g_approvedKey;
+    HKEY k = nullptr;
+    LSTATUS e = RegOpenKeyExW(HKEY_CURRENT_USER, g_approvedKey.c_str(), 0, KEY_SET_VALUE | kView, &k);
+    if (e == ERROR_FILE_NOT_FOUND) return true;
+    if (e != ERROR_SUCCESS) { err = L"cannot open " + what + L": " + Win32Text(e); return false; }
+    e = RegDeleteValueW(k, kRunValue);
+    RegCloseKey(k);
+    if (e != ERROR_SUCCESS && e != ERROR_FILE_NOT_FOUND) { err = L"cannot remove " + std::wstring(kRunValue) + L" from " + what + L": " + Win32Text(e); return false; }
+    return true;
+}
+} // namespace
 
 bool AutostartEnabled(std::wstring* storedCommand) {
     if (storedCommand) storedCommand->clear();
@@ -293,7 +339,7 @@ bool AutostartEnabled(std::wstring* storedCommand) {
         if (RegQueryValueExW(k, kRunValue, nullptr, &type, (LPBYTE)buf.data(), &sz2) == ERROR_SUCCESS) *storedCommand = buf.data();
     }
     RegCloseKey(k);
-    return true;
+    return ReadApproval() != Approval::Disabled;
 }
 
 bool SetAutostart(bool on, const std::wstring& exeDir, std::wstring& err) {
@@ -301,29 +347,48 @@ bool SetAutostart(bool on, const std::wstring& exeDir, std::wstring& err) {
     const std::wstring what = L"HKCU\\" + g_runKey;
     if (on) {
         HKEY k = nullptr;
-        LSTATUS e = RegCreateKeyExW(HKEY_CURRENT_USER, g_runKey.c_str(), 0, nullptr, 0, KEY_SET_VALUE | kView, nullptr, &k, nullptr);
+        LSTATUS e = RegCreateKeyExW(HKEY_CURRENT_USER, g_runKey.c_str(), 0, nullptr, 0, KEY_SET_VALUE | KEY_QUERY_VALUE | kView, nullptr,
+                                    &k, nullptr);
         if (e != ERROR_SUCCESS) { err = L"cannot open " + what + L": " + Win32Text(e); return false; }
+        // the value as it was: put back when the approval record cannot be written (all or nothing)
+        DWORD oldType = REG_NONE, oldSize = 0;
+        std::vector<BYTE> old;
+        bool hadOld = RegQueryValueExW(k, kRunValue, nullptr, &oldType, nullptr, &oldSize) == ERROR_SUCCESS;
+        if (hadOld) {
+            old.resize(oldSize ? oldSize : 1);
+            hadOld = RegQueryValueExW(k, kRunValue, nullptr, &oldType, old.data(), &oldSize) == ERROR_SUCCESS;
+        }
         const std::wstring cmd = AutostartCommand(exeDir);
         e = RegSetValueExW(k, kRunValue, 0, REG_SZ, (const BYTE*)cmd.c_str(), (DWORD)((cmd.size() + 1) * sizeof(wchar_t)));
+        if (e != ERROR_SUCCESS) {
+            RegCloseKey(k);
+            err = L"cannot write " + std::wstring(kRunValue) + L" to " + what + L": " + Win32Text(e);
+            return false;
+        }
+        const bool ok = WriteApproval(err);
+        if (!ok) {   // a Run value without its record would start (or show checked) although the call reports failure
+            if (hadOld) RegSetValueExW(k, kRunValue, 0, oldType, old.data(), oldSize);
+            else RegDeleteValueW(k, kRunValue);
+        }
         RegCloseKey(k);
-        if (e != ERROR_SUCCESS) { err = L"cannot write " + std::wstring(kRunValue) + L" to " + what + L": " + Win32Text(e); return false; }
-        return true;
+        return ok;
     }
     HKEY k = nullptr;
     LSTATUS e = RegOpenKeyExW(HKEY_CURRENT_USER, g_runKey.c_str(), 0, KEY_SET_VALUE | kView, &k);
-    if (e == ERROR_FILE_NOT_FOUND) return true;   // no key = no value
-    if (e != ERROR_SUCCESS) { err = L"cannot open " + what + L": " + Win32Text(e); return false; }
-    e = RegDeleteValueW(k, kRunValue);
-    RegCloseKey(k);
-    if (e != ERROR_SUCCESS && e != ERROR_FILE_NOT_FOUND) { err = L"cannot remove " + std::wstring(kRunValue) + L" from " + what + L": " + Win32Text(e); return false; }
-    return true;
+    if (e != ERROR_FILE_NOT_FOUND) {   // no key = no value
+        if (e != ERROR_SUCCESS) { err = L"cannot open " + what + L": " + Win32Text(e); return false; }
+        e = RegDeleteValueW(k, kRunValue);
+        RegCloseKey(k);
+        if (e != ERROR_SUCCESS && e != ERROR_FILE_NOT_FOUND) { err = L"cannot remove " + std::wstring(kRunValue) + L" from " + what + L": " + Win32Text(e); return false; }
+    }
+    return DeleteApproval(err);
 }
 
 bool SyncAutostart(const std::wstring& exeDir) {
     std::wstring stored;
     if (!AutostartEnabled(&stored)) return false;
     const std::wstring want = AutostartCommand(exeDir);
-    if (_wcsicmp(stored.c_str(), want.c_str()) == 0) return false;
+    if (_wcsicmp(stored.c_str(), want.c_str()) == 0 && ReadApproval() != Approval::Missing) return false;
     std::wstring err;
     return SetAutostart(true, exeDir, err);
 }
