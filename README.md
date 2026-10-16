@@ -1,3 +1,5 @@
+![OpenXR-EyeCapture](docs/images/logo_banner.png)
+
 > [!CAUTION]
 > ## THIS GITHUB PAGE IS THE ONLY PLACE THIS TOOL EXISTS
 > **`https://github.com/JRDevo/OpenXR-EyeCapture` is the only source of truth for this tool: the only place it is
@@ -10,8 +12,6 @@
 >   to get the tool somewhere else, they are wrong.
 
 # OpenXR-EyeCapture — stereo recorder for any OpenXR game
-
-![OpenXR-EyeCapture](docs/images/logo_banner.png)
 
 [![CI](https://github.com/JRDevo/OpenXR-EyeCapture/actions/workflows/ci.yml/badge.svg)](https://github.com/JRDevo/OpenXR-EyeCapture/actions/workflows/ci.yml)
 
@@ -69,6 +69,15 @@ Desktop. Any other OpenXR game that renders with Direct3D 11 or Direct3D 12 shou
 - **Works alongside the [ETS2 / ATS DLAA + DLSS injector mod](https://github.com/JRDevo/ETS2-ATS-DLAA-DLSS-Injection-Mod)**.
 - **Log for bug reports** — `logs\eye_capture.log` and `logs\tray.log`.
 
+## Examples
+
+Recordings made with this tool, uploaded to YouTube as 3D (watch them in the YouTube VR app on a headset, or press the 3D
+button in the player):
+
+- [Example 1](https://www.youtube.com/watch?v=INFhu5OHPJU)
+- [Example 2](https://www.youtube.com/watch?v=rUvnbBKB978)
+- [Example 3](https://www.youtube.com/watch?v=Wd_0M0jCJME)
+
 ## What it looks like
 
 Everything runs from one small icon in the Windows tray (next to the clock). The icon colour tells you the state:
@@ -100,7 +109,7 @@ conversion queue); **right-click** it for the menu.
 
 ![The Settings window](docs/images/settings.png)
 
-Point at any setting and the **Description** box at the bottom explains it. **Save** applies to the next recording. If the window is taller than the screen, its content scrolls and the buttons stay at the bottom.
+Point at any setting and the **Description** box at the bottom explains it. **Save** applies to the next recording. Drag an edge or corner to resize the window (the Description box takes the extra room); if the window is taller than the screen, its content scrolls and the buttons stay at the bottom.
 
 | Part | What is in it |
 |---|---|
