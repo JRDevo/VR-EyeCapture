@@ -71,12 +71,21 @@ Desktop. Any other OpenXR game that renders with Direct3D 11 or Direct3D 12 shou
 
 ## Examples
 
-Recordings made with this tool, uploaded to YouTube as 3D (watch them in the YouTube VR app on a headset, or press the 3D
-button in the player):
+Recordings made with this tool, uploaded to YouTube as 3D. Watch them in the YouTube VR app on a headset (they play in
+YouTube's 8K tier), or press the 3D button in the browser player. All are side-by-side recordings converted by the tray to
+the top/bottom 8K 3D MKV (`Eye crop` is the Export setting that shapes each eye, see "Upload to YouTube").
 
-- [Example 1](https://www.youtube.com/watch?v=INFhu5OHPJU)
-- [Example 2](https://www.youtube.com/watch?v=rUvnbBKB978)
-- [Example 3](https://www.youtube.com/watch?v=Wd_0M0jCJME)
+### Eye crop 16:9 (8K, AV1)
+
+The default: a wide view, 7680 x 4320, plays everywhere.
+
+- [SynthRiders](https://www.youtube.com/watch?v=INFhu5OHPJU)
+- [Pistol Whip](https://www.youtube.com/watch?v=rUvnbBKB978)
+- [Beat Saber](https://www.youtube.com/watch?v=Wd_0M0jCJME)
+
+### Eye crop 4:3
+
+The taller view (more of the headset picture, 5760 x 4320). Examples of the same games follow here, so you can compare the two crops.
 
 ## What it looks like
 
