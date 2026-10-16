@@ -694,6 +694,8 @@ const Help kHelp[] = {
     {ID_DEFAULTS, L"Resets every field to its built-in default. Nothing is saved until Save is clicked."},
     {ID_SAVE, L"Writes the changed values to config.ini. The next recording uses them."},
     {ID_CANCEL, L"Closes the window without saving."},
+    {ID_ABOUTLINK, L"The project page on GitHub: downloads, the latest version, the manual and bug reports. The tool is free for noncommercial use "
+                   L"(PolyForm Noncommercial License 1.0.0, Copyright (c) 2026 JRDevo)."},
 };
 
 const wchar_t* HelpText(int id) {
@@ -1831,6 +1833,15 @@ LRESULT CALLBACK DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_MOUSEWHEEL:
         if (g_scrollMax > 0) { ScrollContent(g_scrollY - (int)GET_WHEEL_DELTA_WPARAM(wp) * 30 / WHEEL_DELTA); return 0; }
         return DefWindowProcW(h, msg, wp, lp);
+    case WM_NOTIFY: {
+        const NMHDR* nh = (const NMHDR*)lp;
+        if (nh && nh->idFrom == ID_ABOUTLINK && (nh->code == NM_CLICK || nh->code == NM_RETURN)) {
+            const NMLINK* nl = (const NMLINK*)lp;
+            ShellExecuteW(nullptr, L"open", nl->item.szUrl, nullptr, nullptr, SW_SHOWNORMAL);
+            return 0;
+        }
+        return DefWindowProcW(h, msg, wp, lp);
+    }
     case WM_DRAWITEM:
         if (wp == kFooterBgId) {
             const DRAWITEMSTRUCT* di = (const DRAWITEMSTRUCT*)lp;
@@ -2388,10 +2399,18 @@ int BuildControls(HWND dlg, Builder::Pass pass, int clientW, int clientH, int sc
     b.Button(ID_SAVE, gx + gw - 2 * wOk - 8, by, wOk, L"Save", true);
     b.Button(ID_CANCEL, gx + gw - wOk, by, wOk, L"Cancel");
     if (create) for (int id : {ID_OPENINI, ID_DEFAULTS, ID_SAVE, ID_CANCEL}) g_footer.push_back(GetDlgItem(dlg, id));
-    HWND note = b.Make(L"STATIC", L"Changes apply to the next recording. Keyboard hotkeys and the indicator require a game restart.",
-                       SS_LEFT | SS_NOPREFIX, gx, fy + 9, gw, 16, -1);
+    const wchar_t* const noteText = L"Changes apply to the next recording. Keyboard hotkeys and the indicator require a game restart.";
+    const int noteW = b.TextW(noteText) + 4;
+    HWND note = b.Make(L"STATIC", noteText, SS_LEFT | SS_NOPREFIX, gx, fy + 9, noteW, 16, -1);
     keep(g_dim, note);
     keep(g_footer, note);
+    // the project link and the copyright / licence line, right-aligned on the note's row (above the background strip)
+    HWND about = b.Make(WC_LINK,
+        L"<a href=\"https://github.com/JRDevo/OpenXR-EyeCapture\">github.com/JRDevo/OpenXR-EyeCapture</a> · Copyright (c) 2026 JRDevo · "
+        L"<a href=\"https://polyformproject.org/licenses/noncommercial/1.0.0\">PolyForm Noncommercial License 1.0.0</a>",
+        WS_TABSTOP | LWS_RIGHT, gx + noteW + 12, fy + 9, gw - noteW - 12, 16, ID_ABOUTLINK);
+    b.Tip(about, HelpText(ID_ABOUTLINK));
+    keep(g_footer, about);
     // created last = lowest of the footer: it only paints the background behind the note and the buttons
     keep(g_footer, b.Make(L"STATIC", L"", SS_OWNERDRAW, 0, fy, clientW, g_footerH, kFooterBgId));
     if (create) {
@@ -2540,6 +2559,16 @@ void CheckTextFit() {
                 const int need = tw + GetSystemMetrics(SM_CXMENUCHECK) + 4;
                 if (need > w) report(c, t, need, w, "check box");
             } else if (tw + 12 > w) report(c, t, tw + 12, w, "button");
+        } else if (!_wcsicmp(cls, L"SysLink")) {
+            if (t.empty()) continue;
+            ++checked;
+            std::wstring plain;   // the text without the <a ...> / </a> tags
+            for (size_t i = 0; i < t.size(); ++i) {
+                if (t[i] == L'<') { const size_t e = t.find(L'>', i); if (e != std::wstring::npos) { i = e; continue; } }
+                plain += t[i];
+            }
+            const int tw = textW(plain);
+            if (tw > w) report(c, plain, tw, w, "link");
         } else if (!_wcsicmp(cls, L"ComboBox")) {
             RECT wr{};
             GetWindowRect(c, &wr);
@@ -2592,7 +2621,7 @@ void ShowDialog(const std::wstring& configPath, std::function<void(const std::ve
         SetForegroundWindow(g_dlg);
         return;
     }
-    INITCOMMONCONTROLSEX icc{sizeof(icc), ICC_BAR_CLASSES | ICC_PROGRESS_CLASS};
+    INITCOMMONCONTROLSEX icc{sizeof(icc), ICC_BAR_CLASSES | ICC_PROGRESS_CLASS | ICC_LINK_CLASS};
     InitCommonControlsEx(&icc);
     const HRESULT co = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);   // SHBrowseForFolder
     g_path = configPath;
