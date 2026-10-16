@@ -87,7 +87,13 @@ The default: a wide view, 7680 x 4320, plays everywhere.
 
 The taller view (more of the headset picture, 5760 x 4320). Examples of the same games follow here, so you can compare the two crops.
 
+<details>
+<summary>
+
 ## What it looks like
+
+</summary>
+
 
 Everything runs from one small icon in the Windows tray (next to the clock). The icon colour tells you the state:
 **grey** = no VR game running, **green** = game running and ready, **red** = recording, **amber** = starting, finishing
@@ -131,7 +137,15 @@ Point at any setting and the **Description** box at the bottom explains it. **Sa
 | **Advanced** | **Log level** (how much goes into the log) and **Start with Windows** (starts the tray app when you log in). |
 | Buttons | **Open config.ini**, **Restore Defaults** (fills in the defaults, nothing saved until Save), **Save**, **Cancel**. |
 
+</details>
+
+<details>
+<summary>
+
 ## ⬇ Download
+
+</summary>
+
 
 **[Download the latest release here](https://github.com/JRDevo/OpenXR-EyeCapture/releases/latest)**
 — get `OpenXR-EyeCapture-v<version>.zip` under **Assets**, then follow [Install](#install) below.
@@ -141,7 +155,15 @@ This is an unofficial fan project. It is not affiliated with, or endorsed by, SC
 Valve or Virtual Desktop Inc. Euro Truck Simulator 2 and American Truck Simulator are trademarks of SCS Software;
 OpenXR is a trademark of The Khronos Group.
 
+</details>
+
+<details>
+<summary>
+
 ## Requirements
+
+</summary>
+
 
 - Windows 10 (1703 or newer) or Windows 11, 64-bit.
 - An OpenXR game using **Direct3D 11 or Direct3D 12**. Vulkan is planned ([`docs/VULKAN.md`](docs/VULKAN.md));
@@ -151,7 +173,15 @@ OpenXR is a trademark of The Khronos Group.
   Optional: `codec = av1` records AV1 on GPUs with a hardware AV1 encoder (NVIDIA RTX 40 / 50 series; tested on an RTX 5090:
   8192 x 4348 at 90 fps with no dropped frames).
 
+</details>
+
+<details>
+<summary>
+
 ## Install
+
+</summary>
+
 
 1. Unzip `OpenXR-EyeCapture-v<version>.zip` to a folder you keep (the layer is loaded from there), for example
    `C:\Tools\OpenXR-EyeCapture`.
@@ -173,7 +203,15 @@ Command-line forms (from an administrator prompt): `EyeCaptureTray.exe --registe
 5 = no administrator rights); `EyeCaptureTray.exe --status` prints `registered=yes|no|stale` and `autostart=yes|no` among the status fields.
 `scripts\install.ps1` / `uninstall.ps1` are only for building from source (see [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)).
 
+</details>
+
+<details>
+<summary>
+
 ## How it works: start the tray app first
+
+</summary>
+
 
 **Start `EyeCaptureTray.exe` before launching the game. Without it the layer does nothing** (it is dormant: every
 OpenXR call is passed straight through, no hotkey, no recorder, no encoder, no shared memory). While the tray app runs it
@@ -185,7 +223,15 @@ Set `require_tray = 0` in `config.ini` to always arm without the tray (old behav
 The tray app also owns the registration: at start it checks that the layer is registered for its own folder (and removes
 any per-user HKCU copy, which would make some loaders load the layer twice) and offers to register it if not.
 
+</details>
+
+<details>
+<summary>
+
 ## Record
+
+</summary>
+
 
 1. Start `EyeCaptureTray.exe`, then the game in VR as usual (ETS2 / ATS: launch option `-openxr`).
 2. Press **Ctrl+Shift+F10** → one beep (880 Hz) in the headset: recording.
@@ -208,7 +254,15 @@ same from a script or a Stream Deck button (`--start` / `--toggle` print an erro
 Xbox controllers and wheels / joysticks the tray can see and, for 15 s (or the given seconds), prints the `hotkey` text of
 every button you press.
 
+</details>
+
+<details>
+<summary>
+
 ## Upload to YouTube
+
+</summary>
+
 
 **The tray app converts every recording to a `.mkv` (automatically, unless Convert is set to "When I say"); upload the `.mkv`.** YouTube only reliably recognises
 the 3D tag as the Matroska `stereo_mode` tag (it ignored the MP4 `st3d` box), so when a recording is saved
@@ -314,7 +368,15 @@ the normal side-by-side way (logged).
   `<name>_YT8K_4x3_AV1.mkv`); when the AV1 encoder is not available and HEVC made it, it keeps the plain name. The tray never
   overwrites a file: if the name exists it writes `<name> (2).mkv`, `(3)` ...
 
+</details>
+
+<details>
+<summary>
+
 ## Settings — `config.ini`
+
+</summary>
+
 
 Next to `eye_capture.dll` (or `%APPDATA%\OpenXR-EyeCapture\config.ini`, which wins if it exists). Read when a game
 starts its OpenXR instance, and read again at the start of every recording: edits to the recording and 3D settings
@@ -381,7 +443,15 @@ projections are labelled "experimental" in the window.
 | `require_tray` | `1` | `1` = the layer is only active while `EyeCaptureTray.exe` is running (checked when the game creates its VR session). `0` = always active. |
 | `log_level` | `info` | `none` (no logging at all), `error`, `warn`, `info`, `debug`. |
 
+</details>
+
+<details>
+<summary>
+
 ## In-headset indicator
+
+</summary>
+
 
 While a recording runs you see a small dot at the lower right of your view, in the headset only: **amber** while the
 recording starts (and while it is being finished), **red, pulsing** while recording, **green** for 1.5 s when the file
@@ -395,7 +465,15 @@ only for now; on Direct3D 12 the log says `indicator: not available on D3D12 yet
 If the runtime ever rejects the extra layer, the indicator switches itself off for the session and the game's frame is
 submitted unchanged (logged).
 
+</details>
+
+<details>
+<summary>
+
 ## Overlays in the recording
+
+</summary>
+
 
 Games and mods can show menus, panels and backdrops as separate OpenXR layers on top of (or behind) the 3D view
 ("quad", "cylinder", "equirect" and "cube" layers), which the headset composites itself. With `record_overlays = 1` (default; Settings window: **Record
@@ -425,7 +503,15 @@ VR180 / VR360 dome then treat them like the rest of the picture. The game's own 
   or when layers are behind the 3D view), and VRAM for the panel images while recording: about 64 MB per ring slot
   (192 MB) for each pixel format family in use (twice that for 16-bit float panels).
 
+</details>
+
+<details>
+<summary>
+
 ## Head-motion smoothing
+
+</summary>
+
 
 A recording shows exactly where your head pointed, so every small shake and nod is in the video. Viewers who watch it
 on a flat screen or in their own headset do not move with you, and the shaking is tiring to watch. With
@@ -469,7 +555,15 @@ eye for a -50 / +40 view) and costs one GPU pass per frame. `symmetric_fov = 0` 
 The log shows the numbers at the start of each recording, e.g.
 `symmetric fov: source L[-50.0,+40.0]x[-45.0,+45.0] R[-40.0,+50.0]x[-45.0,+45.0] -> output ±40.0° x ±45.0° per eye, 5058x6496 per eye`.
 
+</details>
+
+<details>
+<summary>
+
 ## VR180 / VR360 dome mode (experimental)
+
+</summary>
+
 
 **Experimental:** the dome only shows live video where your headset looked (about 100 degrees); the rest is older video or black.
 
@@ -520,7 +614,15 @@ the two eyes (each eye's dome is centred on that eye, like a VR180 camera).
 | `fill_fade_s` | `8` | Seconds a painted area stays before fading to black (over 2 s); `0` = never fade. |
 | `window_feather_deg` | `1` | Soft edge (degrees) where the live view blends into the dome; `0` = hard edge. |
 
+</details>
+
+<details>
+<summary>
+
 ## Log and troubleshooting
+
+</summary>
+
 
 `logs\eye_capture.log` next to the DLL, with a copy in the output folder. Every OpenXR app that starts writes a block:
 the game exe, runtime, graphics API (`capture AVAILABLE` / `DISABLED`), every swapchain (format, size, array, MSAA),
@@ -538,7 +640,15 @@ the frame layout it detected (`TWO_SWAPCHAINS`, `TEXTURE_ARRAY`, `ONE_SWAPCHAIN_
 - **Dropped frames** in the summary: lower `max_fps` or `max_width`, or `bitrate_mbps`.
 - **Disable without uninstalling**: set the environment variable `DISABLE_XR_APILAYER_JRDEVO_eye_capture=1`.
 
+</details>
+
+<details>
+<summary>
+
 ## Cost
+
+</summary>
+
 
 Per frame the game's render thread does two GPU copies (plus an MSAA resolve when the game uses MSAA swapchains),
 a fence signal and nothing else — measured 0.07 ms (D3D12) / 0.18 ms (D3D11) of CPU time per frame on an RTX 5090.
@@ -549,7 +659,15 @@ the encoder's device: measured
 0.2 ms GPU per frame at 12240 x 6496 (ATS on VDXR, encoded at 8192 x 4346) on an RTX 5090, and nothing on the game's
 thread or GPU queue.
 
+</details>
+
+<details>
+<summary>
+
 ## With other mods
+
+</summary>
+
 
 - **ETS2 / ATS DLAA + DLSS injector**: works alongside; this layer never hooks Present or the game's D3D calls. The
   default hotkey is Ctrl+**Shift**+F10 because plain Ctrl+F10 is the injector's snapshot key. Its VR panel and fps box
@@ -557,12 +675,28 @@ thread or GPU queue.
   `record_overlays = 1` (default), records them where you see them. Set `record_overlays = 0` for a clean video.
 - **Virtual Desktop's own OpenXR layer** and other implicit layers coexist (each registers its own entry).
 
+</details>
+
+<details>
+<summary>
+
 ## Building from source
+
+</summary>
+
 
 See [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md). Short version: Visual Studio 2022, then
 `powershell -ExecutionPolicy Bypass -File scripts\package.ps1`.
 
+</details>
+
+<details>
+<summary>
+
 ## Reporting a problem (what to upload)
+
+</summary>
+
 
 If something goes wrong, [open an issue](../../issues/new/choose) on this GitHub page and attach the files below.
 Without the logs I usually can't tell what happened.
@@ -584,6 +718,8 @@ Without the logs I usually can't tell what happened.
 - Other OpenXR layers or mods in use (the DLAA injector, OpenXR Toolkit, etc.).
 
 **Privacy:** the logs contain folder paths with your Windows user name. Open them and check (or edit them) before uploading.
+
+</details>
 
 ## License and credits
 
