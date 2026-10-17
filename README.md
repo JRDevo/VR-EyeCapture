@@ -65,7 +65,7 @@ Desktop. Any other OpenXR game that renders with Direct3D 11 or Direct3D 12 shou
   OpenXR layers (e.g. the DLAA injector's VR panel and fps box) are placed and blended into the video the way the headset
   shows them. The headset's own menus (Virtual Desktop, Quest) cannot be recorded.
 - **VR180 / VR360 dome mode** — experimental.
-- **Live view in OBS** — experimental. An OBS source shows the game's eye picture live, for streaming. See "Live view in OBS".
+- **Live view in OBS** — experimental. An OBS source shows the game's eye picture live, for streaming. Stream and record at the same time. See "Live view in OBS".
 - **Config changes apply to the next recording** — no game restart.
 - **Hardware HEVC encoding** — NVIDIA GTX 10xx or newer, AMD RX 400 or newer, Intel 7th gen or newer.
 - **Rate control and encoder preset** — VBR (default), CBR or constant QP (`rate_control`, `qp`), and the encoder's
@@ -667,7 +667,8 @@ the two eyes (each eye's dome is centred on that eye, like a VR180 camera).
 
 The OBS plugin `obs-eyecapture.dll` adds a source, **OpenXR EyeCapture**, that shows the game's eye picture live in OBS
 Studio. Use it to stream, or to record with OBS. The game copies its eye images straight to OBS on the GPU: no window
-capture, no mirror window.
+capture, no mirror window. You can stream with OBS and record with the app at the same time: the live view and the
+recording are independent.
 
 **Install**
 
