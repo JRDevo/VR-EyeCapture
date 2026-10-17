@@ -3,7 +3,7 @@
 Stereo 3D recorder for VR games (renamed from OpenXR-EyeCapture, see `docs/RENAME_PLAN.md`): an implicit OpenXR API layer
 (`eye_capture.dll`), a per-game SteamVR proxy (`openvr_api.dll`, `src/openvr/`, `docs/STEAMVR_DESIGN.md`) + a tray app
 (`EyeCaptureTray.exe`). Read `README.md`, `docs/DEVELOPMENT.md` and `docs/VR180_REPORT.md` first.
-Project memory lives in the Claude workspace for this folder (`~/.claude/projects/E--OpenXR-EyeCapture/memory`).
+Project memory lives in the Claude workspace for this folder (`~/.claude/projects/E--VR-EyeCapture/memory`).
 
 ## Build / test
 - CMake is NOT on PATH. Use:
@@ -23,7 +23,7 @@ Project memory lives in the Claude workspace for this folder (`~/.claude/project
 - ffmpeg/ffprobe: `%LOCALAPPDATA%\Microsoft\WinGet\Packages\Gyan.FFmpeg.Essentials_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.1.1-essentials_build\bin\`.
 
 ## Install rules
-- The game loads the ROOT copies: `E:\OpenXR-EyeCapture\eye_capture.dll` + json + `EyeCaptureTray.exe` (the tray's
+- The game loads the ROOT copies: `E:\VR-EyeCapture\eye_capture.dll` + json + `EyeCaptureTray.exe` (the tray's
   "SteamVR games" copies `steamvr\openvr_api.dll`, else `build\Release\openvr_api.dll`, into a game folder on Enable).
   Refresh them from `build\Release` after a build — the DLL only when no game has it loaded, the tray only when
   no `EyeCaptureTray` process runs (close it, copy, start it again).
