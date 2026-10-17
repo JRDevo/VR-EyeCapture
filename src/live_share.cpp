@@ -567,6 +567,7 @@ struct LiveShare::Impl {
             if (shareCtx) { shareCtx->ClearState(); shareCtx->Flush(); }
             if (!quickTeardown.load()) Sleep(kTeardownStepMs);
         };
+        if (!stage.load()) outTex.clear();   // raw eyes: outTex = ring.tex, these references free nothing (rawTex holds them)
         while (ovl.ReleaseOneAtlas()) step();
         while (!outTex.empty()) { outTex.pop_back(); step(); }
         while (!rawTex.empty()) { rawTex.pop_back(); step(); }
@@ -927,6 +928,7 @@ struct LiveShare::Impl {
     ~Impl() {
         if (worker.joinable()) {
             if (st != St::Stopping) stopWhy = "session ended";
+            quickTeardown.store(true);   // the session is going away: no game frame to protect, free without pauses
             SetEvent(stopEvt);
             worker.join();
         }
