@@ -37,6 +37,7 @@ const UINT kLiveSlots = 4;   // exported ring: the latest slot + one being read 
 const UINT kRawSlots = 3;    // re-projection: internal raw ring (one in the pass, one in the mailbox, one being written)
 static_assert(kLiveSlots <= EYECAP_LIVE_MAX_SLOTS, "slot count");
 static_assert(sizeof(void*) == 8, "x64 only (handle values are exchanged as uint64)");
+const DWORD kTeardownStepMs = 15;   // pause between texture frees: each is its own short kernel free instead of one ~900 MB batch that blocks the game's GPU submit for several ms
 const int64_t kSlowCall100ns = 40000;   // a game-thread share call longer than 4 ms counts as a stall
 std::atomic<void*> g_owner{nullptr};   // the LiveShare::Impl that shares in this process (one at a time)
 
@@ -94,6 +95,7 @@ struct LiveShare::Impl {
     std::vector<ComPtr<ID3D11Texture2D>> outTex;   // exported ring (raw: = ring.tex)
     ComPtr<ID3D11Fence> outReady, outFree;   // exported fences (raw: = ring.ready / ring.free)
     std::vector<HANDLE> exported;            // NT handles published in the block (closed at teardown)
+    std::atomic<bool> quickTeardown{false};  // session ended (destructor): no game frame to protect, teardown is not paced
     std::string stopWhy;                     // game thread sets before the stop event; worker logs it
     std::string adapter;
     // re-projection resources (worker)
@@ -548,11 +550,29 @@ struct LiveShare::Impl {
             while (ring.free->GetCompletedValue() < lastRawFree && GetTickCount64() - t0 < 2000) Sleep(1);
         }
         if (src && ring.ready) src->DestroyRing();   // waits for the last copy on the game's GPU
+        std::vector<ComPtr<ID3D11Texture2D>> rawTex = std::move(ring.tex);   // dropped one per step below
         ring = SharedRing();
-        ReleaseStage();
+        // the small things first (the consumer's imports are its own references)
+        ovl.comp.Release();   // the compositor holds SRVs of the atlases
+        rawSrv.clear();
+        outRtv.clear();
+        rpVs.Reset(); rpPs.Reset(); rpCb.Reset(); rpSmp.Reset();
+        outReady.Reset();
+        outFree.Reset();
         for (HANDLE h : exported) if (h) CloseHandle(h);
         exported.clear();
         shareCtx4.Reset();
+        // then the big textures, one reference per step: each free is its own short kernel free instead of one ~900 MB batch
+        auto step = [&]() {
+            if (shareCtx) { shareCtx->ClearState(); shareCtx->Flush(); }
+            if (!quickTeardown.load()) Sleep(kTeardownStepMs);
+        };
+        while (ovl.ReleaseOneAtlas()) step();
+        while (!outTex.empty()) { outTex.pop_back(); step(); }
+        while (!rawTex.empty()) { rawTex.pop_back(); step(); }
+        if (shareCtx) { shareCtx->ClearState(); shareCtx->Flush(); }
+        if (!quickTeardown.load()) Sleep(kTeardownStepMs);
+        ReleaseStage();   // whatever is left
         shareCtx.Reset();
         shareDev.Reset();
         src.reset();

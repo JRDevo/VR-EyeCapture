@@ -201,6 +201,7 @@ public:
     void MakePending(IFrameSource* src, ID3D11Device* dev, const std::vector<ComPtr<ID3D11Texture2D>>& ring, DXGI_FORMAT fmt,
                      bool srgb, const char* who, const char* notWhat, const char* devName, const char* before);
     void Release();   // compositor + atlas references (the frame source's DestroyRing releases its side); masks are kept
+    bool ReleaseOneAtlas();   // drops ONE atlas reference (false: none left); call after comp.Release() (it holds SRVs of the atlases)
 private:
     std::vector<ComPtr<ID3D11Texture2D>> atlas_[kOverlayFamilies];
 };

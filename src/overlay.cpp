@@ -753,3 +753,12 @@ void OverlayAtlasSet::Release() {
     comp.Release();
     for (auto& a : atlas_) a.clear();
 }
+
+bool OverlayAtlasSet::ReleaseOneAtlas() {
+    for (auto& a : atlas_) {
+        if (a.empty()) continue;
+        a.pop_back();
+        return true;
+    }
+    return false;
+}

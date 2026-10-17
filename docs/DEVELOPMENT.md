@@ -671,7 +671,9 @@ fills it.
 **Teardown.** Consumer gone (heartbeat > 2 s old; `Close()` clears it so a clean exit stops the layer at its next
 frame), eye size change, mode / size / settings change, first overlay layer, or session end: the game thread stops calling `CopyEyes`, then the worker
 leaves its loop, unpublishes the ring (`producerPid = 0`), waits (<= 2 s) until its last pass has finished reading its
-raw slot, `DestroyRing` (waits for the last copy), releases the share-device resources (and the overlay atlases / compositor), closes the exported handles and
+raw slot, `DestroyRing` (waits for the last copy), releases the small share-device resources (compositor, views, shaders, fences), closes the exported handles,
+frees the big textures (overlay atlases, exported ring, raw ring) one per step with `ClearState` + `Flush` + 15 ms between
+them (`kTeardownStepMs`; not paced at session end), then the share device, and
 logs `live share: stopped (<why>) after N s -- frames shared, dropped busy, dropped gpu, skipped by max fps, replaced
 before the pass, pass found no free slot | game thread: N share calls, max X ms, N over 4 ms`. Session destroy joins the
 worker.

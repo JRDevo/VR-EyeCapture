@@ -29,7 +29,7 @@
 //                      composites the overlays into that raw slot, runs the filter + the pass on the share device from it
 //                      into the exported ring (the output size: symmetric 2 eyeW x eyeH, or the raw layout; halved for
 //                      Half) and publishes. A frame the worker has not taken yet is replaced by the next one (counted).
-//   * consumer gone for > 2 s: the rings are torn down on the worker thread, back to probing.
+//   * consumer gone for > 2 s: the rings are torn down on the worker thread (texture by texture, ~15 ms apart, so the free never stalls the game's GPU submit), back to probing.
 #pragma once
 #include <memory>
 #include <string>
