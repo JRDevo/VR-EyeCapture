@@ -41,8 +41,10 @@ jobs:
           if (-not (Test-Path $dll)) { throw 'mfplat.dll still missing after Server-Media-Foundation (a reboot may be needed)' }
           Get-Item $dll | Select-Object FullName, Length
 
-      - name: Configure (Visual Studio 17 2022, x64, warnings are errors)
-        run: cmake -B build -S . -G "Visual Studio 17 2022" -A x64 -DEYE_WERROR=ON
+      # EYE_BUILD_OBS_PLUGIN=ON: also builds obs-eyecapture.dll (fetches only the libobs headers), so the separate OBS
+      # release zip (scripts\package.ps1) cannot break unnoticed.
+      - name: Configure (Visual Studio 17 2022, x64, warnings are errors, OBS plugin)
+        run: cmake -B build -S . -G "Visual Studio 17 2022" -A x64 -DEYE_WERROR=ON -DEYE_BUILD_OBS_PLUGIN=ON
 
       - name: Build Release
         run: cmake --build build --config Release --parallel
@@ -86,6 +88,9 @@ jobs:
 
       - name: run_yt8k (tray 8K step, CPU libx265)
         run: powershell -NoProfile -ExecutionPolicy Bypass -File tests\run_yt8k.ps1 -FfmpegDir $env:EYECAP_FFMPEG_DIR
+
+      - name: run_tag3d (tray "Tag a video as 3D", ffmpeg remux)
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File testsun_tag3d.ps1 -FfmpegDir $env:EYECAP_FFMPEG_DIR
 
       - name: Upload logs on failure
         if: failure()

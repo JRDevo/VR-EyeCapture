@@ -744,12 +744,14 @@ branches named `ci-*`, and manual runs (`workflow_dispatch`). A new push cancels
 
 **What runs**
 
-1. Configure with `-G "Visual Studio 17 2022" -A x64 -DEYE_WERROR=ON` and build Release. `EYE_WERROR` (default OFF, so local
+1. Configure with `-G "Visual Studio 17 2022" -A x64 -DEYE_WERROR=ON -DEYE_BUILD_OBS_PLUGIN=ON` and build Release (the
+   OBS plugin is built too, so the separate OBS zip cannot break unnoticed; it is not run, OBS is not installed). `EYE_WERROR` (default OFF, so local
    builds are unchanged) adds `/WX` to `EYE_WARN_FLAGS`: any compiler warning in our sources fails the build. The OpenXR SDK
    targets are not affected. To check locally: `cmake -B build -S . -DEYE_WERROR=ON`, build, then set it back to OFF.
 2. Unit exes: `overlay_test`, `head_smoothing_test`, `indicator_test`, `install_test`, `control_final_test`.
 3. `tests\run_hold.ps1` (fake ffmpeg), `tests\run_settings.ps1` (includes the real Settings dialog driven by `settings_test`),
-   `tests\run_install.ps1 -AllowElevated`, `tests\run_yt8k.ps1 -FfmpegDir <dir>` (libx265 on the CPU).
+   `tests\run_install.ps1 -AllowElevated`, `tests\run_yt8k.ps1 -FfmpegDir <dir>` (libx265 on the CPU),
+   `tests\run_tag3d.ps1 -FfmpegDir <dir>` (Tag a video as 3D, a remux).
 4. On failure the logs (`logs\*.log`, `build\ci_unit`, `build\tt*\**\*.log`, `build\settings_scratch`) are uploaded as the
    artifact `test-logs`.
 
