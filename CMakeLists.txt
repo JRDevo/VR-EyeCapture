@@ -58,12 +58,30 @@ target_compile_options(eye_capture_core PRIVATE ${EYE_WARN_FLAGS})
 target_link_libraries(eye_capture_core PUBLIC
     d3d11 d3d12 dxgi d3dcompiler mfplat mfreadwrite mfuuid ole32 strmiids shell32 winmm OpenXR::headers)
 
+# Version information resource (CompanyName, ProductName, FileDescription, versions from project(VERSION)) for every binary we
+# ship, so the files identify themselves in Explorer / antivirus tools. kind = APP or DLL.
+function(eye_add_version_info target kind description original)
+    set(EYE_RC_DESC "${description}")
+    set(EYE_RC_ORIGINAL "${original}")
+    set(EYE_RC_INTERNAL "${target}")
+    set(EYE_RC_VER_DOT "${PROJECT_VERSION}")
+    set(EYE_RC_VER_COMMA "${PROJECT_VERSION_MAJOR},${PROJECT_VERSION_MINOR},${PROJECT_VERSION_PATCH},0")
+    if (kind STREQUAL "DLL")
+        set(EYE_RC_FILETYPE "VFT_DLL")
+    else()
+        set(EYE_RC_FILETYPE "VFT_APP")
+    endif()
+    configure_file(${CMAKE_SOURCE_DIR}/cmake/version.rc.in ${CMAKE_BINARY_DIR}/version_${target}.rc @ONLY)
+    target_sources(${target} PRIVATE ${CMAKE_BINARY_DIR}/version_${target}.rc)
+endfunction()
+
 # --- the API layer DLL ---
 add_library(eye_capture SHARED
     src/layer.cpp)
 target_compile_options(eye_capture PRIVATE ${EYE_WARN_FLAGS})
 target_link_libraries(eye_capture PRIVATE eye_capture_core OpenXR::headers)
 target_compile_definitions(eye_capture PRIVATE XR_USE_PLATFORM_WIN32 XR_USE_GRAPHICS_API_D3D11 XR_USE_GRAPHICS_API_D3D12)
+eye_add_version_info(eye_capture DLL "VR EyeCapture OpenXR API layer" "eye_capture.dll")
 
 # Manifest next to the DLL (library_path is relative to the manifest).
 set(EYE_LAYER_NAME "XR_APILAYER_JRDEVO_eye_capture")
@@ -88,6 +106,7 @@ add_library(openvr_proxy SHARED
 set_target_properties(openvr_proxy PROPERTIES OUTPUT_NAME openvr_api)
 target_compile_options(openvr_proxy PRIVATE $<$<COMPILE_LANGUAGE:CXX>:${EYE_WARN_FLAGS}>)
 target_link_libraries(openvr_proxy PRIVATE eye_capture_core advapi32)
+eye_add_version_info(openvr_proxy DLL "VR EyeCapture SteamVR recorder (OpenVR proxy)" "openvr_api.dll")
 
 # --- SteamVR quick mode: EyeCaptureMirror.exe (src/openvr/mirror_main.cpp) records SteamVR's mirror texture through Valve's own
 # openvr_api.dll v2.15.6 (third_party/openvr/bin/win64, BSD-3), copied to <bin>/valve/ (the bin folder's openvr_api.dll is
@@ -95,6 +114,8 @@ target_link_libraries(openvr_proxy PRIVATE eye_capture_core advapi32)
 add_executable(EyeCaptureMirror WIN32 src/openvr/mirror_main.cpp src/openvr/openvr_hooks.cpp)
 target_compile_options(EyeCaptureMirror PRIVATE ${EYE_WARN_FLAGS})
 target_link_libraries(EyeCaptureMirror PRIVATE eye_capture_core advapi32 psapi)
+eye_add_version_info(EyeCaptureMirror APP "VR EyeCapture SteamVR mirror recorder" "EyeCaptureMirror.exe")
+target_link_options(EyeCaptureMirror PRIVATE "/MANIFESTUAC:level='asInvoker' uiAccess='false'")
 add_custom_command(TARGET EyeCaptureMirror POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:EyeCaptureMirror>/valve
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_CURRENT_SOURCE_DIR}/third_party/openvr/bin/win64/openvr_api.dll
@@ -108,6 +129,9 @@ add_executable(EyeCaptureTray WIN32 tray/tray.cpp tray/postprocess.cpp tray/sett
 target_compile_options(EyeCaptureTray PRIVATE ${EYE_WARN_FLAGS})
 target_link_libraries(EyeCaptureTray PRIVATE eye_capture_core comctl32 comdlg32 dinput8 dxguid advapi32 version)
 target_include_directories(EyeCaptureTray PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tray)
+eye_add_version_info(EyeCaptureTray APP "VR EyeCapture tray app" "EyeCaptureTray.exe")
+# Manifest: runs as the invoking user, never elevates by itself (Common Controls v6 comes from a pragma in tray/settings.cpp).
+target_link_options(EyeCaptureTray PRIVATE "/MANIFESTUAC:level='asInvoker' uiAccess='false'")
 
 # --- live share consumer (obs/live_consumer.cpp): no libobs; used by the OBS plugin and tests/live_share_test ---
 add_library(eye_live_consumer STATIC obs/live_consumer.cpp)
@@ -142,6 +166,7 @@ if (EYE_BUILD_OBS_PLUGIN)
     target_include_directories(obs-eyecapture PRIVATE ${obs_studio_SOURCE_DIR}/libobs)
     target_compile_options(obs-eyecapture PRIVATE ${EYE_WARN_FLAGS})
     target_link_libraries(obs-eyecapture PRIVATE eye_live_consumer ${EYE_OBS_IMPLIB})
+    eye_add_version_info(obs-eyecapture DLL "VR EyeCapture OBS Studio source plugin" "obs-eyecapture.dll")
 endif()
 
 # --- tests ---

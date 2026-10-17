@@ -74,7 +74,7 @@ installed per game.
   `<install dir>\steamvr_games.ini` is bookkeeping only; the files on disk are the truth.
 
 **Home discovery:** sidecar `eye_capture_proxy.ini`; fallback `HKCU\Software\OpenXR-EyeCapture\Home` (REG_SZ, written
-non-elevated by the tray at start). Neither → pure forwarder (no log, nothing created in the game folder).
+non-elevated by the tray when the user enables a game, not at start). Neither → pure forwarder (no log, nothing created in the game folder).
 
 ## 2. Code reuse: keep `eye_capture_core`, move `control.cpp` into it, extract layer glue to `src\capture_common.{h,cpp}`
 

@@ -1054,6 +1054,15 @@ int TestDrive(DWORD pid, bool leaveSlider) {
     Check(install::AutostartEnabled(&stored), "Start with Windows ticked + Save: the (test) Run value exists");
     Check(stored.size() > 2 && stored.front() == L'"' && stored.find(L"EyeCaptureTray.exe") != std::wstring::npos, "Run value is a quoted EyeCaptureTray.exe path");
     printf("    Run value: %s\n", N(stored).c_str());
+    {   // the user's tick writes the Run value, never the StartupApproved record (Windows' own switch)
+        HKEY ak = nullptr;
+        bool rec = false;
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\OpenXR-EyeCapture-Test\\RunApproved", 0, KEY_QUERY_VALUE, &ak) == ERROR_SUCCESS) {
+            rec = RegQueryValueExW(ak, install::AutostartValueName(), nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS;
+            RegCloseKey(ak);
+        }
+        Check(!rec, "Start with Windows ticked + Save: no StartupApproved record was written");
+    }
     { std::wstring e; install::SetAutostart(false, L"", e); }
     // Resolution round trip through the window: reopen -> still Custom (3000) -> pick 4K -> Save; reopen -> 4K (the
     // custom item is gone) -> pick Native -> Save; reopen -> Native -> Cancel. run_settings.ps1 checks the file / tray.log.

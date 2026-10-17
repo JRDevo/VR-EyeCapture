@@ -10,6 +10,7 @@
 #include <vector>
 #include "config.h"
 #include "log.h"
+#include "openvr/openvr_hooks.h"   // EYECAP_HOME_REG_KEY / _VALUE, EYECAP_TEST_HOME_KEY_ENV
 #include "steamvr_games.h"
 
 namespace steamvr_ui {
@@ -334,6 +335,33 @@ std::wstring PickExe() {
     return file;
 }
 
+// HKCU\Software\OpenXR-EyeCapture\Home = the install folder (REG_SZ, no admin): the SteamVR proxy's FALLBACK when a game folder
+// has no sidecar (src/openvr/openvr_hooks.h; the sidecar already carries home). Written only when the user enabled a SteamVR
+// game, and only when it differs -- never at tray start. Tests: the key comes from XR_EYE_CAPTURE_TEST_HOME_KEY (an HKCU
+// subkey); a test-mode tray without it writes nothing.
+void EnsureHomeKey() {
+    wchar_t keyBuf[512];
+    const DWORD n = GetEnvironmentVariableW(EYECAP_TEST_HOME_KEY_ENV, keyBuf, 512);
+    std::wstring key = (n > 0 && n < 512) ? std::wstring(keyBuf) : std::wstring();
+    if (key.empty()) {
+        if (g_opt.testMode) return;
+        key = EYECAP_HOME_REG_KEY;
+    }
+    wchar_t cur[1024] = L"";
+    DWORD bytes = sizeof(cur) - sizeof(wchar_t);
+    if (RegGetValueW(HKEY_CURRENT_USER, key.c_str(), EYECAP_HOME_REG_VALUE, RRF_RT_REG_SZ, nullptr, cur, &bytes) == ERROR_SUCCESS &&
+        _wcsicmp(cur, g_opt.installDir.c_str()) == 0)
+        return;
+    HKEY k = nullptr;
+    LSTATUS e = RegCreateKeyExW(HKEY_CURRENT_USER, key.c_str(), 0, nullptr, 0, KEY_SET_VALUE, nullptr, &k, nullptr);
+    if (e == ERROR_SUCCESS) {
+        e = RegSetValueExW(k, EYECAP_HOME_REG_VALUE, 0, REG_SZ, (const BYTE*)g_opt.installDir.c_str(), (DWORD)((g_opt.installDir.size() + 1) * sizeof(wchar_t)));
+        RegCloseKey(k);
+    }
+    if (e == ERROR_SUCCESS) LOGI("tray: SteamVR home: HKCU\\%s\\Home = %s", elog::Narrow(key).c_str(), elog::Narrow(g_opt.installDir).c_str());
+    else LOGW("tray: SteamVR home: cannot write HKCU\\%s\\Home (error %ld)", elog::Narrow(key).c_str(), (long)e);
+}
+
 // Enable (or re-enable) one game: scan, OpenComposite question, confirmation, enable every 64-bit folder, save the list.
 void EnableFlow(const std::wstring& exe, const std::wstring& root, const std::wstring& name, const std::wstring& appid, bool reenable) {
     const char* what = reenable ? "re-enable" : "enable";
@@ -443,6 +471,7 @@ void EnableFlow(const std::wstring& exe, const std::wstring& root, const std::ws
         if (r.ok) { ++okCount; e.dlls.push_back(L.dir); }
         results += L"  " + Rel(root, L.dir) + L"\n      " + r.message + L"\n";
     }
+    if (okCount) EnsureHomeKey();
     bool saved = true;
     SaveGames([&](std::vector<GameEntry>& games) {
         // folders listed before that this scan did not touch but that still hold our files stay in the list
@@ -589,6 +618,7 @@ void OnEnableAll() {
         if (!e.dlls.empty()) { add.push_back(e); ++games; }
         results += L"  " + r.name + L": " + (e.dlls.empty() ? L"not enabled" : L"enabled") + res + L"\n";
     }
+    if (games) EnsureHomeKey();
     SaveGames([&](std::vector<GameEntry>& g) { for (const GameEntry& e : add) steamvr::UpsertGame(g, e); });
     LOGI("tray: steamvr: enable all: %zu of %zu game(s) enabled", games, todo.size());
     Box(L"SteamVR recording enabled for " + std::to_wstring(games) + L" of " + std::to_wstring(todo.size()) + L" game(s).\n\n" + results,

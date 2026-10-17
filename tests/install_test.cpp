@@ -132,31 +132,49 @@ int LockDemo() {
 }
 
 const wchar_t kApprovedTest[] = L"Software\\OpenXR-EyeCapture-Test\\RunApproved";
-// Reads the test StartupApproved value: returns its type (REG_NONE if missing), size and first byte.
-DWORD ApprovedRead(BYTE& b0, DWORD& size) {
+const wchar_t kRunTest[] = L"Software\\OpenXR-EyeCapture-Test\\Run";
+// Reads a test StartupApproved value: returns its type (REG_NONE if missing), size and first byte.
+DWORD ApprovedReadFor(const wchar_t* name, BYTE& b0, DWORD& size) {
     b0 = 0; size = 0;
     HKEY k = nullptr;
     if (RegOpenKeyExW(HKEY_CURRENT_USER, kApprovedTest, 0, KEY_QUERY_VALUE, &k) != ERROR_SUCCESS) return REG_NONE;
     BYTE buf[64] = {};
     DWORD type = REG_NONE, sz = sizeof(buf);
-    const LSTATUS e = RegQueryValueExW(k, install::AutostartValueName(), nullptr, &type, buf, &sz);
+    const LSTATUS e = RegQueryValueExW(k, name, nullptr, &type, buf, &sz);
     RegCloseKey(k);
     if (e != ERROR_SUCCESS) return REG_NONE;
     b0 = buf[0]; size = sz;
     return type;
 }
-void ApprovedWriteByte0(BYTE v) {
+DWORD ApprovedRead(BYTE& b0, DWORD& size) { return ApprovedReadFor(install::AutostartValueName(), b0, size); }
+// Test setup only (stands in for Windows / Task Manager writing the record; the code under test never does).
+void ApprovedWriteByte0For(const wchar_t* name, BYTE v) {
     HKEY k = nullptr;
     if (RegCreateKeyExW(HKEY_CURRENT_USER, kApprovedTest, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &k, nullptr) != ERROR_SUCCESS) return;
     BYTE rec[12] = {v};
-    RegSetValueExW(k, install::AutostartValueName(), 0, REG_BINARY, rec, sizeof(rec));
+    RegSetValueExW(k, name, 0, REG_BINARY, rec, sizeof(rec));
     RegCloseKey(k);
 }
+void ApprovedWriteByte0(BYTE v) { ApprovedWriteByte0For(install::AutostartValueName(), v); }
 void ApprovedDelete() {
     HKEY k = nullptr;
     if (RegOpenKeyExW(HKEY_CURRENT_USER, kApprovedTest, 0, KEY_SET_VALUE, &k) != ERROR_SUCCESS) return;
     RegDeleteValueW(k, install::AutostartValueName());
     RegCloseKey(k);
+}
+// Test Run key values (the code under test is redirected to kRunTest with SetAutostartTestKey).
+void SetRunStr(const wchar_t* name, const std::wstring& v) {
+    HKEY k = nullptr;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, kRunTest, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &k, nullptr) != ERROR_SUCCESS) return;
+    RegSetValueExW(k, name, 0, REG_SZ, (const BYTE*)v.c_str(), (DWORD)((v.size() + 1) * sizeof(wchar_t)));
+    RegCloseKey(k);
+}
+bool GetRunStr(const wchar_t* name, std::wstring* v) {
+    wchar_t b[1024] = L"";
+    DWORD n = sizeof(b) - sizeof(wchar_t);
+    const bool ok = RegGetValueW(HKEY_CURRENT_USER, kRunTest, name, RRF_RT_ANY, nullptr, b, &n) == ERROR_SUCCESS;
+    if (v) *v = ok ? b : L"";
+    return ok;
 }
 
 int RunAll() {
@@ -299,112 +317,98 @@ int RunAll() {
         Check(false, "could not create the read-only key");
     }
 
-    printf("10. Start with Windows (Run key redirected to a test subkey)\n");
-    install::SetAutostartTestKey(L"Software\\OpenXR-EyeCapture-Test\\Run");
+    printf("10. Start with Windows (Run key redirected to a test subkey): only SetAutostart writes the Run value; StartupApproved is read-only\n");
+    install::SetAutostartTestKey(kRunTest);
     {
         std::wstring stored = L"junk";
         const std::wstring dirA = L"C:\\A", dirB = L"C:\\B";
+        BYTE b0 = 0; DWORD n = 0;
         Check(!install::AutostartEnabled(&stored) && stored.empty(), "not enabled at first (stored command empty)");
-        Check(!install::SyncAutostart(dirA), "SyncAutostart when not enabled: no-op");
-        Check(!install::AutostartEnabled(), "SyncAutostart did not turn it on");
-        Check(install::SetAutostart(true, dirA, err), "SetAutostart(true) succeeds");
         {
-            BYTE b0 = 0; DWORD n = 0;
-            Check(ApprovedRead(b0, n) == REG_BINARY && n == 12 && b0 == 2, "approved record: REG_BINARY, 12 bytes, byte0 == 2");
-            ApprovedWriteByte0(3);
-            Check(!install::AutostartEnabled(), "approved byte0 = 3 (disabled by the user): AutostartEnabled false");
-            Check(!install::SyncAutostart(dirA), "SyncAutostart leaves a user-disabled entry alone");
-            Check(install::SetAutostart(true, dirA, err), "SetAutostart(true) again");
-            Check(ApprovedRead(b0, n) == REG_BINARY && n == 12 && b0 == 2, "approved byte0 back to 2");
-            Check(install::AutostartEnabled(), "enabled again");
-            ApprovedDelete();
-            Check(install::AutostartEnabled(), "approved value missing: still enabled");
-            Check(install::SyncAutostart(dirA), "SyncAutostart with the approval missing: true (rewritten)");
-            Check(ApprovedRead(b0, n) == REG_BINARY && n == 12 && b0 == 2, "SyncAutostart recreated the approved record");
-            Check(!install::SyncAutostart(dirA), "SyncAutostart again: false");
+            const install::AutostartInfo i0 = install::ReadAutostart();
+            Check(!i0.runPresent && !i0.oldPresent && !i0.disabledInTaskManager, "ReadAutostart: nothing there");
+            Check(install::AutostartStalePath(dirA).empty(), "no Run value: no stale path");
         }
+        Check(install::SetAutostart(true, dirA, err), "SetAutostart(true) succeeds");
+        Check(ApprovedRead(b0, n) == REG_NONE, "SetAutostart(true) wrote NO StartupApproved record");
         Check(install::AutostartEnabled(&stored), "enabled");
         Check(stored == install::AutostartCommand(dirA), "stored command == AutostartCommand(C:\\A)");
         Check(install::AutostartCommand(dirA) == L"\"C:\\A\\EyeCaptureTray.exe\"", "command is quoted, no arguments");
-        Check(!install::SyncAutostart(dirA), "SyncAutostart with the same folder: false (nothing rewritten)");
-        Check(install::SyncAutostart(dirB), "SyncAutostart with another folder: true (rewritten)");
-        Check(install::AutostartEnabled(&stored) && stored == install::AutostartCommand(dirB) && stored.find(L"C:\\B") != std::wstring::npos,
-              "stored command now names C:\\B");
-        Check(!install::SyncAutostart(L"c:\\b"), "SyncAutostart: case-insensitive compare");
+        {
+            const install::AutostartInfo i1 = install::ReadAutostart();
+            Check(install::AutostartPointsHere(i1, dirA) && install::AutostartPointsHere(i1, L"c:\\a"), "points at C:\\A (case-insensitive)");
+            Check(!install::AutostartPointsHere(i1, dirB), "does not point at C:\\B");
+            Check(install::AutostartStalePath(dirA).empty(), "stale path for C:\\A: none");
+            Check(install::AutostartStalePath(dirB) == L"C:\\A\\EyeCaptureTray.exe", "stale path for C:\\B: C:\\A\\EyeCaptureTray.exe");
+            Check(GetRunStr(L"VR EyeCapture", &stored) && stored == install::AutostartCommand(dirA), "the read calls changed nothing");
+        }
+        // the user disabled it in Task Manager (odd first byte): reads as off, the record is never rewritten
+        ApprovedWriteByte0(3);
+        Check(!install::AutostartEnabled(&stored) && stored == install::AutostartCommand(dirA), "approved byte0 = 3: AutostartEnabled false, stored command kept");
+        Check(install::ReadAutostart().disabledInTaskManager, "ReadAutostart: disabledInTaskManager");
+        Check(ApprovedRead(b0, n) == REG_BINARY && n == 12 && b0 == 3, "the reads left the user's record alone");
+        Check(install::SetAutostart(true, dirB, err), "SetAutostart(true) C:\\B while disabled in Task Manager");
+        Check(ApprovedRead(b0, n) == REG_BINARY && n == 12 && b0 == 3, "... the record is STILL byte0 == 3 (never written)");
+        Check(!install::AutostartEnabled(&stored) && stored == install::AutostartCommand(dirB), "... Run value now C:\\B, still reads as disabled");
+        ApprovedWriteByte0(2);
+        Check(install::AutostartEnabled(), "record byte0 = 2 (set by 'Windows'): enabled");
+        ApprovedDelete();
+        Check(install::AutostartEnabled(), "record missing: still enabled");
+        Check(install::SetAutostart(true, dirA, err) && ApprovedRead(b0, n) == REG_NONE, "SetAutostart(true) with the record missing: no record is created");
+        // off: the Run value goes, a record that exists stays exactly as it is
+        ApprovedWriteByte0(2);
         Check(install::SetAutostart(false, dirA, err), "SetAutostart(false) succeeds");
         Check(!install::AutostartEnabled(&stored) && stored.empty(), "not enabled again");
-        {
-            BYTE b0 = 0; DWORD n = 0;
-            Check(ApprovedRead(b0, n) == REG_NONE, "SetAutostart(false) removed the approved value");
-        }
+        Check(ApprovedRead(b0, n) == REG_BINARY && n == 12 && b0 == 2, "SetAutostart(false) left the StartupApproved record alone");
+        ApprovedDelete();
         Check(install::SetAutostart(false, dirA, err), "SetAutostart(false) again: still success");
-        // all or nothing: the approval record cannot be written (read-only test approval key) -> the Run value is put back
+        // a read-only approval key no longer matters: it is never written
         ApprovedWriteByte0(2);
-        ApprovedDelete();   // the key exists, the value does not
         if (SetSddl(kApprovedTest, L"D:P(A;;KR;;;WD)")) {
-            const bool failed = !install::SetAutostart(true, dirA, err);
-            printf("    read-only approval key: %s\n", N(err).c_str());
-            Check(failed && !err.empty(), "read-only approval key: SetAutostart(true) fails with an error text");
-            Check(!install::AutostartEnabled(&stored) && stored.empty(), "... and the Run value it wrote first is removed again");
+            Check(install::SetAutostart(true, dirA, err) && install::AutostartEnabled(&stored) && stored == install::AutostartCommand(dirA),
+                  "read-only approval key: SetAutostart(true) still works (it does not write the key)");
             SetSddl(kApprovedTest, L"D:(A;;KA;;;WD)");
-            // a user-disabled entry (Run value C:\A, record byte0 = 3): a failed re-enable for C:\B leaves it exactly as it was
-            Check(install::SetAutostart(true, dirA, err), "SetAutostart(true) C:\\A with the key writable again");
-            ApprovedWriteByte0(3);
-            SetSddl(kApprovedTest, L"D:P(A;;KR;;;WD)");
-            Check(!install::SetAutostart(true, dirB, err), "read-only approval key: re-enabling a user-disabled entry fails");
-            Check(!install::AutostartEnabled(&stored) && stored == install::AutostartCommand(dirA),
-                  "... and the old Run value (C:\\A, still user-disabled) is restored");
-            SetSddl(kApprovedTest, L"D:(A;;KA;;;WD)");
-            Check(install::SetAutostart(false, dirA, err) && !install::AutostartEnabled(&stored) && stored.empty(),
-                  "SetAutostart(false) cleans up after the read-only key test");
+            Check(install::SetAutostart(false, dirA, err) && !install::AutostartEnabled(&stored) && stored.empty(), "SetAutostart(false) cleans up");
         } else {
             Check(false, "could not make the test approval key read-only");
         }
+        ApprovedDelete();
     }
 
-    printf("11. the rename: Run value \"OpenXR-EyeCapture\" -> \"VR EyeCapture\", %%APPDATA%% config folder (test keys / folders)\n");
+    printf("11. the old Run value \"OpenXR-EyeCapture\": only a user tick replaces it; %%APPDATA%% config folder (test keys / folders)\n");
     {
-        const wchar_t* const runTest = L"Software\\OpenXR-EyeCapture-Test\\Run";
-        auto setStr = [](const wchar_t* sub, const wchar_t* name, const std::wstring& v) {
-            HKEY k = nullptr;
-            if (RegCreateKeyExW(HKEY_CURRENT_USER, sub, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &k, nullptr) != ERROR_SUCCESS) return;
-            RegSetValueExW(k, name, 0, REG_SZ, (const BYTE*)v.c_str(), (DWORD)((v.size() + 1) * sizeof(wchar_t)));
-            RegCloseKey(k);
-        };
-        auto getStr = [](const wchar_t* sub, const wchar_t* name, std::wstring* v) {
-            wchar_t b[1024] = L"";
-            DWORD n = sizeof(b) - sizeof(wchar_t);
-            const bool ok = RegGetValueW(HKEY_CURRENT_USER, sub, name, RRF_RT_ANY, nullptr, b, &n) == ERROR_SUCCESS;
-            if (v) *v = ok ? b : L"";
-            return ok;
-        };
-        Check(std::wstring(install::AutostartValueName()) == L"VR EyeCapture", "the Run value is now called \"VR EyeCapture\"");
-        std::wstring what, v;
-        Check(!install::MigrateAutostartName(&what) && what.empty(), "no old value: MigrateAutostartName is a no-op");
+        Check(std::wstring(install::AutostartValueName()) == L"VR EyeCapture", "the Run value is called \"VR EyeCapture\"");
+        std::wstring v;
+        const std::wstring dirA = L"C:\\A";
         const std::wstring oldCmd = L"\"D:\\Old Place\\EyeCaptureTray.exe\"";
-        setStr(runTest, L"OpenXR-EyeCapture", oldCmd);
-        {   // the user had disabled it in Task Manager: odd first byte
-            HKEY k = nullptr;
-            RegCreateKeyExW(HKEY_CURRENT_USER, kApprovedTest, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &k, nullptr);
-            const BYTE rec[12] = {3};
-            if (k) { RegSetValueExW(k, L"OpenXR-EyeCapture", 0, REG_BINARY, rec, sizeof(rec)); RegCloseKey(k); }
-        }
-        Check(install::MigrateAutostartName(&what), "old value: MigrateAutostartName moves it");
-        printf("    %s\n", N(what).c_str());
-        Check(getStr(runTest, L"VR EyeCapture", &v) && v == oldCmd, "new Run value has the old data");
-        Check(!getStr(runTest, L"OpenXR-EyeCapture", nullptr), "old Run value deleted");
+        SetRunStr(L"OpenXR-EyeCapture", oldCmd);
+        ApprovedWriteByte0For(L"OpenXR-EyeCapture", 3);   // the user had disabled it in Task Manager
+        install::AutostartInfo i = install::ReadAutostart();
+        Check(!i.runPresent && i.oldPresent && i.oldCommand == oldCmd, "ReadAutostart sees the old-name value only");
+        Check(i.disabledInTaskManager && !install::AutostartEnabled(&v) && v == oldCmd, "its record (old name) says disabled: off, stored command = the old one");
+        Check(install::AutostartStalePath(dirA) == L"D:\\Old Place\\EyeCaptureTray.exe", "stale path = the old program path");
+        // reading (what the tray does at start) changes nothing
+        Check(GetRunStr(L"OpenXR-EyeCapture", &v) && v == oldCmd && !GetRunStr(L"VR EyeCapture", nullptr), "after the reads: old value still there, no new value");
         BYTE b0 = 0; DWORD n = 0;
-        Check(ApprovedRead(b0, n) == REG_BINARY && n == 12 && b0 == 3, "the StartupApproved record moved too (still disabled by the user)");
-        Check(!install::AutostartEnabled(&v) && v == oldCmd, "... so AutostartEnabled stays false, stored command kept");
-        Check(!install::MigrateAutostartName(&what), "second call: nothing left to move");
-        // both exist: the new one wins, the old one is removed
-        setStr(runTest, L"OpenXR-EyeCapture", L"\"X:\\stale\\EyeCaptureTray.exe\"");
-        Check(install::MigrateAutostartName(&what) && getStr(runTest, L"VR EyeCapture", &v) && v == oldCmd &&
-                  !getStr(runTest, L"OpenXR-EyeCapture", nullptr) && what.find(L"removed (new one \"VR EyeCapture\" already present)") != std::wstring::npos,
-              "old and new both present: the new value is kept, the old one deleted, and the log text says so");
-        printf("    %s\n", N(what).c_str());
+        Check(ApprovedReadFor(L"OpenXR-EyeCapture", b0, n) == REG_BINARY && n == 12 && b0 == 3, "... and the old-name record is untouched");
+        // the user ticks the check box
         std::wstring err;
-        install::SetAutostart(false, L"", err);
+        Check(install::SetAutostart(true, dirA, err), "user tick: SetAutostart(true)");
+        Check(GetRunStr(L"VR EyeCapture", &v) && v == install::AutostartCommand(dirA), "new value written for this folder");
+        Check(!GetRunStr(L"OpenXR-EyeCapture", nullptr), "old-name value deleted by the same user action");
+        Check(ApprovedReadFor(L"VR EyeCapture", b0, n) == REG_NONE, "no StartupApproved record written for the new name");
+        Check(ApprovedReadFor(L"OpenXR-EyeCapture", b0, n) == REG_BINARY && b0 == 3, "the old-name record is left to Windows");
+        // both exist, user unticks: both go
+        SetRunStr(L"OpenXR-EyeCapture", L"\"X:\\stale\\EyeCaptureTray.exe\"");
+        Check(install::SetAutostart(false, dirA, err) && !GetRunStr(L"VR EyeCapture", nullptr) && !GetRunStr(L"OpenXR-EyeCapture", nullptr),
+              "user untick: both names deleted");
+        {   // leftover record of the old name removed by the test itself
+            HKEY k = nullptr;
+            if (RegOpenKeyExW(HKEY_CURRENT_USER, kApprovedTest, 0, KEY_SET_VALUE, &k) == ERROR_SUCCESS) {
+                RegDeleteValueW(k, L"OpenXR-EyeCapture");
+                RegCloseKey(k);
+            }
+        }
 
         // %APPDATA%: new folder first, then the old one, then next to the DLL; the tray copies old -> new once
         const std::wstring app = ScratchDir(L"AppData", false, false);

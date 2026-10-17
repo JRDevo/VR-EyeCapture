@@ -15,17 +15,16 @@
 // "Start with Windows" (optional, off by default) is a separate, per-user registry state, NOT a config.ini key:
 //   HKCU\Software\Microsoft\Windows\CurrentVersion\Run, value "VR EyeCapture" (REG_SZ) = "<exeDir>\EyeCaptureTray.exe"
 //   (quoted, no arguments). No admin rights needed. Before the rename (docs/RENAME_PLAN.md) the value was called
-//   "OpenXR-EyeCapture"; MigrateAutostartName moves it (and its StartupApproved record) at tray start. Rules:
-//   - newer Windows 11 builds start a Run entry at sign-in only when it also has an enabled approval record:
-//     HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run, same value name, REG_BINARY of 12 bytes,
-//     first byte even (2) = enabled, odd (3) = disabled by the user in Task Manager / Settings. SetAutostart(true) writes
-//     02 00 00 00 + 8 zero bytes, SetAutostart(false) deletes it;
-//   - enabled = the Run value exists (whatever its data) AND the approval record is missing or has an even first byte;
-//     a record the user disabled reads as off (the Settings checkbox shows unchecked; checking it again rewrites 02);
-//     SetAutostart(true) writes the Run value, then the record (all or nothing: when the record cannot be written the Run
-//     value is put back as it was), SetAutostart(false) deletes both (a missing value counts as success);
-//   - SyncAutostart rewrites an enabled entry whose data is not the expected command for this exe folder (the folder
-//     was moved) or that has no approval record yet (an older install); it never turns the option on by itself;
+//   "OpenXR-EyeCapture". Behaviour rules (antivirus: a program that quietly rewrites its own startup entries looks like
+//   malware, see docs/DEVELOPMENT.md "Antivirus: behaviour rules"):
+//   - the Run value is written or deleted ONLY by SetAutostart, i.e. by the user changing the Settings check box. Nothing
+//     in this module runs at tray start except the read-only ReadAutostart / AutostartStalePath;
+//   - the StartupApproved record (HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run, same
+//     value name, REG_BINARY, first byte even = enabled, odd = the user disabled it in Task Manager > Startup apps) is
+//     Windows' own switch. It is only READ here (to show "disabled in Task Manager"), never written, moved or deleted;
+//   - enabled = a Run value exists (new or old name) AND the record is missing or has an even first byte;
+//   - SetAutostart(true) writes the "VR EyeCapture" value and deletes a value of the old name (user action);
+//     SetAutostart(false) deletes both names. Neither touches the StartupApproved key;
 //   - tests redirect the Run key to a subkey of HKCU with SetAutostartTestKey (the approval key becomes <subkey>"Approved"),
 //     so a real Run / StartupApproved key is never touched.
 #pragma once
@@ -65,23 +64,29 @@ void SetTestRoots(const std::wstring& lmPath, const std::wstring& cuPath);
 
 // ---- Start with Windows (HKCU Run key, see the header comment) ----
 const wchar_t* AutostartValueName();   // "VR EyeCapture"
-// The rename: a Run value "OpenXR-EyeCapture" becomes "VR EyeCapture" with the same type and data (an existing new value is
-// kept as it is), then the old one is deleted; the same for its StartupApproved record. Returns true when something moved
-// (*what, optional: a line for the log). No-op (false) when there is no old value.
-bool MigrateAutostartName(std::wstring* what = nullptr);
 // The command the Run value should hold for exeDir: "<exeDir>\EyeCaptureTray.exe" (quoted, no arguments).
 std::wstring AutostartCommand(const std::wstring& exeDir);
-// True when the Run value exists (any data) AND its StartupApproved record is missing or enabled: a record the user disabled
-// (Task Manager / Settings) returns false. *storedCommand (optional) gets the Run value's data whenever the value exists,
-// also when the user disabled it; it is empty only when there is no Run value.
+
+// Read-only snapshot of the startup entry.
+struct AutostartInfo {
+    bool runPresent = false;                // value "VR EyeCapture" exists
+    std::wstring runCommand;
+    bool oldPresent = false;                // value "OpenXR-EyeCapture" (name before the rename) exists
+    std::wstring oldCommand;
+    bool disabledInTaskManager = false;     // the StartupApproved record of the present value has an odd first byte
+};
+AutostartInfo ReadAutostart();
+// True when every present Run value (new / old name) starts the EyeCaptureTray.exe of exeDir (path compare, case-insensitive).
+// False when none exists.
+bool AutostartPointsHere(const AutostartInfo& info, const std::wstring& exeDir);
+// "" when there is no Run value or it points at exeDir; else the program path the stale value points at (for a hint / balloon).
+std::wstring AutostartStalePath(const std::wstring& exeDir);
+// True when a Run value exists (any name, any data) AND its StartupApproved record is missing or enabled: a record the user
+// disabled (Task Manager) returns false. *storedCommand (optional) gets the Run data (new name first), "" when there is none.
 bool AutostartEnabled(std::wstring* storedCommand = nullptr);
-// on: writes the Run value for exeDir and an enabled StartupApproved record; all or nothing: when the record cannot be
-// written, the Run value is put back as it was (deleted again if it did not exist) and false is returned.
-// off: deletes both (already missing = success). False + err on a Win32 error.
+// on: writes the "VR EyeCapture" value for exeDir and deletes an old-name value. off: deletes both names (missing = success).
+// Never touches StartupApproved. Only call it from a user action. False + err on a Win32 error.
 bool SetAutostart(bool on, const std::wstring& exeDir, std::wstring& err);
-// If enabled and the stored command differs from AutostartCommand(exeDir) (case-insensitive), rewrites it. Returns true
-// only when it rewrote the value; a no-op (false) when not enabled or already right.
-bool SyncAutostart(const std::wstring& exeDir);
 // Tests: redirect the Run key to "Software\\OpenXR-EyeCapture-Test\\Run" under HKCU. Empty restores the real key.
 void SetAutostartTestKey(const std::wstring& hkcuSubkey);
 

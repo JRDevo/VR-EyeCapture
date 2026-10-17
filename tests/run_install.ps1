@@ -11,9 +11,10 @@
                           value = tt3\json, stale gone) -> CU duplicate -> registered=yes hkcu_duplicate=yes -> --register
                           removes it -> --unregister (exit 0) -> registered=no; dll missing -> --register exit 1 and
                           files=missing; read-only LM key -> --register exit 5. tray.log has the --register lines.
-    3. GUI on test keys  : the rename migration at the first start: an old "OpenXR-EyeCapture" value in the test Run key
-                          becomes "VR EyeCapture" (then SyncAutostart points it at tt3), %APPDATA%\OpenXR-EyeCapture\config.ini
-                          (scratch APPDATA) is copied to %APPDATA%\VR EyeCapture (old kept). Then
+    3. GUI on test keys  : the start must not touch the startup registration: with a stale old-name "OpenXR-EyeCapture" Run value
+                          and StartupApproved records in the test keys, the Run key and the records are UNCHANGED after the
+                          start (one balloon + log line report it); %APPDATA%\OpenXR-EyeCapture\config.ini (scratch APPDATA)
+                          is copied to %APPDATA%\VR EyeCapture (old kept). Then
                           the scratch tray in test mode (EYECAP_TRAY_TEST_SHM + EYECAP_TRAY_TEST_REG=1): logs the
                           registration state, the start question (answered No in test mode: no dialog, no UAC), the
                           "Not registered for VR games" tooltip; a stale value gives the "registered from another folder"
@@ -124,11 +125,19 @@ try {
     Step 'tray.log has the --register / --unregister lines' ($log -match 'tray: --register \(exe folder' -and $log -match 'tray: registered: ' -and $log -match 'tray: unregistered: ' -and $log -match 'tray: --register failed: .*needs administrator rights')
 
     # ---- 3. GUI flow on test keys
-    # the rename (docs/RENAME_PLAN.md): an old "OpenXR-EyeCapture" Run value (test Run key) and an old
-    # %APPDATA%\OpenXR-EyeCapture\config.ini (scratch APPDATA) must be migrated at the first start
+    # Antivirus behaviour rules (docs/DEVELOPMENT.md): the tray must not touch the startup registration at start. A stale old-name
+    # "OpenXR-EyeCapture" Run value (test Run key) with StartupApproved records (test key) must stay EXACTLY as it is; the tray
+    # only logs it and shows one balloon (logged in test mode). A config.ini in the old %APPDATA% folder is still copied once.
     $oldCmd = '"X:\Old Place\EyeCaptureTray.exe"'
     New-Item -Path $runKey -Force | Out-Null
     New-ItemProperty -Path $runKey -Name 'OpenXR-EyeCapture' -Value $oldCmd -PropertyType String -Force | Out-Null
+    $apprKey = "$($runKey)Approved"
+    New-Item -Path $apprKey -Force | Out-Null
+    $recOld = [byte[]](3,0,0,0,0,0,0,0,0,0,0,0); $recNew = [byte[]](2,0,0,0,0,0,0,0,0,0,0,0)
+    New-ItemProperty -Path $apprKey -Name 'OpenXR-EyeCapture' -Value $recOld -PropertyType Binary -Force | Out-Null
+    New-ItemProperty -Path $apprKey -Name 'Other App' -Value $recNew -PropertyType Binary -Force | Out-Null
+    function RunSnapshot { $a = Get-Item $runKey; $b = Get-Item $apprKey; (($a.GetValueNames() | Sort-Object | ForEach-Object { "$_=$($a.GetValue($_))" }) -join '|') + '#' + (($b.GetValueNames() | Sort-Object | ForEach-Object { "$_=" + (($b.GetValue($_)) -join ',') }) -join '|') }
+    $snapBefore = RunSnapshot
     $oldCfgDir = Join-Path $t 'appdata\OpenXR-EyeCapture'; $newCfg = Join-Path $t 'appdata\VR EyeCapture\config.ini'
     New-Item -ItemType Directory -Force $oldCfgDir | Out-Null
     [System.IO.File]::WriteAllText((Join-Path $oldCfgDir 'config.ini'), "; old folder`r`n[capture]`r`nhotkey = ScrollLock`r`n", (New-Object System.Text.UTF8Encoding $false))
@@ -141,9 +150,12 @@ try {
     Step 'GUI: start question logged, answered No in test mode' ($log -match 'question box: VR EyeCapture is not registered for OpenXR games yet\.[\s\S]*Register VR EyeCapture for OpenXR games now\? Windows will ask for administrator rights once\.[\s\S]*\(Later: right-click the tray icon -> Register for VR games\.\) -> No \(test mode\)')
     Step 'GUI: tooltip first line "Not registered for VR games"' ($log -match 'tooltip now: Not registered for VR games \(right-click: Register\)\s+VR EyeCapture: no VR game running')
     $rk = Get-Item $runKey
-    Step 'GUI rename: Run value "OpenXR-EyeCapture" -> "VR EyeCapture" (old one gone), logged' (($rk.GetValueNames() -contains 'VR EyeCapture') -and -not ($rk.GetValueNames() -contains 'OpenXR-EyeCapture') -and $log -match [regex]::Escape("start-with-Windows entry renamed: HKCU\Software\OpenXR-EyeCapture-Test\Run: `"OpenXR-EyeCapture`" -> `"VR EyeCapture`" = $oldCmd"))
-    Step 'GUI rename: then pointed at this folder (SyncAutostart), autostart=yes' ($rk.GetValue('VR EyeCapture') -eq "`"$exe`"" -and (TrayCli $exe '--status').out -match 'autostart=yes')
-    Step 'GUI rename: %APPDATA%\OpenXR-EyeCapture\config.ini copied to %APPDATA%\VR EyeCapture (old kept), logged' ((Test-Path $newCfg) -and (Test-Path (Join-Path $oldCfgDir 'config.ini')) -and ((Get-Content $newCfg -Raw) -eq (Get-Content (Join-Path $oldCfgDir 'config.ini') -Raw)) -and $log -match 'tray: config\.ini copied from the old folder .*OpenXR-EyeCapture\\config\.ini to .*VR EyeCapture\\config\.ini')
+    Step 'GUI start: the stale old-name Run value and every StartupApproved record are UNCHANGED' ((RunSnapshot) -eq $snapBefore -and -not ($rk.GetValueNames() -contains 'VR EyeCapture') -and $rk.GetValue('OpenXR-EyeCapture') -eq $oldCmd)
+    Step 'GUI start: logs that start-with-Windows points elsewhere and left it unchanged' ($log -match [regex]::Escape('tray: start with Windows points at X:\Old Place\EyeCaptureTray.exe, not at this folder') -and $log -match 'left unchanged')
+    Step 'GUI start: ONE balloon "Start with Windows still points to <old path>. Open Settings and tick ..."' ([regex]::Matches($log, [regex]::Escape('Start with Windows still points to X:\Old Place\EyeCaptureTray.exe. Open Settings and tick Start with Windows again to fix it.')).Count -eq 1)
+    Step 'GUI start: no rename / sync / approval log lines (the old behaviour)' ($log -notmatch 'entry renamed|entry updated|StartupApproved record moved')
+    Step 'GUI start: the old-name value shows as off (disabled in Task Manager) in the log and --status' ($log -match 'tray: start with Windows: off \(disabled in Task Manager' -and (TrayCli $exe '--status').out -match 'autostart=no')
+    Step 'GUI: %APPDATA%\OpenXR-EyeCapture\config.ini copied to %APPDATA%\VR EyeCapture (old kept), logged' ((Test-Path $newCfg) -and (Test-Path (Join-Path $oldCfgDir 'config.ini')) -and ((Get-Content $newCfg -Raw) -eq (Get-Content (Join-Path $oldCfgDir 'config.ini') -Raw)) -and $log -match 'tray: config\.ini copied from the old folder .*OpenXR-EyeCapture\\config\.ini to .*VR EyeCapture\\config\.ini')
     Remove-Item -Path $runKey -Recurse -Force
     Remove-Item -Path "$($runKey)Approved" -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item -Recurse -Force (Join-Path $t 'appdata\*')

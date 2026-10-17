@@ -269,6 +269,13 @@ std::wstring ExeFolder() {
     return k == std::wstring::npos ? std::wstring() : s.substr(0, k);
 }
 
+// The check box state: a Run value that starts THIS folder's tray and that Windows has not disabled (Task Manager). A value that
+// points at another folder shows as unticked, so ticking it is the user action that repairs it.
+bool AutostartChecked() {
+    const install::AutostartInfo i = install::ReadAutostart();
+    return (i.runPresent || i.oldPresent) && !i.disabledInTaskManager && install::AutostartPointsHere(i, ExeFolder());
+}
+
 Reporter g_reporter = nullptr;
 void Report(const std::wstring& title, const std::wstring& text) {
     if (g_reporter) { g_reporter(title, text); return; }
@@ -730,9 +737,9 @@ const Help kHelp[] = {
     {ID_LOGLEVEL, L"Amount of detail written to logs\\eye_capture.log and logs\\tray.log. Off writes nothing. Information is the normal level. "
                   L"Debug is intended for bug reports."},
     {ID_AUTOSTART, L"Starts this tray app when you sign in to Windows, so that it is already running before a VR game starts "
-                   L"(the layer only records while the tray is running). Off by default. Writes a 'Run' entry for the current Windows "
-                   L"account and its 'StartupApproved' record (the on / off switch Task Manager shows), nothing else; turning it off "
-                   L"removes both. Clear this option before deleting the folder."},
+                   L"(the layer only records while the tray is running). Off by default. Writes one 'Run' entry for the current Windows "
+                   L"account, nothing else (the on / off switch in Task Manager > Startup apps is Windows' own and is never changed "
+                   L"by this program); turning it off removes the entry. Clear this option before deleting the folder."},
     {ID_OPENINI, L"Opens config.ini in a text editor. The file lists every setting, with comments."},
     {ID_DEFAULTS, L"Resets every field to its built-in default. Nothing is saved until Save is clicked."},
     {ID_SAVE, L"Writes the changed values to config.ini. The next recording uses them."},
@@ -1451,7 +1458,7 @@ void LoadFromFile() {
     ParseConfigFile(g_path, c, problems);
     if (c.hotkey.text.empty()) ParseHotkey(L"Ctrl+Shift+F10", c.hotkey);
     SetControls(FromConfig(c));
-    SendMessageW(Ctl(ID_AUTOSTART), BM_SETCHECK, install::AutostartEnabled() ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(Ctl(ID_AUTOSTART), BM_SETCHECK, AutostartChecked() ? BST_CHECKED : BST_UNCHECKED, 0);
     if (!problems.empty()) {
         std::wstring m = L"The configuration file contains invalid values on the following lines. The window shows the default value for each of them, and Save replaces them:\n\n";
         for (const auto& p : problems) m += p + L"\n";
@@ -1722,12 +1729,15 @@ void DoSave() {
     }
     // "Start with Windows" is a registry state, not a config.ini key: apply it after the config was written
     const bool wantAuto = SendMessageW(Ctl(ID_AUTOSTART), BM_GETCHECK, 0, 0) == BST_CHECKED;
-    const bool hadAuto = install::AutostartEnabled();
+    const bool hadAuto = AutostartChecked();
     if (wantAuto != hadAuto) {
         std::wstring err;
-        if (install::SetAutostart(wantAuto, ExeFolder(), err))
+        if (install::SetAutostart(wantAuto, ExeFolder(), err)) {
             r.changed.push_back(wantAuto ? L"start_with_windows 0->1" : L"start_with_windows 1->0");
-        else
+            // Windows' own switch (Task Manager > Startup apps) is never written by this program: only pointed out
+            if (wantAuto && install::ReadAutostart().disabledInTaskManager)
+                Report(kWindowTitle, L"Windows has this disabled in Task Manager > Startup apps; turn it on there.");
+        } else
             Report(kWindowTitle, L"The Start with Windows setting could not be changed:\n" + err);
     }
     if (g_onSaved) g_onSaved(r.changed);

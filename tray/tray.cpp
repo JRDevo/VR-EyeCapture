@@ -794,32 +794,6 @@ void OpenSteamVrGames() {
     steamvr_ui::ShowDialog(o);
 }
 
-// HKCU\Software\OpenXR-EyeCapture\Home = this install folder (REG_SZ, no admin): the SteamVR proxy's fallback when a game
-// folder has no sidecar (src/openvr/openvr_hooks.h). Written at every start, only when it differs. Tests: the key comes
-// from XR_EYE_CAPTURE_TEST_HOME_KEY (an HKCU subkey); a test-mode tray without it writes nothing.
-void WriteHomeKey(bool testMode) {
-    wchar_t keyBuf[512];
-    const DWORD n = GetEnvironmentVariableW(EYECAP_TEST_HOME_KEY_ENV, keyBuf, 512);
-    std::wstring key = (n > 0 && n < 512) ? std::wstring(keyBuf) : std::wstring();
-    if (key.empty()) {
-        if (testMode) return;
-        key = EYECAP_HOME_REG_KEY;
-    }
-    wchar_t cur[1024] = L"";
-    DWORD bytes = sizeof(cur) - sizeof(wchar_t);
-    if (RegGetValueW(HKEY_CURRENT_USER, key.c_str(), EYECAP_HOME_REG_VALUE, RRF_RT_REG_SZ, nullptr, cur, &bytes) == ERROR_SUCCESS &&
-        _wcsicmp(cur, g_exeDir.c_str()) == 0)
-        return;
-    HKEY k = nullptr;
-    LSTATUS e = RegCreateKeyExW(HKEY_CURRENT_USER, key.c_str(), 0, nullptr, 0, KEY_SET_VALUE, nullptr, &k, nullptr);
-    if (e == ERROR_SUCCESS) {
-        e = RegSetValueExW(k, EYECAP_HOME_REG_VALUE, 0, REG_SZ, (const BYTE*)g_exeDir.c_str(), (DWORD)((g_exeDir.size() + 1) * sizeof(wchar_t)));
-        RegCloseKey(k);
-    }
-    if (e == ERROR_SUCCESS) LOGI("tray: SteamVR home: HKCU\\%s\\Home = %s", elog::Narrow(key).c_str(), elog::Narrow(g_exeDir).c_str());
-    else LOGW("tray: SteamVR home: cannot write HKCU\\%s\\Home (error %ld)", elog::Narrow(key).c_str(), (long)e);
-}
-
 // ---- registration UI ----
 // Yes / No question. Test mode (EYECAP_TRAY_TEST_SHM): logged and answered No, so tests never block on a dialog and
 // never reach the UAC prompt.
@@ -1590,17 +1564,14 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     elog::Init(g_exeDir + L"\\logs\\tray.log", false);
     LOGI("tray: started%s (exe folder %s)", testMode ? " [TEST MODE, private status block]" : "", elog::Narrow(g_exeDir).c_str());
     ApplyTestRunKey(testMode);   // before the settings window can open
-    // the rename (docs/RENAME_PLAN.md): the old "OpenXR-EyeCapture" Run value becomes "VR EyeCapture" (same data, the
-    // StartupApproved record follows), and %APPDATA%\OpenXR-EyeCapture\config.ini is copied once to %APPDATA%\VR EyeCapture
+    // %APPDATA%\OpenXR-EyeCapture\config.ini is copied once to %APPDATA%\VR EyeCapture (a plain file copy, no registry).
+    // Nothing in the registry is written at start: no Run / StartupApproved / Home writes (docs/DEVELOPMENT.md "Antivirus").
     {
-        std::wstring what;
-        if (install::MigrateAutostartName(&what)) LOGI("tray: start-with-Windows entry renamed: %s", elog::Narrow(what).c_str());
         std::wstring from, to;
         const int m = MigrateAppDataConfig(&from, &to);
         if (m > 0) LOGI("tray: config.ini copied from the old folder %s to %s (the old file is kept)", elog::Narrow(from).c_str(), elog::Narrow(to).c_str());
         else if (m < 0) LOGW("tray: could not copy %s to %s (error %d); the old file is still used", elog::Narrow(from).c_str(), elog::Narrow(to).c_str(), -m);
     }
-    WriteHomeKey(testMode);
     g_shm = testMode ? EyeCapOpenShared(&g_map, testShm) : EyeCapOpenShared(&g_map);
     for (int i = 0; i < kIcoCount; ++i) g_icons[i] = LoadTrayIcon(i);
 
@@ -1645,10 +1616,18 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
             PostMessageW(g_wnd, WM_CHECK_REG, 0, 0);
         }
     }
-    // "Start with Windows" (HKCU Run value, tray/install.h): keep the entry pointed at this folder; runs in normal mode too
-    if (install::SyncAutostart(g_exeDir))
-        LOGI("tray: start-with-Windows entry updated (moved folder or missing approval record): %s", elog::Narrow(install::AutostartCommand(g_exeDir)).c_str());
-    LOGI("tray: start with Windows: %s", install::AutostartEnabled() ? "on" : "off");
+    // "Start with Windows" (HKCU Run value, tray/install.h): READ ONLY at start. A value that points at another folder is
+    // only reported (log + one balloon); the user repairs it by ticking the Settings check box again.
+    {
+        const install::AutostartInfo ai = install::ReadAutostart();
+        LOGI("tray: start with Windows: %s%s", (ai.runPresent || ai.oldPresent) && !ai.disabledInTaskManager ? "on" : "off",
+             ai.disabledInTaskManager ? " (disabled in Task Manager > Startup apps)" : "");
+        const std::wstring stale = install::AutostartStalePath(g_exeDir);
+        if (!stale.empty()) {
+            LOGW("tray: start with Windows points at %s, not at this folder (%s); left unchanged", elog::Narrow(stale).c_str(), elog::Narrow(g_exeDir).c_str());
+            Balloon(kAppTitle, L"Start with Windows still points to " + stale + L". Open Settings and tick Start with Windows again to fix it.", false);
+        }
+    }
     // controller / wheel hotkeys (Pad: / Joy: bindings): the tray polls them and sends ECC_TOGGLE to the game
     ApplyInputBindings("start");
     InstallQueueHooks();   // before the window can open

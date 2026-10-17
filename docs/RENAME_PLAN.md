@@ -30,8 +30,9 @@ and the Settings header changed early (2026-10-17) so YouTube and GitHub can use
 1. **Config folder** `%APPDATA%\OpenXR-EyeCapture\config.ini` -> `%APPDATA%\VR EyeCapture\config.ini`.
    `src/config.cpp`: look in the new folder, then the old one, then next to the DLL. The tray copies the old file to the
    new folder once at start (never deletes the old one).
-2. **Start with Windows** Run value `OpenXR-EyeCapture` -> `VR EyeCapture` (`tray/install.cpp` kRunValue). At start,
-   if the old value exists: write the new one with the same path, delete the old one. `tests\run_install.ps1` covers it.
+2. **Start with Windows** Run value `OpenXR-EyeCapture` -> `VR EyeCapture` (`tray/install.cpp` kRunValue). The tray no longer
+   migrates it at start (antivirus rule, docs/DEVELOPMENT.md): ticking **Start with Windows** in Settings writes the new
+   value and deletes the old one; at start a value pointing elsewhere only gets a balloon. `tests\run_install.ps1` covers it.
 3. **All visible strings**: tray tooltip, menu ("Open VR EyeCapture"), balloons, message boxes, Settings window title and
    About link (`tray/tray.cpp`, `tray/settings.cpp`, `tray/postprocess.cpp`, `tray/input.cpp`), OBS source display name
    (`obs/plugin.cpp`), MP4 `sv3d` metadata_source (`src/st3d.cpp`).
