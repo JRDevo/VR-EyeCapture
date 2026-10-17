@@ -24,6 +24,7 @@
 // The game's swapchain images are only ever copied from (or resolved from), exactly like the eye images. The in-headset
 // indicator is appended after the capture and is never part of this.
 #pragma once
+#include <atomic>
 #include <cstdint>
 #include <vector>
 #include "frame_source.h"
@@ -160,4 +161,46 @@ private:
     DXGI_FORMAT ringFmt_ = DXGI_FORMAT_UNKNOWN;
     bool ringSrgb_ = true, ready_ = false, loggedScratch_ = false, bound_ = false;
     int debugDraws_ = 24;   // log_level = debug: the first draws are logged
+};
+
+// The two halves of record_overlays around ONE ring, shared by the recorder (its encoder ring) and the live share (its
+// internal raw ring): the game thread packs a frame's sub-images (OverlayPack) and hands the copies to
+// IFrameSource::CopyEyes next to the eye copies; the worker makes the atlases a frame asked for (OverlayAtlasSet) and
+// draws with its compositor into the ring slot before any other pass.
+
+// Game thread: this frame's overlay sub-images packed into the ring slot's atlas of their format family (shelf packing
+// per family, identical sub-images once, a cube layer's 6 faces as one 3 x 2 block). Layers of a family whose atlas is
+// not made yet are only counted and requested (wantBits); a failed family is skipped. draws[0 .. nBehind) are behind the
+// projection layer (they come first in ov.layer).
+struct OverlayPacked {
+    OverlayCopy copies[kMaxOverlayCopies];
+    OverlayDraw draws[kMaxOverlays];
+    UINT     nCopy = 0;
+    uint32_t nDraw = 0, nBehind = 0;
+    uint32_t layersIn = 0, notReady = 0, full = 0, setupFailed = 0;   // this frame's counts
+    uint32_t wantBits = 0;                                            // families to make an atlas for (OverlayAtlasSet::want)
+};
+// loggedFull: the "does not fit" warning once per owner; who / consequence: its log line ("recorder", "not recorded on
+// such frames").
+void OverlayPack(const OverlayFrame& ov, uint32_t readyMask, uint32_t failedMask, OverlayPacked& out, bool& loggedFull,
+                 const char* who, const char* consequence);
+
+// Worker side of one ring: the per-slot atlases (one shared texture per family and ring slot, through the frame source:
+// shared with the game device) + the compositor. Masks: bit f = OverlayFamily f; `want` is set by the game thread, `ready`
+// / `failed` by the worker (the game thread packs a family only after its `ready` bit is set: release / acquire).
+class OverlayAtlasSet {
+public:
+    std::atomic<uint32_t> want{0}, ready{0}, failed{0};
+    OverlayCompositor comp;
+    void ResetMasks() { want = 0; ready = 0; failed = 0; }
+    bool Pending() const { return (want.load() & ~(ready.load() | failed.load())) != 0; }
+    // Worker, after the frame's ready fence wait was queued: makes the atlases asked for (A x A each, A = kOverlayAtlasSize,
+    // ring.size() slots) and the compositor at the first one. A failure switches that family (compositor: all) off for
+    // the owner's episode. Log lines: "<who>: overlays: <family> atlas ... on the <devName>; blended ... into the ring
+    // before <before>" / "<who>: overlay atlas setup failed (...) -- layers of that format family are not <notWhat>".
+    void MakePending(IFrameSource* src, ID3D11Device* dev, const std::vector<ComPtr<ID3D11Texture2D>>& ring, DXGI_FORMAT fmt,
+                     bool srgb, const char* who, const char* notWhat, const char* devName, const char* before);
+    void Release();   // compositor + atlas references (the frame source's DestroyRing releases its side); masks are kept
+private:
+    std::vector<ComPtr<ID3D11Texture2D>> atlas_[kOverlayFamilies];
 };

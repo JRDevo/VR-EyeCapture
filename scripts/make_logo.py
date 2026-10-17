@@ -40,8 +40,9 @@ def font(path, size):
     return ImageFont.truetype(path, size)
 
 
-def draw_mark(draw, ox, oy, size):
-    """Draw the mark into `draw` with its 256-unit design box scaled to `size` px, top-left at (ox, oy)."""
+def draw_mark(draw, ox, oy, size, left=BLUE, right=CORAL, dot=RED, strap_color=GREY, dot_scale=1.0):
+    """Draw the mark into `draw` with its 256-unit design box scaled to `size` px, top-left at (ox, oy).
+    left / right: lens colours; dot: the recording dot's colour (None = no dot); dot_scale: dot size (tray icons)."""
     s = size / 256.0
 
     def R(x0, y0, x1, y1):
@@ -49,33 +50,38 @@ def draw_mark(draw, ox, oy, size):
 
     w = max(1, round(11 * s))
     # head strap stubs left and right of the goggles
+    sw = strap_color
     strap = max(1, round(9 * s))
-    draw.line([(ox + 4 * s, oy + 128 * s), (ox + 24 * s, oy + 128 * s)], fill=GREY, width=strap)
-    draw.line([(ox + 232 * s, oy + 128 * s), (ox + 252 * s, oy + 128 * s)], fill=GREY, width=strap)
-    draw.ellipse(R(4 - 4.5, 128 - 4.5, 4 + 4.5, 128 + 4.5), fill=GREY)
-    draw.ellipse(R(252 - 4.5, 128 - 4.5, 252 + 4.5, 128 + 4.5), fill=GREY)
+    draw.line([(ox + 4 * s, oy + 128 * s), (ox + 24 * s, oy + 128 * s)], fill=sw, width=strap)
+    draw.line([(ox + 232 * s, oy + 128 * s), (ox + 252 * s, oy + 128 * s)], fill=sw, width=strap)
+    draw.ellipse(R(4 - 4.5, 128 - 4.5, 4 + 4.5, 128 + 4.5), fill=sw)
+    draw.ellipse(R(252 - 4.5, 128 - 4.5, 252 + 4.5, 128 + 4.5), fill=sw)
     # bridge between the lenses
-    draw.rounded_rectangle(R(112, 117, 144, 139), radius=6 * s, fill=GREY)
+    draw.rounded_rectangle(R(112, 117, 144, 139), radius=6 * s, fill=sw)
     # lenses: left blue, right coral
-    draw.rounded_rectangle(R(24, 76, 118, 180), radius=26 * s, outline=BLUE, width=w)
-    draw.rounded_rectangle(R(138, 76, 232, 180), radius=26 * s, outline=CORAL, width=w)
+    draw.rounded_rectangle(R(24, 76, 118, 180), radius=26 * s, outline=left, width=w)
+    draw.rounded_rectangle(R(138, 76, 232, 180), radius=26 * s, outline=right, width=w)
     # pupils, looking slightly inwards (two eyes, one picture)
-    draw.ellipse(R(78 - 17, 128 - 17, 78 + 17, 128 + 17), fill=BLUE)
-    draw.ellipse(R(178 - 17, 128 - 17, 178 + 17, 128 + 17), fill=CORAL)
-    # recording dot
-    draw.ellipse(R(222 - 18, 50 - 18, 222 + 18, 50 + 18), fill=WHITE)
-    draw.ellipse(R(222 - 13, 50 - 13, 222 + 13, 50 + 13), fill=RED)
+    draw.ellipse(R(78 - 17, 128 - 17, 78 + 17, 128 + 17), fill=left)
+    draw.ellipse(R(178 - 17, 128 - 17, 178 + 17, 128 + 17), fill=right)
+    # recording dot (tray icons: bigger, a status light)
+    if dot is not None:
+        o, i = 18 * dot_scale, 13 * dot_scale
+        cx, cy = (222, 50) if dot_scale == 1.0 else (256 - o - 2, o + 2)   # the logo's own spot / tray: the corner
+        draw.ellipse(R(cx - o, cy - o, cx + o, cy + o), fill=WHITE)
+        draw.ellipse(R(cx - i, cy - i, cx + i, cy + i), fill=dot)
 
 
-def mark_image(size, bg=None, radius_frac=0.0, pad_frac=0.0):
-    """The mark as an RGBA image of size x size. bg: fill colour (rounded square) or None for transparent."""
+def mark_image(size, bg=None, radius_frac=0.0, pad_frac=0.0, **mark):
+    """The mark as an RGBA image of size x size. bg: fill colour (rounded square) or None for transparent.
+    mark: draw_mark's colour / dot options."""
     big = size * SS
     img = Image.new('RGBA', (big, big), CLEAR)
     d = ImageDraw.Draw(img)
     if bg is not None:
         d.rounded_rectangle((0, 0, big - 1, big - 1), radius=big * radius_frac, fill=bg)
     pad = big * pad_frac
-    draw_mark(d, pad, pad, big - 2 * pad)
+    draw_mark(d, pad, pad, big - 2 * pad, **mark)
     return img.resize((size, size), Image.LANCZOS)
 
 
@@ -195,8 +201,43 @@ def banner():
     return img
 
 
+def app_icon(path):
+    """EyeCaptureTray.exe's icon (tray/app.ico, embedded by tray/tray.rc): the mark drawn natively at every size."""
+    sizes = [256, 128, 64, 48, 32, 24, 16]
+    imgs = [mark_image(s) for s in sizes]
+    imgs[0].save(path, format='ICO', sizes=[(s, s) for s in sizes], append_images=imgs[1:])
+
+
+# Tray-area icons (tray/icons/tray_<state>.ico, resources 101.. in tray/tray.rc): the mark with a bigger status dot.
+# While recording or converting the tray alternates the A / B frames (lens colours swapped) every 0.5 s.
+GREEN = (46, 204, 96, 255)
+AMBER = (255, 176, 32, 255)
+CONV = (59, 139, 255, 255)
+DIM = (120, 126, 138, 255)
+TRAY_ICONS = [
+    ('nogame', dict(left=DIM, right=DIM, dot=None, strap_color=DIM)),
+    ('ready', dict(dot=GREEN)),
+    ('rec_a', dict(dot=RED)),
+    ('rec_b', dict(left=CORAL, right=BLUE, dot=RED)),
+    ('busy', dict(dot=AMBER)),
+    ('conv_a', dict(dot=CONV)),
+    ('conv_b', dict(left=CORAL, right=BLUE, dot=CONV)),
+]
+
+
+def tray_icons(folder):
+    os.makedirs(folder, exist_ok=True)
+    sizes = [64, 48, 40, 32, 24, 20, 16]
+    for name, opt in TRAY_ICONS:
+        imgs = [mark_image(sz, dot_scale=1.9, **opt) for sz in sizes]
+        imgs[0].save(os.path.join(folder, 'tray_%s.ico' % name), format='ICO', sizes=[(sz, sz) for sz in sizes],
+                     append_images=imgs[1:])
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
+    app_icon(os.path.join(ROOT, 'tray', 'app.ico'))
+    tray_icons(os.path.join(ROOT, 'tray', 'icons'))
     mark_image(512).save(os.path.join(OUT, 'logo_mark_512.png'))
     mark_image(128).save(os.path.join(OUT, 'logo_mark_128.png'))
     mark_image(800, bg=BG, radius_frac=0.2, pad_frac=0.1).save(os.path.join(OUT, 'logo_icon_800.png'))

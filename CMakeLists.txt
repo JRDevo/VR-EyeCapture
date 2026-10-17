@@ -40,6 +40,8 @@ add_library(eye_capture_core STATIC
     src/source_d3d12.cpp
     src/source_vulkan.cpp
     src/recorder.cpp
+    src/live_share.cpp
+    src/reproject.cpp
     src/head_smoothing.cpp
     src/dome.cpp
     src/indicator.cpp
@@ -72,10 +74,45 @@ add_custom_command(TARGET eye_capture POST_BUILD
             $<TARGET_FILE_DIR:eye_capture>/${EYE_LAYER_NAME}.json)
 
 # --- tray control app (required: the layer is dormant without it; it also registers the layer, tray/install.cpp) ---
-add_executable(EyeCaptureTray WIN32 tray/tray.cpp tray/postprocess.cpp tray/settings.cpp tray/install.cpp tray/input.cpp)
+add_executable(EyeCaptureTray WIN32 tray/tray.cpp tray/postprocess.cpp tray/settings.cpp tray/install.cpp tray/input.cpp tray/tray.rc)
 target_compile_options(EyeCaptureTray PRIVATE ${EYE_WARN_FLAGS})
 target_link_libraries(EyeCaptureTray PRIVATE eye_capture_core comctl32 comdlg32 dinput8 dxguid)
 target_include_directories(EyeCaptureTray PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tray)
+
+# --- live share consumer (obs/live_consumer.cpp): no libobs; used by the OBS plugin and tests/live_share_test ---
+add_library(eye_live_consumer STATIC obs/live_consumer.cpp)
+target_include_directories(eye_live_consumer PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/obs ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_definitions(eye_live_consumer PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_options(eye_live_consumer PRIVATE ${EYE_WARN_FLAGS})
+target_link_libraries(eye_live_consumer PUBLIC d3d11 dxgi)
+
+# --- OBS Studio source plugin obs-eyecapture.dll (optional; obs/README.md) ---
+# Only the libobs HEADERS of OBS 31.0.0 are fetched (shallow, no submodules, OBS itself is not configured or built); the
+# import library for obs.dll is generated from obs/obs.def (only the exports the plugin uses), so no OBS binaries are
+# needed to build.
+option(EYE_BUILD_OBS_PLUGIN "Build the OBS Studio source plugin obs-eyecapture.dll (fetches the libobs headers)" OFF)
+if (EYE_BUILD_OBS_PLUGIN)
+    FetchContent_Declare(obs_studio
+        GIT_REPOSITORY https://github.com/obsproject/obs-studio.git
+        GIT_TAG        31.0.0
+        GIT_SHALLOW    TRUE
+        GIT_SUBMODULES ""
+        SOURCE_SUBDIR  headers-only-not-built)   # no CMakeLists.txt there: populated, never added to the build
+    FetchContent_MakeAvailable(obs_studio)
+    set(EYE_OBS_IMPLIB ${CMAKE_CURRENT_BINARY_DIR}/obs_implib/obs.lib)
+    add_custom_command(OUTPUT ${EYE_OBS_IMPLIB}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/obs_implib
+        COMMAND ${CMAKE_AR} /nologo /def:${CMAKE_CURRENT_SOURCE_DIR}/obs/obs.def /machine:x64 /out:${EYE_OBS_IMPLIB}
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/obs/obs.def
+        COMMENT "obs.lib import library from obs/obs.def")
+    add_custom_target(eye_obs_implib DEPENDS ${EYE_OBS_IMPLIB})
+    add_library(obs-eyecapture MODULE obs/plugin.cpp)
+    add_dependencies(obs-eyecapture eye_obs_implib)
+    # the public libobs headers need none of the files OBS generates at configure time (obsconfig.h is internal only)
+    target_include_directories(obs-eyecapture PRIVATE ${obs_studio_SOURCE_DIR}/libobs)
+    target_compile_options(obs-eyecapture PRIVATE ${EYE_WARN_FLAGS})
+    target_link_libraries(obs-eyecapture PRIVATE eye_live_consumer ${EYE_OBS_IMPLIB})
+endif()
 
 # --- tests ---
 option(EYE_BUILD_TESTS "Build the self-tests (encoder self-test, loader test, mock runtime end-to-end)" ON)
@@ -145,6 +182,12 @@ if (EYE_BUILD_TESTS)
     target_compile_definitions(mock_runtime PRIVATE XR_USE_PLATFORM_WIN32 XR_USE_GRAPHICS_API_D3D11 XR_USE_GRAPHICS_API_D3D12 NOMINMAX)
     configure_file(${CMAKE_CURRENT_SOURCE_DIR}/tests/mock_runtime.json.in
                    ${CMAKE_CURRENT_BINARY_DIR}/mock_runtime.json COPYONLY)
+
+    # Live share consumer test (obs/live_consumer.cpp, the plugin's code) against layer_e2e + the layer: tests/run_live.ps1.
+    add_executable(live_share_test tests/live_share_test.cpp src/head_smoothing.cpp)   # ComputeSymmetricFov: the expected size
+    target_compile_options(live_share_test PRIVATE ${EYE_WARN_FLAGS})
+    target_link_libraries(live_share_test PRIVATE eye_live_consumer)
+    target_include_directories(live_share_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
 
     add_executable(layer_e2e tests/layer_e2e.cpp)
     target_compile_options(layer_e2e PRIVATE ${EYE_WARN_FLAGS})

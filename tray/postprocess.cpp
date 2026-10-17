@@ -291,6 +291,175 @@ std::wstring ResolveFfmpeg(const Config& cfg, const std::wstring& exeDir, std::w
 
 // ------------------------------------------------------------------------------------------------------------------
 
+namespace {
+// CreateProcessW (suspended, no window, below normal) where the child inherits ONLY its own std handles (PROC_THREAD_ATTRIBUTE_HANDLE_LIST):
+// the tag thread and the conversion worker launch children concurrently, and a plain bInheritHandles would leak one child's pipe write
+// end into the other (the reader then gets no EOF until that other child exits).
+BOOL CreateChildOwnHandles(std::wstring& cl, HANDLE in, HANDLE out, HANDLE err, PROCESS_INFORMATION& pi) {
+    STARTUPINFOEXW si{};
+    si.StartupInfo.cb = sizeof(si);
+    si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    si.StartupInfo.hStdInput = in;
+    si.StartupInfo.hStdOutput = out;
+    si.StartupInfo.hStdError = err;
+    HANDLE list[3];
+    DWORD n = 0;
+    for (HANDLE h : {in, out, err}) {
+        if (!h || h == INVALID_HANDLE_VALUE) continue;
+        bool dup = false;
+        for (DWORD i = 0; i < n; ++i) if (list[i] == h) dup = true;
+        if (!dup) list[n++] = h;
+    }
+    SIZE_T sz = 0;
+    InitializeProcThreadAttributeList(nullptr, 1, 0, &sz);
+    std::vector<char> mem(sz);
+    LPPROC_THREAD_ATTRIBUTE_LIST al = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(mem.data());
+    bool haveList = false;
+    if (n && InitializeProcThreadAttributeList(al, 1, 0, &sz)) {
+        haveList = UpdateProcThreadAttribute(al, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, list, n * sizeof(HANDLE), nullptr, nullptr) != FALSE;
+        if (!haveList) DeleteProcThreadAttributeList(al);
+    }
+    DWORD flags = CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS | CREATE_SUSPENDED;
+    if (haveList) {
+        si.lpAttributeList = al;
+        flags |= EXTENDED_STARTUPINFO_PRESENT;
+    }
+    const BOOL ok = CreateProcessW(nullptr, &cl[0], nullptr, nullptr, TRUE, flags, nullptr, nullptr, &si.StartupInfo, &pi);
+    const DWORD e = GetLastError();
+    if (haveList) DeleteProcThreadAttributeList(al);
+    SetLastError(e);
+    return ok;
+}
+
+// Runs a command line to completion, stdout + stderr merged into `output`. The child sits in its own kill-on-close job object, so a
+// tray that dies takes it along. False = could not start (output says why).
+bool RunTool(const std::wstring& cmdline, std::string& output, DWORD& exitCode) {
+    output.clear();
+    exitCode = (DWORD)-1;
+    SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
+    HANDLE rd = nullptr, wr = nullptr;
+    if (!CreatePipe(&rd, &wr, &sa, 0)) { output = "could not create a pipe"; return false; }
+    SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
+    HANDLE nul = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, nullptr);
+    PROCESS_INFORMATION pi{};
+    std::wstring cl = cmdline;
+    const BOOL ok = CreateChildOwnHandles(cl, nul, wr, wr, pi);
+    const DWORD createErr = GetLastError();
+    CloseHandle(wr);
+    if (nul != INVALID_HANDLE_VALUE) CloseHandle(nul);
+    if (!ok) {
+        CloseHandle(rd);
+        // the tool's own name (first token of the command line, quoted or not) so a failing ffprobe is not reported as ffmpeg
+        std::wstring exe = cmdline.empty() ? std::wstring() : cmdline[0] == L'"' ? cmdline.substr(1, cmdline.find(L'"', 1) - 1) : cmdline.substr(0, cmdline.find(L' '));
+        const size_t sl = exe.find_last_of(L"\\/");
+        if (sl != std::wstring::npos) exe = exe.substr(sl + 1);
+        char msg[128];
+        snprintf(msg, sizeof(msg), "could not start %s (error %lu)", exe.empty() ? "the tool" : N(exe).c_str(), (unsigned long)createErr);
+        output = msg;
+        return false;
+    }
+    HANDLE job = CreateJobObjectW(nullptr, nullptr);
+    if (job) {
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION li{};
+        li.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        SetInformationJobObject(job, JobObjectExtendedLimitInformation, &li, sizeof(li));
+        AssignProcessToJobObject(job, pi.hProcess);   // failure: the child just runs as it would without the job
+    }
+    ResumeThread(pi.hThread);
+    CloseHandle(pi.hThread);
+    char buf[4096];
+    DWORD got = 0;
+    while (ReadFile(rd, buf, sizeof(buf), &got, nullptr) && got) {
+        if (output.size() < 65536) output.append(buf, got);
+    }
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    GetExitCodeProcess(pi.hProcess, &exitCode);
+    CloseHandle(pi.hProcess);
+    CloseHandle(rd);
+    if (job) CloseHandle(job);
+    return true;
+}
+} // namespace
+
+bool Tag3d(const Config& cfg, const std::wstring& exeDir, const std::wstring& in, bool topBottom, std::wstring& outPath, std::wstring& why) {
+    outPath.clear();
+    why.clear();
+    const std::string inN = N(in);
+    const char* mode = topBottom ? "top_bottom" : "left_right";
+    if (!FileExists(in)) {
+        why = L"file not found";
+        LOGE("tag3d: %s: file not found", inN.c_str());
+        return false;
+    }
+    std::wstring how;
+    const std::wstring ff = ResolveFfmpeg(cfg, exeDir, how);
+    if (ff.empty()) {
+        why = L"ffmpeg not found — run: winget install Gyan.FFmpeg.Essentials";
+        LOGE("tag3d: %s: ffmpeg not found (%s)", inN.c_str(), N(how).c_str());
+        return false;
+    }
+    const std::wstring finalPath = FreePath(StripExt(in) + L"_3D.mkv");
+    const std::wstring part = finalPath + L".part";
+    if (finalPath != StripExt(in) + L"_3D.mkv") LOGI("tag3d: %s exists -- writing %s instead", N(StripExt(in) + L"_3D.mkv").c_str(), N(FileName(finalPath)).c_str());
+    // -dn: data streams (a mov's timecode track ...) cannot go into Matroska; every other stream is copied.
+    const std::wstring cmd = Q(ff) + L" -hide_banner -loglevel error -y -i " + Q(in) + L" -map 0 -dn -c copy -metadata:s:v:0 stereo_mode=" +
+                             (topBottom ? L"top_bottom" : L"left_right") + L" -f matroska " + Q(part);
+    LOGI("tag3d: %s -> %s (stereo_mode=%s): %s", inN.c_str(), N(FileName(finalPath)).c_str(), mode, N(cmd).c_str());
+    std::string out;
+    DWORD code = 0;
+    auto fail = [&](const std::wstring& reason) {
+        DeleteFileW(part.c_str());
+        why = reason;
+        LOGE("tag3d: %s FAILED: %s", inN.c_str(), N(reason).c_str());
+        return false;
+    };
+    if (!RunTool(cmd, out, code)) return fail(elog::Widen(out));
+    if (code != 0) {
+        std::wstring r = FirstLine(out);
+        if (r.empty()) r = L"ffmpeg exit code " + std::to_wstring(code);
+        return fail(r);
+    }
+    unsigned long long size = 0;
+    if (!FileSize(part, size) || size == 0) return fail(L"ffmpeg wrote no output");
+    // ffprobe sits next to ffmpeg: the remux must be as long as the source (within 1 s / 2%)
+    const size_t slash = ff.find_last_of(L"\\/");
+    const std::wstring probe = (slash == std::wstring::npos ? std::wstring() : ff.substr(0, slash + 1)) + L"ffprobe.exe";
+    if (FileExists(probe)) {
+        auto duration = [&](const std::wstring& file, double& sec) {
+            std::string po;
+            DWORD pc = 0;
+            if (!RunTool(Q(probe) + L" -v error -show_entries format=duration -of default=nw=1 " + Q(file), po, pc) || pc != 0) return false;
+            const std::string v = ProbeValue(po, "duration");
+            char* end = nullptr;
+            sec = strtod(v.c_str(), &end);
+            return !v.empty() && end != v.c_str() && sec > 0.0;
+        };
+        double a = 0.0, b = 0.0;
+        if (duration(in, a) && duration(part, b)) {
+            const double tol = a * 0.02 > 1.0 ? a * 0.02 : 1.0;
+            if (std::fabs(a - b) > tol) {
+                char msg[96];
+                snprintf(msg, sizeof(msg), "output is %.1f s, the source %.1f s", b, a);
+                return fail(elog::Widen(msg));
+            }
+            LOGI("tag3d: verified %.2f s vs source %.2f s, %llu bytes", b, a, size);
+        } else {
+            LOGW("tag3d: ffprobe could not read the durations -- not checked");
+        }
+    } else {
+        LOGW("tag3d: ffprobe.exe not next to ffmpeg -- duration not checked");
+    }
+    const std::wstring dest = FreePath(finalPath);   // a file that appeared meanwhile is never overwritten
+    if (!MoveFileExW(part.c_str(), dest.c_str(), 0)) {
+        char msg[64];
+        snprintf(msg, sizeof(msg), "could not rename the output (error %lu)", GetLastError());
+        return fail(elog::Widen(msg));
+    }
+    outPath = dest;
+    LOGI("tag3d: done %s (%llu bytes)", N(dest).c_str(), size);
+    return true;
+}
+
 void Processor::Start(const std::wstring& exeDir, HWND wnd, UINT msg) {
     exeDir_ = exeDir;
     wnd_ = wnd;
@@ -858,17 +1027,10 @@ bool Processor::RunFfmpeg(const std::wstring& cmdline, std::string& output, DWOR
         SetHandleInformation(erd, HANDLE_FLAG_INHERIT, 0);
     }
     HANDLE nul = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, nullptr);
-    STARTUPINFOW si{};
-    si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESTDHANDLES;
-    si.hStdInput = nul;
-    si.hStdOutput = wr;
-    si.hStdError = progress ? ewr : wr;
     PROCESS_INFORMATION pi{};
     std::wstring cl = cmdline;
     // suspended until it is in the job object (kill on close: it never outlives the tray), then resumed
-    const BOOL ok = CreateProcessW(nullptr, &cl[0], nullptr, nullptr, TRUE, CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS | CREATE_SUSPENDED,
-                                   nullptr, nullptr, &si, &pi);
+    const BOOL ok = CreateChildOwnHandles(cl, nul, wr, progress ? ewr : wr, pi);
     const DWORD createErr = GetLastError();
     CloseHandle(wr);
     if (ewr) CloseHandle(ewr);

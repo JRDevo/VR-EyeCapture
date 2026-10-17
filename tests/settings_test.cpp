@@ -1,4 +1,4 @@
-// settings_test -- tests for the tray's Settings window (tray/settings.cpp). No GPU, no game.
+// settings_test -- tests for the tray's app window (tray/settings.cpp). No GPU, no game.
 //
 //   settings_test hotkeys
 //       every key name the window can produce round-trips through ParseHotkey (with every modifier combination), plus
@@ -669,7 +669,7 @@ HWND ChildByText(HWND d, const wchar_t* text) {
     return ctx.found;
 }
 int TestDrive(DWORD pid, bool leaveSlider) {
-    printf("drive the Settings window of tray pid %lu\n", pid);
+    printf("drive the app window of tray pid %lu\n", pid);
     FindCtx c{pid, nullptr};
     for (HWND w = nullptr; (w = FindWindowExW(HWND_MESSAGE, w, L"OpenXREyeCaptureTray", nullptr)) != nullptr;) {
         DWORD wp = 0;
@@ -683,9 +683,9 @@ int TestDrive(DWORD pid, bool leaveSlider) {
     { std::wstring e; install::SetAutostart(false, L"", e); }
     PostMessageW(c.found, WM_APP + 3, 0, 0);
     HWND d = WaitDialog(pid, true);
-    Check(d != nullptr, "Settings window opened");
+    Check(d != nullptr, "app window opened");
     if (!d) return 1;
-    printf("  window title '%s', hotkey field '%s', bitrate '%s'\n", "OpenXR-EyeCapture Settings", N(GetEdit(d, settings::ID_HOTKEY)).c_str(),
+    printf("  window title '%s', hotkey field '%s', bitrate '%s'\n", "OpenXR-EyeCapture", N(GetEdit(d, settings::ID_HOTKEY)).c_str(),
            N(GetEdit(d, settings::ID_BITRATE)).c_str());
     // "Capture...": F7 without modifiers
     SendMessageW(GetDlgItem(d, settings::ID_HOTKEY_PICK), BM_CLICK, 0, 0);
@@ -1040,7 +1040,7 @@ int TestDrive(DWORD pid, bool leaveSlider) {
     for (const Pick& pk : picks) {
         PostMessageW(c.found, WM_APP + 3, 0, 0);
         HWND d2 = WaitDialog(pid, true);
-        Check(d2 != nullptr, "Settings window reopened");
+        Check(d2 != nullptr, "app window reopened");
         if (!d2) break;
         const HWND mw = GetDlgItem(d2, settings::ID_MAXWIDTH);
         wchar_t item[96] = L"";
@@ -1064,7 +1064,7 @@ int TestDrive(DWORD pid, bool leaveSlider) {
     for (int round = 0; round < 2; ++round) {
         PostMessageW(c.found, WM_APP + 3, 0, 0);
         HWND d3 = WaitDialog(pid, true);
-        Check(d3 != nullptr, "Settings window reopened");
+        Check(d3 != nullptr, "app window reopened");
         if (!d3) break;
         const HWND pw = GetDlgItem(d3, settings::ID_POSTWHEN);
         wchar_t item[64] = L"";
@@ -1143,7 +1143,7 @@ int TestQueue(DWORD pid, int argc, wchar_t** argv) {
     const std::wstring action = argv[3];
     PostMessageW(tw, WM_APP + 3, 0, 0);
     HWND d = WaitDialog(pid, true);
-    Check(d != nullptr, "Settings window opened");
+    Check(d != nullptr, "app window opened");
     if (!d) return 1;
     Sleep(700);   // one queue-view refresh
     if ((action == L"add" || action == L"convert") && argc >= 6) {
@@ -1177,7 +1177,7 @@ int TestQueue(DWORD pid, int argc, wchar_t** argv) {
     return g_fail;
 }
 } // namespace
-// pp::PredictLayout (the arithmetic behind the conversion's log line AND the Settings layout preview) against the numbers the tray logged
+// pp::PredictLayout (the arithmetic behind the conversion's log line AND the window's layout preview) against the numbers the tray logged
 // for a Quest 3 recording ("input 8192x4630 = eyes 4096x4630; eye_crop 16:9 -> centre-cropped to 4096x2304; tb_half frame 7680x4320")
 // and docs/DEVELOPMENT.md (4:3 -> 5760x4320, none -> 4320x4884).
 int TestLayout() {
@@ -1204,6 +1204,15 @@ int TestLayout() {
     const pp::LayoutSize h = pp::PredictLayout(4096, 2000, Layout3d::TbHalf, EyeCrop::Wide169, 4320);
     Check(g.cw == h.cw && g.ch == h.ch && g.fw == h.fw && g.fh == h.fh && g.sw == h.sw && g.sh == h.sh && g.pw == g.cw && g.vx == 0,
           "4:3pad, eye already wider than 16:9: neither cropped nor padded (= 16:9's numbers)");
+    // frame-rate rule for the 60 fps YouTube video: 60 / 120 / 180 / 240 and 30 / 20 / 15 are even (+-1.5 fps), the rest is not
+    Check(!pp::UnevenFor60(60) && !pp::UnevenFor60(120) && !pp::UnevenFor60(180) && !pp::UnevenFor60(240) &&
+          !pp::UnevenFor60(30) && !pp::UnevenFor60(20) && !pp::UnevenFor60(15), "fps 15 / 20 / 30 / 60 / 120 / 180 / 240 are even");
+    Check(!pp::UnevenFor60(59.2) && !pp::UnevenFor60(61.5) && !pp::UnevenFor60(118.6) && !pp::UnevenFor60(0) && !pp::UnevenFor60(-1),
+          "fps within +-1.5 of an even rate, 0 (unknown) and negative are not flagged");
+    Check(pp::UnevenFor60(72) && pp::UnevenFor60(80) && pp::UnevenFor60(90) && pp::UnevenFor60(144) && pp::UnevenFor60(45) &&
+          pp::UnevenFor60(62) && pp::UnevenFor60(100) && pp::UnevenFor60(48), "fps 72 / 80 / 90 / 144 / 45 / 62 / 100 / 48 are uneven");
+    Check(pp::FpsWarningText(90).find(L"90 fps") == 0 && pp::FpsWarningText(120).empty() && pp::FpsWarningText(0).empty(),
+          "the warning text starts with the rate and is empty for an even / unknown rate");
     return g_fail;
 }
 int wmain(int argc, wchar_t** argv) {

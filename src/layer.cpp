@@ -11,6 +11,7 @@
 //                          -> Recorder::SubmitFrame, then forward
 //                          + in-headset recording indicator: one quad layer appended AFTER the capture (indicator.h)
 //                          + record_overlays: quad / cylinder / equirect / cube layers around the projection layer (overlay.h)
+//                          + live_share: the same L / R views to a live viewer (OBS plugin) when one is watching (live_share.h)
 //   xrCreateReferenceSpace / xrDestroySpace   track VIEW spaces (overlay layers in them follow the submitted head)
 //   xrDestroyInstance      clean up
 // Rule: any internal failure logs and passes through. The game's calls are always forwarded and their results returned
@@ -39,6 +40,8 @@
 #include "control.h"
 #include "frame_source.h"
 #include "indicator.h"
+#include "live_share.h"
+#include "live_share_proto.h"
 #include "log.h"
 #include "overlay.h"
 #include "recorder.h"
@@ -93,6 +96,7 @@ struct SessionData {
     GfxApi api = GfxApi::None;
     std::unique_ptr<IFrameSource> src;
     std::unique_ptr<Recorder> rec;
+    std::unique_ptr<LiveShare> live;     // live_share = 1, armed sessions with a frame source (idle until a consumer appears)
     bool armed = false;                 // tray running (or require_tray=0) when the session was created; else dormant
     bool faulted = false;
     uint64_t frames = 0;
@@ -152,6 +156,7 @@ std::wstring g_dllDir, g_exeName, g_logPath;
 double g_autoRecordSec = 0;
 double g_autoRecord2Sec = 0;   // test-only XR_EYE_CAPTURE_AUTORECORD2=<s>: a second autorecord ~1 s after the first stopped
 bool g_trayIpc = true;   // test-only XR_EYE_CAPTURE_TRAY_IPC=0: no control thread (no hotkey, nothing published to a tray)
+std::wstring g_liveShm;  // live share block name (EYECAP_LIVE_SHM_NAME; test-only override XR_EYE_CAPTURE_TEST_LIVE_SHM)
 
 // ------------------------------------------------------------------------------------------------ helpers
 
@@ -246,6 +251,9 @@ void InitProcess() {
     }
     LOGI("require_tray %s: %s", g_cfg.requireTray ? "1" : "0",
          g_cfg.requireTray ? "sessions are armed only while EyeCaptureTray.exe is running" : "sessions are always armed");
+    g_liveShm = EnvW(L"XR_EYE_CAPTURE_TEST_LIVE_SHM");
+    if (g_liveShm.empty()) g_liveShm = EYECAP_LIVE_SHM_NAME;
+    else LOGI("XR_EYE_CAPTURE_TEST_LIVE_SHM=%s: live share block name (test override)", elog::Narrow(g_liveShm).c_str());
 }
 
 void EnsureInit() { std::call_once(g_initOnce, InitProcess); }
@@ -892,21 +900,33 @@ void CaptureImpl(SessionData* sd, const XrFrameEndInfo* info) {
 
     const RecState rs = sd->rec->State();
     if (wantStart && rs != RecState::Starting && rs != RecState::Recording) StartRecording(sd, eyes[0], eyes[1]);
-    if (sd->rec->State() == RecState::Recording) {
-        // record_overlays: only frames with more than the projection layer do any overlay work
-        OverlayFrame ovf;
-        const OverlayFrame* ovp = nullptr;
-        if (info->layerCount > 1) {
-            if (g_cfg.recordOverlays) {
-                CollectOverlays(sd, info, projIdx, proj, g_cfg.swapEyes, ovf);
-                if (ovf.n) ovp = &ovf;
-            } else if (!sd->loggedOvOff) {
-                sd->loggedOvOff = true;
-                LOGI("overlay: record_overlays = 0 -- the %u other layer(s) of this frame (panels / overlays) are not recorded",
-                     info->layerCount - 1);
-            }
+    // record_overlays: only frames with more than the projection layer, while recording or while the live view composites
+    // overlays (LiveShare::WantsOverlays), do any overlay work; one collection serves both
+    const bool recording = sd->rec->State() == RecState::Recording;
+    OverlayFrame ovf;
+    const OverlayFrame* ovp = nullptr;
+    if (info->layerCount > 1 && (recording || (sd->live && sd->live->WantsOverlays()))) {
+        if (g_cfg.recordOverlays) {
+            CollectOverlays(sd, info, projIdx, proj, g_cfg.swapEyes, ovf);
+            if (ovf.n) ovp = &ovf;
+        } else if (!sd->loggedOvOff) {
+            sd->loggedOvOff = true;
+            LOGI("overlay: record_overlays = 0 -- the %u other layer(s) of this frame (panels / overlays) are not recorded",
+                 info->layerCount - 1);
         }
-        sd->rec->SubmitFrame(VideoClock(sd, info->displayTime), eyes[0], eyes[1], (int64_t)info->displayTime, ovp);
+    }
+    if (recording) sd->rec->SubmitFrame(VideoClock(sd, info->displayTime), eyes[0], eyes[1], (int64_t)info->displayTime, ovp);
+    // live_share: the same views to a live viewer (OBS plugin), re-projected like a recording (g_cfg.head, with the overlay
+    // layers when record_overlays = 1) unless the viewer asks for the raw eyes. Without a consumer this is a once-per-second
+    // probe.
+    if (sd->live) {
+        DXGI_FORMAT stage = DXGI_FORMAT_UNKNOWN, stageR = DXGI_FORMAT_UNKNOWN;
+        bool srgb = true, srgbR = true;
+        if (!sd->src->StageFormat(*eyes[0].sc, &stage, &srgb) || !sd->src->StageFormat(*eyes[1].sc, &stageR, &srgbR) || stage != stageR)
+            stage = DXGI_FORMAT_UNKNOWN;   // not shareable (logged by LiveShare when a consumer appears)
+        if (g_cfg.gamma == GammaMode::Srgb) srgb = true;
+        else if (g_cfg.gamma == GammaMode::Linear) srgb = false;
+        sd->live->Frame(eyes[0], eyes[1], stage, srgb, (int64_t)(info->displayTime / 100), g_cfg.head, g_cfg.recordOverlays, ovp);
     }
 }
 
@@ -942,7 +962,9 @@ bool IndicatorImpl(SessionData* sd, const XrFrameEndInfo* info, XrCompositionLay
     std::string msg;
     if (sd->indTracker.NeedsMessage(st)) msg = sd->rec->Status().message;
     const double now = (double)QpcNow100ns() * 1e-7;
-    const IndShow show = sd->indTracker.Update(st, msg, now);
+    // indicator_live: a live viewer receiving frames shows its own (steady violet) dot; recording wins
+    const bool live = sd->indCfg.live && sd->live && sd->live->Active();
+    const IndShow show = sd->indTracker.Update(st, msg, now, live);
     if (show == IndShow::Hidden) return false;                    // hidden: nothing at all is done
     if (info->layerCount + 1 > sd->maxLayers) {
         if (!sd->loggedIndLimit) {
@@ -1286,6 +1308,24 @@ XrResult XRAPI_CALL Hook_CreateSession(XrInstance instance, const XrSessionCreat
         if (sd->armed) {
             if (sd->api == GfxApi::None) LOGW("session has no known graphics binding (headless?) -- capture disabled");
             if (sd->src) sd->rec = std::make_unique<Recorder>();
+            if (sd->src && g_cfg.liveShare && (sd->api == GfxApi::D3D11 || sd->api == GfxApi::D3D12)) {
+                LiveShareParams lp;
+                lp.api = sd->api;
+                for (auto* q = reinterpret_cast<const XrBaseInStructure*>(ci->next); q; q = q->next) {
+                    if (q->type == XR_TYPE_GRAPHICS_BINDING_D3D11_KHR) {
+                        lp.dev11 = reinterpret_cast<const XrGraphicsBindingD3D11KHR*>(q)->device;
+                        break;
+                    }
+                    if (q->type == XR_TYPE_GRAPHICS_BINDING_D3D12_KHR) {
+                        lp.dev12 = reinterpret_cast<const XrGraphicsBindingD3D12KHR*>(q)->device;
+                        lp.queue12 = reinterpret_cast<const XrGraphicsBindingD3D12KHR*>(q)->queue;
+                        break;
+                    }
+                }
+                lp.game = g_exeName;
+                lp.shmName = g_liveShm;
+                sd->live = std::make_unique<LiveShare>(lp);
+            }
             LOGI("session %p created: graphics API %s -> capture %s", (void*)*session, GfxApiName(sd->api),
                  sd->src ? "AVAILABLE" : "DISABLED");
             sd->indCfg = g_cfg.indicator;
@@ -1295,8 +1335,9 @@ XrResult XRAPI_CALL Hook_CreateSession(XrInstance instance, const XrSessionCreat
                     sd->maxLayers = sp.graphicsProperties.maxLayerCount;
             }
             if (sd->rec && sd->indCfg.enabled)
-                LOGI("indicator: on (vr_indicator = 1) -- dot in the headset while recording at (%.2f, %.2f, %.2f) m view space, "
-                     "%.3f m, opacity %.2f%s", sd->indCfg.x, sd->indCfg.y, sd->indCfg.z, sd->indCfg.size, sd->indCfg.opacity,
+                LOGI("indicator: on (vr_indicator = 1) -- dot in the headset while recording%s at (%.2f, %.2f, %.2f) m view "
+                     "space, %.3f m, opacity %.2f%s", sd->indCfg.live && sd->live ? " and (violet) while a live viewer receives frames" : "",
+                     sd->indCfg.x, sd->indCfg.y, sd->indCfg.z, sd->indCfg.size, sd->indCfg.opacity,
                      sd->api == GfxApi::D3D11 ? "" : " (D3D11 only for now)");
             else if (sd->rec)
                 LOGI("indicator: off (vr_indicator = 0)");
@@ -1364,6 +1405,7 @@ XrResult XRAPI_CALL Hook_DestroySession(XrSession session) {
             }
             if (sd->armed) PublishFinalStatus(*sd, finalized);
         }
+        sd->live.reset();   // stops a live share (its teardown waits for the last copy on the game's GPU)
         LOGI("session %p destroyed after %llu frames%s", (void*)session, (unsigned long long)sd->frames,
              sd->armed ? "" : " (dormant)");
         const bool wasArmed = sd->armed;

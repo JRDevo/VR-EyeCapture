@@ -658,3 +658,98 @@ void OverlayCompositor::Release() {
     loggedScratch_ = false;
     debugDraws_ = 24;
 }
+
+void OverlayPack(const OverlayFrame& ov, uint32_t readyMask, uint32_t failedMask, OverlayPacked& out, bool& loggedFull,
+                 const char* who, const char* consequence) {
+    out.nCopy = 0;
+    out.nDraw = out.nBehind = 0;
+    out.layersIn = out.notReady = out.full = out.setupFailed = 0;
+    out.wantBits = 0;
+    const uint32_t n = std::min<uint32_t>(ov.n, kMaxOverlays);
+    out.layersIn = n;
+    struct Shelf { UINT cx = 0, cy = 0, rowH = 0; } shelf[kOverlayFamilies];
+    const UINT A = kOverlayAtlasSize;
+    for (uint32_t i = 0; i < n; ++i) {
+        const OverlayLayer& la = ov.layer[i];
+        if (la.family < 0 || la.family >= kOverlayFamilies) continue;
+        const uint32_t bit = 1u << la.family;
+        if (failedMask & bit) { ++out.setupFailed; continue; }
+        if (!(readyMask & bit)) { out.wantBits |= bit; ++out.notReady; continue; }
+        const bool cube = la.kind == OverlayKind::Cube;
+        const UINT bw = cube ? 3 * la.w : la.w, bh = cube ? 2 * la.h : la.h, nc = cube ? 6 : 1;
+        OverlayDraw& d = out.draws[out.nDraw];
+        d.l = la;
+        bool placed = false;
+        for (uint32_t j = 0; j < out.nDraw && !placed; ++j) {   // the same sub-image again (e.g. one per eye): reuse it
+            const OverlayLayer& o = out.draws[j].l;
+            if (o.image == la.image && o.arrayIndex == la.arrayIndex && o.x == la.x && o.y == la.y && o.w == la.w &&
+                o.h == la.h && (o.kind == OverlayKind::Cube) == cube) {
+                d.ax = out.draws[j].ax; d.ay = out.draws[j].ay; placed = true;
+            }
+        }
+        if (!placed) {
+            Shelf& s = shelf[la.family];
+            if (s.cx + bw > A) { s.cx = 0; s.cy += s.rowH; s.rowH = 0; }
+            if (bw > A || s.cy + bh > A || out.nCopy + nc > kMaxOverlayCopies) {
+                ++out.full;
+                if (!loggedFull) {
+                    loggedFull = true;
+                    LOGW("%s: overlay sub-image %ux%u (%s) does not fit the %ux%u %s overlay atlas next to this frame's "
+                         "other overlays -- %s", who, bw, bh, OverlayKindName(la.kind), A, A, OverlayFamilyName(la.family),
+                         consequence);
+                }
+                continue;
+            }
+            d.ax = s.cx; d.ay = s.cy;
+            for (UINT f = 0; f < nc; ++f) {
+                OverlayCopy& c = out.copies[out.nCopy++];
+                c.image = la.image; c.sc = la.sc; c.scKey = la.scKey; c.family = la.family;
+                c.arrayIndex = la.arrayIndex + f;
+                c.x = la.x; c.y = la.y; c.w = la.w; c.h = la.h;
+                c.dstX = s.cx + (f % 3) * la.w; c.dstY = s.cy + (f / 3) * la.h;
+            }
+            s.cx += bw;
+            s.rowH = std::max(s.rowH, bh);
+        }
+        if (la.behind) ++out.nBehind;   // behind layers come first in ov.layer
+        ++out.nDraw;
+    }
+}
+
+void OverlayAtlasSet::MakePending(IFrameSource* src, ID3D11Device* dev, const std::vector<ComPtr<ID3D11Texture2D>>& ring,
+                                  DXGI_FORMAT fmt, bool srgb, const char* who, const char* notWhat, const char* devName,
+                                  const char* before) {
+    const uint32_t pending = want.load() & ~(ready.load() | failed.load());
+    if (!pending) return;
+    // view / shader / texture creation is free-threaded: nothing touches the immediate context here
+    if (!comp.Ready() && !comp.Init(dev, ring, fmt, srgb)) {
+        failed.fetch_or((1u << kOverlayFamilies) - 1);
+        LOGE("%s: overlay compositor setup failed -- overlays are not %s", who, notWhat);
+        return;
+    }
+    const UINT A = kOverlayAtlasSize, count = (UINT)ring.size();
+    for (int f = 0; f < kOverlayFamilies; ++f) {
+        const uint32_t bit = 1u << f;
+        if (!(pending & bit)) continue;
+        // typed member of the family (D3D11 cannot open a TYPELESS D3D12 shared resource; the shader decodes sRGB itself)
+        const DXGI_FORMAT typed = OverlayFamilyFormat(f);
+        const bool ok = typed != DXGI_FORMAT_UNKNOWN && src->CreateOverlayAtlas(dev, A, A, typed, count, f, atlas_[f]) &&
+                        comp.AddAtlas(f, atlas_[f], typed);
+        if (!ok) {
+            failed.fetch_or(bit);
+            LOGE("%s: overlay atlas setup failed (%s) -- layers of that format family are not %s", who, DxgiFormatName(typed),
+                 notWhat);
+            continue;
+        }
+        const double mb = (double)A * A * OverlayFamilyBytes(f) * count / (1024.0 * 1024.0);
+        LOGI("%s: overlays: %s atlas %ux%u %s x %u ring slots (+%.0f MB VRAM, shared with the game device) + compositor on "
+             "the %s; blended in %s into the ring before %s", who, OverlayFamilyName(f), A, A, DxgiFormatName(typed), count,
+             mb, devName, srgb ? "linear light (sRGB decode / encode in the shader)" : "linear light", before);
+        ready.fetch_or(bit, std::memory_order_release);
+    }
+}
+
+void OverlayAtlasSet::Release() {
+    comp.Release();
+    for (auto& a : atlas_) a.clear();
+}

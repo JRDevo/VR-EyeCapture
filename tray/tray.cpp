@@ -3,16 +3,16 @@
 //
 // Tray icon: grey = no game, green = game running (ready), red = recording, amber = starting / finalizing / failed,
 // blue = converting a finished recording (post-processing, see tray/postprocess.h).
-// Left-click: the Settings window (all settings + the conversion queue / progress). Right-click menu: Start / Stop
+// Left-click: the app window (all settings + the conversion queue / progress). Right-click menu: Start / Stop
 // recording, Open captures folder, Convert last recording now, Convert a recording... (standard Open dialog, one or more MP4s, queued forced like "Convert now",
 // each with config.ini's conversion settings as its format snapshot), Open log,
-// Settings..., Edit config, Register / Unregister for VR games..., Exit.
+// Open OpenXR-EyeCapture (bold: = left-click), Edit config, Register / Unregister for VR games..., Exit.
 // While a conversion runs, the menu starts with a greyed info line ("Converting <file> (8K) 42% - about 6 min left"),
 // "Pause conversion" / "Resume conversion" (suspends / resumes the ffmpeg; the ETA ignores paused time) and
 // "Cancel conversion" (ends the ffmpeg, deletes that step's partial output, keeps the MP4, skips the rest of the job;
 // queued jobs continue). See pp::Processor::TogglePause / Cancel. Exit while converting does the same cleanup (Stop).
 // Test hooks (the menu uses TrackPopupMenu(TPM_RETURNCMD), so WM_COMMAND cannot drive it): post to the message-only
-// window of class "OpenXREyeCaptureTray": WM_APP+3 = Settings, WM_APP+5 = pause / resume toggle, WM_APP+6 = cancel,
+// window of class "OpenXREyeCaptureTray": WM_APP+3 = open the window, WM_APP+5 = pause / resume toggle, WM_APP+6 = cancel,
 // WM_APP+7 = "Convert last recording now" (the menu items call the same code).
 // Test mode (EYECAP_TRAY_TEST_SHM): balloons are logged ("tray: balloon [title] text"), never shown on the desktop.
 // Registration (tray/install.h): at start the tray removes its own HKCU duplicates and checks HKLM; when the layer is
@@ -23,16 +23,22 @@
 // while an OpenXR session is live (the layer releases the status block -- ownerPid 0, ECS_NONE -- when the game destroys
 // its last session, even if the process keeps running); game_exit (default) = also hold while the process that made a
 // queued recording is still alive; manual = a hold that never clears: recordings are queued and wait until the user starts
-// them (Settings window "Conversions" -> Start / Start all / Run now, "Convert a recording...", "Convert last recording now").
-// Settings "Add to queue..." jobs wait for Start / Start all whatever post_when says (pp::Processor userHeld); so does every
+// them (the window's "Conversions" -> Start / Start all / Run now, "Convert a recording...", "Convert last recording now").
+// "Add to queue..." jobs wait for Start / Start all whatever post_when says (pp::Processor userHeld); so does every
 // job restored from queue.json after a tray restart.
 // See UpdateHold() and pp::Processor::SetHold. Switching to manual keeps the queue; its jobs simply stay held (a running
-// non-forced job is suspended, like any hold) and are listed in the Settings window's queue view.
+// non-forced job is suspended, like any hold) and are listed in the window's queue view.
 // Start it BEFORE the game: the layer decides at xrCreateSession whether to arm (config require_tray=0 = always arm).
 #include <windows.h>
 #include <objbase.h>
 #include <shellapi.h>
 #include <commdlg.h>
+#include <commctrl.h>   // LoadIconMetric
+#include <shlobj.h>
+#include <atomic>
+#include <mutex>
+#include <thread>
+#include <deque>
 #include <cmath>
 #include <map>
 #include <set>
@@ -48,24 +54,28 @@
 namespace {
 const UINT WM_TRAY = WM_APP + 1;
 const UINT WM_PP = WM_APP + 2;     // the post-processing worker changed state / queued a notice
-const UINT WM_OPEN_SETTINGS = WM_APP + 3;   // also posted by tests/settings_test.exe to open the Settings window
+const UINT WM_OPEN_SETTINGS = WM_APP + 3;   // also posted by tests/settings_test.exe to open the app window
 const UINT WM_CHECK_REG = WM_APP + 4;       // posted once at start: registration prompt (inside the message loop)
 const UINT WM_PAUSE_JOB = WM_APP + 5;       // pause / resume the running conversion (= the menu item; tests post it)
 const UINT WM_CANCEL_JOB = WM_APP + 6;      // cancel the running conversion (= the menu item; tests post it)
 const UINT WM_CONVERT_LAST = WM_APP + 7;    // "Convert last recording now" (= the menu item; tests post it)
+const UINT WM_TAG3D = WM_APP + 8;           // a "Tag a video as 3D" thread has a result to show (balloon)
 const UINT kTimer = 1;
 const UINT kTipTimer = 2;     // one-shot: end of the "settings saved" tooltip
 enum : UINT { ID_TOGGLE = 100, ID_FOLDER, ID_CONVERT, ID_LOG, ID_SETTINGS, ID_CONFIG, ID_EXIT, ID_REGISTER, ID_UNREGISTER,
-               ID_CONVERT_PICK, ID_JOB_INFO, ID_JOB_PAUSE, ID_JOB_CANCEL };
+               ID_CONVERT_PICK, ID_JOB_INFO, ID_JOB_PAUSE, ID_JOB_CANCEL, ID_TAG3D_SBS, ID_TAG3D_TB };
 const wchar_t kAppTitle[] = L"OpenXR-EyeCapture";
+// tray icon frames (resource 101 + value); recording and converting alternate A / B (lens colours swapped) every 0.5 s
+enum : int { kIcoNoGame, kIcoReady, kIcoRecA, kIcoRecB, kIcoBusy, kIcoConvA, kIcoConvB, kIcoCount };
 
 HINSTANCE      g_inst;
 HWND           g_wnd;
 NOTIFYICONDATAW g_nid{};
 EyeCapShared*  g_shm = nullptr;
 HANDLE         g_map = nullptr;
-HICON          g_icons[5] = {};   // 0 grey, 1 green, 2 red, 3 amber, 4 blue (converting)
+HICON          g_icons[kIcoCount] = {};   // LoadTrayIcon: no game, ready, recording A / B, busy (amber), converting A / B
 int            g_iconIdx = -1;
+bool           g_blinkOdd = false;             // the tray icon's A / B frame (flipped by the 0.5 s timer)
 EyeCapShared   g_st{};
 bool           g_live = false;    // a live owner exists
 uint32_t       g_prevState = ECS_NONE;
@@ -81,7 +91,8 @@ struct Pending { ULONGLONG size = 0; ULONGLONG stableSince = 0; std::wstring pat
 std::map<std::wstring, Pending> g_pending;         // scan candidates waiting for their size to settle
 bool           g_wasLive = false;
 bool           g_testMode = false;
-std::wstring   g_savedTip;                         // temporary tooltip after Settings -> Save
+DWORD          g_fpsBalloonPid = 0;                // the game process whose uneven-frame-rate balloon was shown (once per session)
+std::wstring   g_savedTip;                         // temporary tooltip after Save in the window
 ULONGLONG      g_savedTipUntil = 0;
 ULONGLONG      g_lastScan = 0;
 // Registration of the layer (tray/install.h). Off in the EYECAP_TRAY_TEST_SHM test mode unless EYECAP_TRAY_TEST_REG=1.
@@ -96,43 +107,19 @@ pp::JobFormat  g_savedFmt;                         // config.ini's conversion ke
 struct Proc { DWORD pid = 0; HANDLE h = nullptr; };
 Proc           g_lastOwner;                        // the last live owner of the status block (ownerPid is 0 once released)
 std::vector<Proc> g_producers;
+// "Tag a video as 3D" results (tag thread -> UI thread): balloons are shown on the UI thread (WM_TAG3D).
+// Heap objects that are never freed on purpose: the detached tag thread may still run while wWinMain returns and the CRT destroys
+// statics. g_tagQuit (set in WM_DESTROY) stops it from posting to the dead window.
+std::mutex&    g_tagM = *new std::mutex;
+std::deque<pp::Notice>& g_tagNotices = *new std::deque<pp::Notice>;
+std::atomic<bool> g_tagQuit{false};
 
-HICON MakeDotIcon(COLORREF c) {
-    const int s = 32;
-    BITMAPV5HEADER bh{};
-    bh.bV5Size = sizeof(bh);
-    bh.bV5Width = s;
-    bh.bV5Height = -s;
-    bh.bV5Planes = 1;
-    bh.bV5BitCount = 32;
-    bh.bV5Compression = BI_BITFIELDS;
-    bh.bV5RedMask = 0x00FF0000; bh.bV5GreenMask = 0x0000FF00; bh.bV5BlueMask = 0x000000FF; bh.bV5AlphaMask = 0xFF000000;
-    void* bits = nullptr;
-    HDC dc = GetDC(nullptr);
-    HBITMAP color = CreateDIBSection(dc, (BITMAPINFO*)&bh, DIB_RGB_COLORS, &bits, nullptr, 0);
-    ReleaseDC(nullptr, dc);
-    if (!color || !bits) return nullptr;
-    auto* px = (uint32_t*)bits;
-    const double cx = (s - 1) / 2.0, r = s / 2.0 - 2;
-    for (int y = 0; y < s; ++y) {
-        for (int x = 0; x < s; ++x) {
-            const double d = sqrt((x - cx) * (x - cx) + (y - cx) * (y - cx));
-            double a = r + 0.5 - d;                         // anti-aliased edge
-            a = a < 0 ? 0 : (a > 1 ? 1 : a);
-            const bool ring = d > r - 2.5;                  // dark rim
-            const uint32_t rr = ring ? GetRValue(c) / 2 : GetRValue(c);
-            const uint32_t gg = ring ? GetGValue(c) / 2 : GetGValue(c);
-            const uint32_t bb = ring ? GetBValue(c) / 2 : GetBValue(c);
-            const uint32_t al = (uint32_t)(a * 255);
-            px[y * s + x] = (al << 24) | ((rr * al / 255) << 16) | ((gg * al / 255) << 8) | (bb * al / 255);
-        }
-    }
-    HBITMAP mask = CreateBitmap(s, s, 1, 1, nullptr);
-    ICONINFO ii{TRUE, 0, 0, mask, color};
-    HICON icon = CreateIconIndirect(&ii);
-    DeleteObject(color);
-    DeleteObject(mask);
-    return icon;
+// The tray-area icons: the logo mark with a status dot, one .ico per state (tray/icons, resources 101.. in tray/tray.rc,
+// made by scripts/make_logo.py), loaded at the small-icon size of the current DPI.
+HICON LoadTrayIcon(int i) {
+    HICON h = nullptr;
+    if (FAILED(LoadIconMetric(g_inst, MAKEINTRESOURCEW(101 + i), LIM_SMALL, &h))) h = LoadIconW(nullptr, IDI_APPLICATION);
+    return h;
 }
 
 std::wstring ExeDir() {
@@ -232,9 +219,9 @@ void ClearProducers() {
     g_producers.clear();
 }
 
-// Shown after "converts " / "resumes " in the tooltip, the menu and the Settings queue view.
+// Shown after "converts " / "resumes " in the tooltip, the menu and the window's queue view.
 const wchar_t* HoldReason() {
-    return g_postWhen == PostWhen::SessionEnd ? L"when VR stops" : g_postWhen == PostWhen::Manual ? L"when you say (Settings)" : L"when the game closes";
+    return g_postWhen == PostWhen::SessionEnd ? L"when VR stops" : g_postWhen == PostWhen::Manual ? L"when you say" : L"when the game closes";
 }
 
 // Computes the hold from post_when and the live status and hands it to the worker (it logs the on / off transitions).
@@ -251,9 +238,9 @@ void UpdateHold() {
 // Queue a finished recording for post-processing (MP4 only; a no-op when post_mkv, post_flat and post_yt8k are all 0).
 // Automatic requests (not forced, no format, not held by the user) are deduplicated by full path for the whole tray session
 // (status message vs fallback scan); they have no format snapshot (config.ini at job start).
-// Forced requests ("Convert last recording now", "Convert a recording...", Settings "Start") ignore post_when: they run
+// Forced requests ("Convert last recording now", "Convert a recording...", the window's "Start") ignore post_when: they run
 // next. post_when = manual: automatic recordings are queued and stay held (see UpdateHold) until one of those forces them.
-// fmt = the job's own format snapshot (pp::Processor). userHeld = Settings "Add to queue...": waits for Start / Start all.
+// fmt = the job's own format snapshot (pp::Processor). userHeld = "Add to queue...": waits for Start / Start all.
 void QueueRecording(const std::wstring& mp4, bool force, const pp::JobFormat* fmt = nullptr, bool userHeld = false) {
     const bool automatic = !force && !fmt && !userHeld;
     if (automatic) {
@@ -464,6 +451,14 @@ void Refresh() {
         PollPending();
     }
 
+    const bool fpsUneven = g_live && pp::UnevenFor60((double)g_st.fps);
+    {
+        static int s_prevUneven = -1;
+        if (s_prevUneven != (int)fpsUneven) {
+            s_prevUneven = (int)fpsUneven;
+            if (fpsUneven) LOGI("tray: game frame rate %u fps is uneven for 60 fps YouTube video", g_st.fps);
+        }
+    }
     const pp::State job = g_pp.GetState();
     int idx = 0;
     if (state == ECS_READY) idx = 1;
@@ -514,10 +509,10 @@ void Refresh() {
             jobKey += q;
         }
     } else if (waiting && job.userHeld == job.queued) {
-        jobLine = std::to_wstring(job.queued) + (job.queued == 1 ? L" recording waits" : L" recordings wait") + L" for you (Settings: Start)";
+        jobLine = std::to_wstring(job.queued) + (job.queued == 1 ? L" recording waits" : L" recordings wait") + L" for you (click Start in the window)";
     } else if (waiting) {
         jobLine = std::to_wstring(job.queued) + (job.queued == 1 ? L" recording waiting" : L" recordings waiting") +
-                  L" -- converts " + (job.held ? job.holdReason : std::wstring(L"when you start it (Settings)"));
+                  L" -- converts " + (job.held ? job.holdReason : std::wstring(L"when you start it in the window"));
     } else if (!job.lastLine.empty()) {
         jobLine = job.lastLine;
     }
@@ -534,6 +529,14 @@ void Refresh() {
         const std::wstring withReg = std::wstring(L"Not registered for VR games (right-click: Register)\n") + full;
         wcsncpy_s(full, withReg.c_str(), _TRUNCATE);
     }
+    // uneven game frame rate: a short tooltip line (dropped first when the 127 characters are full)
+    if (fpsUneven) {
+        const std::wstring w = pp::FpsWarningText((double)g_st.fps, true);
+        if (wcslen(full) + 1 + w.size() <= 127) {
+            const std::wstring withFps = std::wstring(full) + L"\n" + w;
+            wcsncpy_s(full, withFps.c_str(), _TRUNCATE);
+        }
+    }
     static int s_prevNotReg = -1;
     const bool logRegTip = s_prevNotReg != (int)notReg && g_regEnabled;
     s_prevNotReg = (int)notReg;
@@ -541,7 +544,12 @@ void Refresh() {
     g_nid.uFlags = NIF_TIP | NIF_ICON;
     wcsncpy_s(g_nid.szTip, full, _TRUNCATE);     // szTip holds 127 characters
     if (logRegTip) LOGI("tray: tooltip now: %s", elog::Narrow(g_nid.szTip).c_str());
-    g_nid.hIcon = g_icons[idx];
+    // idx is the state; the icon frame alternates while recording / converting (the timer refreshes every 0.5 s)
+    const bool odd = g_blinkOdd;
+    const bool converting = job.busy && !job.paused && !job.userPaused;
+    const int frame = idx == 0 ? kIcoNoGame : idx == 1 ? kIcoReady : idx == 2 ? (odd ? kIcoRecB : kIcoRecA)
+                    : idx == 3 ? kIcoBusy : (converting && odd ? kIcoConvB : kIcoConvA);
+    g_nid.hIcon = g_icons[frame];
     // balloon: a conversion result wins over "Recording saved"
     pp::Notice notice;
     if (g_pp.PopNotice(notice)) {
@@ -557,6 +565,12 @@ void Refresh() {
                    cut ? std::wstring(L"Recording stopped: the output drive is almost full.") : std::wstring(g_st.message), lowDisk, lowDisk);
     } else if (g_live && state == ECS_FAILED && g_prevState != ECS_FAILED && g_st.message[0]) {
         SetBalloon(L"Recording not started", g_st.message, true);   // e.g. the low-space guard (src/disk.h)
+    } else if (g_live && state == ECS_RECORDING && fpsUneven && g_fpsBalloonPid != g_st.ownerPid) {
+        // once per game session (not per recording): the 60 fps YouTube video of an uneven frame rate stutters
+        g_fpsBalloonPid = g_st.ownerPid;
+        SetBalloon(L"Frame rate " + std::to_wstring(g_st.fps) + L" fps",
+                   L"YouTube plays at most 60 fps, so the video of this recording will stutter a little. Set the headset (Virtual "
+                   L"Desktop) to 120 Hz, or 60 Hz, for smooth video.", false);
     }
     g_prevState = state;
     Shell_NotifyIconW(NIM_MODIFY, &g_nid);
@@ -605,7 +619,7 @@ void ApplyInputBindings(const char* why) {
         g_postWhen = cfg.postWhen;
         LOGI("tray: post_when = %s (%s)", PostWhenName(g_postWhen), g_postWhen == PostWhen::Now ? "convert recordings right away"
              : g_postWhen == PostWhen::SessionEnd ? "convert when no VR session is live"
-             : g_postWhen == PostWhen::Manual ? "never convert on its own; recordings wait until started from Settings / the tray menu"
+             : g_postWhen == PostWhen::Manual ? "never convert on its own; recordings wait until started from the window / the tray menu"
              : "convert when the game that made the recording has closed");
     }
     std::wstring list;
@@ -623,7 +637,7 @@ void CheckConfigChanged() {
     ApplyInputBindings("config.ini changed");
 }
 
-// Settings -> Save: log the changed keys, show "settings saved" in the tooltip for 5 s.
+// Save in the window: log the changed keys, show "settings saved" in the tooltip for 5 s.
 void OnSettingsSaved(const std::vector<std::wstring>& changed) {
     {
         // apply log_level now (e.g. "none" silences tray.log without a restart); the saved file passed validation
@@ -860,7 +874,8 @@ void ConvertLast(const char* from) {
 // The MP4s the user picks: the standard multi-select Open dialog in the captures folder (`title`). Test mode
 // (EYECAP_TRAY_TEST_SHM) with EYECAP_TRAY_TEST_PICK=<file>: no dialog, the picked paths are that file's lines (UTF-8, read at
 // every pick, so a test can change them between clicks).
-std::vector<std::wstring> PickMp4s(HWND owner, const char* from, const wchar_t* title) {
+// video = "Tag a video as 3D": *.mkv / *.mp4 / *.mov, starting in the user's Videos folder.
+std::vector<std::wstring> PickMp4s(HWND owner, const char* from, const wchar_t* title, bool video = false) {
     std::vector<std::wstring> files;
     wchar_t pickFile[MAX_PATH] = L"";
     if (g_testMode && GetEnvironmentVariableW(L"EYECAP_TRAY_TEST_PICK", pickFile, MAX_PATH) > 0) {
@@ -885,12 +900,19 @@ std::vector<std::wstring> PickMp4s(HWND owner, const char* from, const wchar_t* 
         LOGI("tray: %s (%s): EYECAP_TRAY_TEST_PICK -> %zu file(s), no dialog (test)", elog::Narrow(title).c_str(), from, files.size());
         return files;
     }
-    const std::wstring dir = CapturesDir();
+    std::wstring dir;
+    if (video) {
+        PWSTR vp = nullptr;
+        if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Videos, 0, nullptr, &vp)) && vp) dir = vp;
+        CoTaskMemFree(vp);
+    }
+    if (dir.empty()) dir = CapturesDir();
     std::vector<wchar_t> buf(64 * 1024, L'\0');
     OPENFILENAMEW ofn{};
     ofn.lStructSize = sizeof(ofn);
     ofn.hwndOwner = owner;
-    ofn.lpstrFilter = L"MP4 recordings (*.mp4)\0*.mp4\0";   // recordings only: PickAndQueue refuses anything else
+    ofn.lpstrFilter = video ? L"Video files (*.mkv;*.mp4;*.mov)\0*.mkv;*.mp4;*.mov\0"
+                            : L"MP4 recordings (*.mp4)\0*.mp4\0";   // recordings only: PickAndQueue refuses anything else
     ofn.lpstrFile = buf.data();
     ofn.nMaxFile = (DWORD)buf.size();
     ofn.lpstrInitialDir = dir.c_str();
@@ -911,8 +933,8 @@ std::vector<std::wstring> PickMp4s(HWND owner, const char* from, const wchar_t* 
     return files;
 }
 
-// "Convert a recording..." (tray menu, and the Settings window's button) / "Add to queue..." (Settings window): one or more
-// MP4s, each queued with the format snapshot `fmt` (tray menu: config.ini's current values; Settings: the values the window
+// "Convert a recording..." (tray menu, and the window's button) / "Add to queue..." (the window): one or more
+// MP4s, each queued with the format snapshot `fmt` (tray menu: config.ini's current values; window: the values the window
 // shows). start = forced (runs next, ignores post_when); else held by the user until Start / Start all.
 void PickAndQueue(HWND owner, const char* from, const pp::JobFormat& fmt, bool start) {
     const std::vector<std::wstring> files = PickMp4s(owner, from, start ? L"Convert a recording" : L"Add recordings to the queue");
@@ -938,7 +960,43 @@ void PickAndQueue(HWND owner, const char* from, const pp::JobFormat& fmt, bool s
     Refresh();
 }
 
-// The Settings window's "Conversions" group and its "Convert a recording..." / "Add to queue..." buttons (tray/settings.h QueueHooks).
+// Tag menu: "Tag a video as 3D" -> "Side by side..." / "Top / bottom...". The picked videos are remuxed one after the other on a
+// background thread (pp::Tag3d: -c copy, <name>_3D.mkv with the Matroska stereo_mode tag); it neither uses nor disturbs the
+// conversion queue. Each result becomes a balloon (UI thread, WM_TAG3D). A thread still running when the tray exits is
+// killed with the process (its ffmpeg is in a kill-on-close job object; a half-written .part may stay).
+void TagAsStereo(HWND owner, const char* from, bool topBottom) {
+    const wchar_t* title = topBottom ? L"Tag a video as 3D (top / bottom)" : L"Tag a video as 3D (side by side)";
+    const std::vector<std::wstring> files = PickMp4s(owner, from, title, true);
+    if (files.empty()) return;
+    Config cfg;
+    LoadConfig(g_exeDir, cfg);
+    const std::wstring exeDir = g_exeDir;
+    const HWND wnd = g_wnd;
+    LOGI("tray: tag as 3D (%s): %zu file(s), %s", from, files.size(), topBottom ? "top_bottom" : "left_right");
+    std::thread([files, cfg, exeDir, topBottom, wnd] {
+        for (const auto& f : files) {
+            std::wstring out, why;
+            pp::Notice n;
+            if (pp::Tag3d(cfg, exeDir, f, topBottom, out, why)) {
+                n.title = kAppTitle;
+                n.text = L"Tagged as 3D: " + out.substr(out.find_last_of(L"\\/") + 1);
+            } else {
+                const size_t sl = f.find_last_of(L"\\/");
+                n.title = L"Tag as 3D failed";
+                n.text = (sl == std::wstring::npos ? f : f.substr(sl + 1)) + L": " + why;
+                n.error = true;
+            }
+            if (g_tagQuit) return;   // the tray is exiting: nobody shows the balloon
+            {
+                std::lock_guard<std::mutex> lk(g_tagM);
+                g_tagNotices.push_back(n);
+            }
+            PostMessageW(wnd, WM_TAG3D, 0, 0);
+        }
+    }).detach();
+}
+
+// The window's "Conversions" group and its "Convert a recording..." / "Add to queue..." buttons (tray/settings.h QueueHooks).
 void InstallQueueHooks() {
     settings::QueueHooks h;
     h.state = [] { return g_pp.GetState(); };
@@ -963,6 +1021,7 @@ void InstallQueueHooks() {
         if (!g_pp.Remove(id)) LOGI("tray: remove (settings): job %llu is no longer waiting", id);
         Refresh();
     };
+    h.gameFps = [] { return g_live ? g_st.fps : 0u; };
     settings::SetQueueHooks(h);
 }
 
@@ -999,8 +1058,15 @@ void ShowMenu() {
     AppendMenuW(m, MF_STRING, ID_FOLDER, L"Open captures folder");
     AppendMenuW(m, MF_STRING, ID_CONVERT, L"Convert last recording now");
     AppendMenuW(m, MF_STRING, ID_CONVERT_PICK, L"Convert a recording...");
+    {
+        HMENU tag = CreatePopupMenu();   // destroyed with the parent menu
+        AppendMenuW(tag, MF_STRING, ID_TAG3D_SBS, L"Side by side...");
+        AppendMenuW(tag, MF_STRING, ID_TAG3D_TB, L"Top / bottom...");
+        AppendMenuW(m, MF_POPUP, (UINT_PTR)tag, L"Tag a video as 3D");
+    }
     AppendMenuW(m, MF_STRING, ID_LOG, L"Open log");
-    AppendMenuW(m, MF_STRING, ID_SETTINGS, L"Settings...");
+    AppendMenuW(m, MF_STRING, ID_SETTINGS, L"Open OpenXR-EyeCapture");
+    SetMenuDefaultItem(m, ID_SETTINGS, FALSE);   // bold: left-click on the icon does the same
     AppendMenuW(m, MF_STRING, ID_CONFIG, L"Edit config");
     if (g_regEnabled) {
         AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
@@ -1032,6 +1098,10 @@ void ShowMenu() {
     case ID_CONVERT_PICK:
         LoadConfig(g_exeDir, cfg);
         PickAndQueue(g_wnd, "menu", pp::FormatFromConfig(cfg), true);   // config.ini's current conversion settings
+        break;
+    case ID_TAG3D_SBS:
+    case ID_TAG3D_TB:
+        TagAsStereo(g_wnd, "menu", cmd == ID_TAG3D_TB);
         break;
     case ID_JOB_PAUSE:
         PauseJob("menu");
@@ -1074,6 +1144,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         if (wp == kTipTimer) { KillTimer(h, kTipTimer); g_savedTip.clear(); Refresh(); LOGI("tray: tooltip restored: %s", elog::Narrow(g_nid.szTip).c_str()); return 0; }
         if (g_regEnabled && !g_regBusy && GetTickCount64() - g_regQueried >= 10000) QueryReg(false);   // cheap registry read
         CheckConfigChanged();   // one GetFileAttributesEx: controller / wheel hotkeys follow config.ini edits
+        g_blinkOdd = !g_blinkOdd;
         Refresh();
         return 0;
     case WM_CHECK_REG:
@@ -1081,8 +1152,21 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_PP:
         Refresh();
-        settings::NotifyQueueChanged();   // the Settings window's queue view (no-op when it is closed)
+        settings::NotifyQueueChanged();   // the window's queue view (no-op when it is closed)
         return 0;
+    case WM_TAG3D: {
+        pp::Notice n;
+        for (;;) {
+            {
+                std::lock_guard<std::mutex> lk(g_tagM);
+                if (g_tagNotices.empty()) break;
+                n = g_tagNotices.front();
+                g_tagNotices.pop_front();
+            }
+            Balloon(n.title, n.text, n.error);
+        }
+        return 0;
+    }
     case WM_OPEN_SETTINGS:
         OpenSettings();
         return 0;
@@ -1098,11 +1182,12 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         ConvertLast("WM_APP+7");
         return 0;
     case WM_TRAY:
-        // left click: the Settings window (conversion queue / progress, all settings); right click: the menu
+        // left click: the app window (conversion queue / progress, all settings); right click: the menu
         if (LOWORD(lp) == WM_LBUTTONUP) { if (!g_regBusy) OpenSettings(); }
         else if (LOWORD(lp) == WM_RBUTTONUP || LOWORD(lp) == WM_CONTEXTMENU) ShowMenu();
         return 0;
     case WM_DESTROY:
+        g_tagQuit = true;
         KillTimer(h, kTimer);
         g_pp.Stop();   // cancels a running ffmpeg (resumed first if held) and deletes its partial output
         ClearProducers();
@@ -1168,7 +1253,7 @@ int RunRegCli(const std::wstring& arg) {
 // button boxes ...), then for N seconds (default 15) prints every button press as the text the `hotkey` setting takes
 // ("Pad:A", "Joy:Thrustmaster T300RS Racing Wheel:Button3"). Hold several buttons for a combination; the text is printed
 // when you let go. Read-only: nothing is sent to a game, nothing is saved. Keyboard keys are not listed (use the
-// Settings window's "Press a key...").
+// window's "Press a key...").
 int RunInputs(const std::wstring& arg) {
     unsigned secs = 15;
     {
@@ -1221,7 +1306,7 @@ int RunInputs(const std::wstring& arg) {
     }
     input::SetCapture(false);
     input::Stop();
-    CliPrint(L"done. Put a printed text into the Settings window's Hotkey field (or config.ini: hotkey = ...), "
+    CliPrint(L"done. Put a printed text into the window's Hotkey field (or config.ini: hotkey = ...), "
              L"several separated by commas.");
     return 0;
 }
@@ -1275,10 +1360,39 @@ int RunCli(const std::wstring& arg) {
 }
 } // namespace
 
+// EyeCaptureTray.exe --tag3d <sbs|tb> <file>: the menu's "Tag a video as 3D" for one file, synchronously (tests, scripts).
+// Prints "ok <output file>" / "error: <reason>"; exit code 0 = tagged, 2 = bad arguments, 1 = failed. Logs to logs\tray.log.
+int RunTag3d(const std::wstring& arg) {
+    g_exeDir = ExeDir();
+    elog::Init(g_exeDir + L"\\logs\\tray.log", false);
+    std::wstring rest = arg.substr(8);   // after "--tag3d "
+    while (!rest.empty() && rest.front() == L' ') rest.erase(0, 1);
+    const size_t sp = rest.find(L' ');
+    const std::wstring mode = rest.substr(0, sp);
+    std::wstring file = sp == std::wstring::npos ? std::wstring() : rest.substr(sp + 1);
+    while (!file.empty() && file.front() == L' ') file.erase(0, 1);
+    if (file.size() >= 2 && file.front() == L'"' && file.back() == L'"') file = file.substr(1, file.size() - 2);
+    if ((mode != L"sbs" && mode != L"tb") || file.empty()) {
+        CliPrint(L"usage: EyeCaptureTray.exe --tag3d <sbs|tb> <file>");
+        return 2;
+    }
+    Config cfg;
+    LoadConfig(g_exeDir, cfg);
+    elog::SetLevel(cfg.logLevel);
+    std::wstring out, why;
+    if (!pp::Tag3d(cfg, g_exeDir, file, mode == L"tb", out, why)) {
+        CliPrint(L"error: " + why);
+        return 1;
+    }
+    CliPrint(L"ok " + out);
+    return 0;
+}
+
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     if (cmdLine && cmdLine[0] == L'-') {
         std::wstring a = cmdLine;
         while (!a.empty() && a.back() == L' ') a.pop_back();
+        if (a.compare(0, 8, L"--tag3d ") == 0) return RunTag3d(a);
         if (a == L"--start" || a == L"--stop" || a == L"--toggle" || a == L"--status") return RunCli(a);
         if (a == L"--register" || a == L"--unregister") return RunRegCli(a);
         if (a == L"--inputs" || a.compare(0, 9, L"--inputs ") == 0) return RunInputs(a);
@@ -1308,11 +1422,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     LOGI("tray: started%s (exe folder %s)", testMode ? " [TEST MODE, private status block]" : "", elog::Narrow(g_exeDir).c_str());
     ApplyTestRunKey(testMode);   // before the settings window can open
     g_shm = testMode ? EyeCapOpenShared(&g_map, testShm) : EyeCapOpenShared(&g_map);
-    g_icons[0] = MakeDotIcon(RGB(140, 140, 140));
-    g_icons[1] = MakeDotIcon(RGB(40, 190, 70));
-    g_icons[2] = MakeDotIcon(RGB(230, 30, 30));
-    g_icons[3] = MakeDotIcon(RGB(240, 170, 20));
-    g_icons[4] = MakeDotIcon(RGB(50, 130, 240));
+    for (int i = 0; i < kIcoCount; ++i) g_icons[i] = LoadTrayIcon(i);
 
     WNDCLASSW wc{};
     wc.lpfnWndProc = WndProc;
@@ -1360,7 +1470,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     LOGI("tray: start with Windows: %s", install::AutostartEnabled() ? "on" : "off");
     // controller / wheel hotkeys (Pad: / Joy: bindings): the tray polls them and sends ECC_TOGGLE to the game
     ApplyInputBindings("start");
-    InstallQueueHooks();   // before the Settings window can open
+    InstallQueueHooks();   // before the window can open
     input::Start(OnInputFire);
     Refresh();
 

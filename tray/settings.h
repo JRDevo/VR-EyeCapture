@@ -1,4 +1,4 @@
-// settings -- the tray's "Settings..." window and the config.ini writer behind it (Win32 controls, no frameworks).
+// settings -- the tray's main window (settings, conversion queue, export) and the config.ini writer behind it (Win32 controls, no frameworks).
 //
 // The window edits the config file the tray / layer really use (ConfigPath(exe folder)): it rewrites only the
 // `key = value` lines whose value changed, keeps comments, blank lines, section headers, unknown lines, the file's
@@ -58,6 +58,7 @@ struct QueueHooks {
     std::function<void(unsigned long long id)>   start;           // force a waiting job (or the running, held one)
     std::function<void()>                        startAll;        // force every waiting job (they run oldest first)
     std::function<void(unsigned long long id)>   remove;          // drop a waiting job
+    std::function<unsigned()>                    gameFps;         // the running game's frame rate (status block), 0 = no game / unknown
 };
 void SetQueueHooks(const QueueHooks& hooks);
 // The worker changed state: refresh the queue view now (it also refreshes every 500 ms on its own). No-op when closed.
@@ -98,7 +99,8 @@ enum : int {
     ID_RATECONTROL,             // "Rate control" drop-down bound to rate_control (appended for the same reason)
     ID_QP,                      // "QP" edit bound to qp; enabled only for rate_control = qp (appended for the same reason)
     ID_PRESET,                  // "Encoder preset" drop-down bound to quality_vs_speed (appended for the same reason)
-    ID_CFR                      // "Constant frame rate ..." check bound to constant_frame_rate (appended for the same reason)
+    ID_CFR,                     // "Constant frame rate ..." check bound to constant_frame_rate (appended for the same reason)
+    ID_FPSWARN                  // red warning line on the top edge of the Export group box: the game's frame rate is uneven for 60 fps YouTube video (hidden otherwise)
 };
 // ID_QSTART reads "Start" and acts on every selected item of ID_QLIST (a multi-select list box: LB_SETSEL / LB_GETSELITEMS).
 extern const wchar_t* const kWindowTitle;

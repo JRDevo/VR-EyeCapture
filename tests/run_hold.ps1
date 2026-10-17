@@ -221,7 +221,7 @@ try {
     Step 'G: balloon "Not enough disk space", no .mkv, no ffmpeg, MP4 still there' (((LogText) -match 'balloon \[Not enough disk space\] hg_SBS\.mp4 was not converted') -and -not (Test-Path (Mkv $g)) -and (FakeProcs).Count -eq 0 -and (Test-Path $g))
     $s | Wait-Process -Timeout 30
 
-    # ---- H: the Settings window's queue: "Add to queue..." jobs wait (even with post_when = now), each with its own format
+    # ---- H: the app window's queue: "Add to queue..." jobs wait (even with post_when = now), each with its own format
     # snapshot taken from the window (unsaved values); the queue survives a tray restart (queue.json); Start runs the selected
     # job next, Start all the rest in order; one MP4 converted with three eye crops gives three files; keep_mp4 = 0 deletes the
     # MP4 only after the last of its jobs.

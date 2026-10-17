@@ -20,7 +20,7 @@
 
 namespace settings {
 
-const wchar_t* const kWindowTitle = L"OpenXR-EyeCapture Settings";
+const wchar_t* const kWindowTitle = L"OpenXR-EyeCapture";
 
 namespace {
 
@@ -562,6 +562,9 @@ const Help kHelp[] = {
     {ID_OUTFREE, L"Free space on the drive of the output folder. Recordings and their converted files (MKV, 8K, flat) are all written "
                  L"there; nothing large goes to drive C: unless the folder is on C:. A recording or conversion does not start with "
                  L"less than 10 GB free, and a recording stops (and is saved) when the drive drops below 2 GB."},
+    {ID_FPSWARN, L"Shown only while a game runs at a frame rate that 60 does not divide evenly (72, 80, 90, 144 fps ...). YouTube plays "
+                 L"at most 60 fps and the 8K conversion makes 60 fps, so some frames are dropped unevenly and the motion stutters a little. "
+                 L"A headset refresh rate of 120 Hz (or 60 Hz) gives smooth video; set it in Virtual Desktop or the headset settings."},
     {ID_MAXWIDTH, L"Width of the recorded video: the whole side-by-side frame, both eyes together. "
                   L"Native uses the full size that the headset provides (very large on a Quest 3, up to the codec limit).\r\n"
                   L"A smaller size reduces the GPU load during recording (the symmetric view and head smoothing pass is drawn at this size, "
@@ -692,7 +695,7 @@ const Help kHelp[] = {
                   L"When the VR session ends: once no game has a VR session open (for example, after leaving VR or closing the game). "
                   L"If VR starts again while a conversion is running, the conversion is paused and continues afterwards.\r\n"
                   L"When the game exits (default): once the game that made the recording has exited and no VR game is running.\r\n"
-                  L"When I say: never converts on its own. Use 'Convert a recording...' in Settings or the tray menu. Finished recordings "
+                  L"When I say: never converts on its own. Use 'Convert a recording...' in this window or the tray menu. Finished recordings "
                   L"wait in the Conversions list below; select them and click Start, or click Start all.\r\n"
                   L"\"Convert last recording now\" and \"Convert a recording...\" always start immediately; recordings added with "
                   L"\"Add to queue...\" always wait for Start."},
@@ -1025,6 +1028,31 @@ void UpdateFreeSpace() {
         t += L" -- below " + disk::SizeText(disk::MinFreeToStart()) + L": recordings and conversions will not start";
     else if (def) t += L"  (the captures folder next to the app)";
     SetWindowTextW(Ctl(ID_OUTFREE), t.c_str());
+}
+
+// The red line under the Export settings: shown only while a game runs at a frame rate that 60 does not divide evenly
+// (pp::UnevenFor60); refreshed by kQueueTimer / WM_QUEUE_POKE. The text is set before the window is shown / hidden.
+void UpdateFpsWarning() {
+    HWND c = g_dlg ? Ctl(ID_FPSWARN) : nullptr;
+    if (!c) return;
+    const double fps = g_hooks.gameFps ? (double)g_hooks.gameFps() : 0.0;
+    std::wstring t = pp::FpsWarningText(fps);
+    RECT rc{};
+    GetClientRect(c, &rc);
+    if (!t.empty()) {   // the long wording when it fits the label, else the short one
+        HDC dc = GetDC(c);
+        HGDIOBJ old = g_font ? SelectObject(dc, g_font) : nullptr;
+        SIZE z{};
+        GetTextExtentPoint32W(dc, t.c_str(), (int)t.size(), &z);
+        if (old) SelectObject(dc, old);
+        ReleaseDC(c, dc);
+        if (z.cx > rc.right) t = pp::FpsWarningText(fps, true);
+    }
+    wchar_t cur[256] = L"";
+    GetWindowTextW(c, cur, 256);
+    if (t != cur) SetWindowTextW(c, t.c_str());
+    const bool vis = (GetWindowLongW(c, GWL_STYLE) & WS_VISIBLE) != 0;
+    if (vis == t.empty()) ShowWindow(c, t.empty() ? SW_HIDE : SW_SHOWNA);
 }
 
 void UpdateLayoutPreview() {
@@ -1426,7 +1454,7 @@ void LoadFromFile() {
     if (!problems.empty()) {
         std::wstring m = L"The configuration file contains invalid values on the following lines. The window shows the default value for each of them, and Save replaces them:\n\n";
         for (const auto& p : problems) m += p + L"\n";
-        Report(L"Settings", m);
+        Report(L"OpenXR-EyeCapture", m);
     }
 }
 
@@ -1621,7 +1649,7 @@ void QueueCommand(int id, int code) {
         if (g_hooks.pickFiles) {
             const pp::JobFormat f = WindowFormat();
             if (f.Empty()) {
-                Report(L"Settings", L"The Export settings create no files (YouTube output None and no 2D video). Choose a YouTube output first.");
+                Report(L"OpenXR-EyeCapture", L"The Export settings create no files (YouTube output None and no 2D video). Choose a YouTube output first.");
                 break;
             }
             g_hooks.pickFiles(g_dlg, f, id == ID_CONVERTPICK);
@@ -1688,7 +1716,7 @@ void DoSave() {
     if (!SaveKeyValuesToFile(g_path, CollectControls(), r)) {
         std::wstring m = L"The settings could not be saved:\n\n";
         for (const auto& p : r.problems) m += p + L"\n";
-        Report(L"Settings - Not Saved", m);
+        Report(L"Not Saved", m);
         return;
     }
     // "Start with Windows" is a registry state, not a config.ini key: apply it after the config was written
@@ -1699,7 +1727,7 @@ void DoSave() {
         if (install::SetAutostart(wantAuto, ExeFolder(), err))
             r.changed.push_back(wantAuto ? L"start_with_windows 0->1" : L"start_with_windows 1->0");
         else
-            Report(L"Settings", L"The Start with Windows setting could not be changed:\n" + err);
+            Report(L"OpenXR-EyeCapture", L"The Start with Windows setting could not be changed:\n" + err);
     }
     if (g_onSaved) g_onSaved(r.changed);
     DestroyWindow(g_dlg);
@@ -1710,7 +1738,7 @@ void DoSave() {
 void DoBrowse() {
     IFileOpenDialog* dlg = nullptr;
     if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dlg))) || !dlg) {
-        Report(L"Settings", L"The folder picker could not be opened. Type the folder into the field instead.");
+        Report(L"OpenXR-EyeCapture", L"The folder picker could not be opened. Type the folder into the field instead.");
         return;
     }
     DWORD opts = 0;
@@ -1928,7 +1956,7 @@ LRESULT CALLBACK DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         if (wp == kQueueTimer) {
-            if (!IsIconic(h)) UpdateQueueView();
+            if (!IsIconic(h)) { UpdateQueueView(); UpdateFpsWarning(); }
             return 0;
         }
         if (wp == kFreeSpaceTimer) {   // one-shot: UpdateFreeSpace kills it
@@ -1952,6 +1980,11 @@ LRESULT CALLBACK DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 SetTextColor((HDC)wp, GetSysColor(COLOR_GRAYTEXT));
                 return (LRESULT)GetSysColorBrush(COLOR_BTNFACE);
             }
+        if ((HWND)lp == Ctl(ID_FPSWARN)) {   // the frame-rate warning: red on the dialog background
+            SetBkMode((HDC)wp, TRANSPARENT);
+            SetTextColor((HDC)wp, RGB(192, 0, 0));
+            return (LRESULT)GetSysColorBrush(COLOR_BTNFACE);
+        }
         if ((HWND)lp == Ctl(ID_HELPTEXT)) {   // the read-only help edit: same background as the dialog
             SetBkColor((HDC)wp, GetSysColor(COLOR_BTNFACE));
             SetTextColor((HDC)wp, GetSysColor(COLOR_WINDOWTEXT));
@@ -1960,6 +1993,7 @@ LRESULT CALLBACK DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return DefWindowProcW(h, msg, wp, lp);
     case WM_QUEUE_POKE:
         UpdateQueueView();
+        UpdateFpsWarning();
         return 0;
     case WM_SIZE:
         if (wp != SIZE_MINIMIZED) Relayout();
@@ -2417,6 +2451,12 @@ int BuildControls(HWND dlg, Builder::Pass pass, int clientW, int clientH, int sc
         b.Button(ID_CONVERTPICK, cx, r, bw, L"Convert a recording...");
         b.Button(ID_ADDQUEUE, cx + bw + 8, r, cw - bw - 8, L"Add to queue...");
     }
+    {   // the frame-rate warning: sits on the group box's top edge right of the "Export" title (opaque, so it interrupts the line);
+        // empty and hidden until UpdateFpsWarning finds a game at an uneven rate
+        HWND wl = b.Make(L"STATIC", L"", SS_LEFT | SS_NOPREFIX | SS_NOTIFY, gx + 62, y, gw - 62 - 12, 16, ID_FPSWARN);
+        b.Tip(wl, HelpText(ID_FPSWARN));
+        if (b.pass == Builder::Pass::Create) ShowWindow(wl, SW_HIDE);
+    }
     b.HiddenCheck(ID_POSTMKV);     // bound to post_mkv / post_yt8k, set from / read into the drop-down
     b.HiddenCheck(ID_POSTYT8K);
     b.Tip(b.Make(L"STATIC", L"", SS_OWNERDRAW | SS_NOTIFY, gx + gw - 12 - lpW, y + top + ex2 / 2, lpW, lpH, ID_LAYOUTPREVIEW),
@@ -2758,6 +2798,7 @@ void ShowDialog(const std::wstring& configPath, std::function<void(const std::ve
         wc.lpfnWndProc = DlgProc;
         wc.hInstance = GetModuleHandleW(nullptr);
         wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        wc.hIcon = LoadIconW(wc.hInstance, MAKEINTRESOURCEW(1));   // the app icon (tray/tray.rc): title bar, taskbar, Alt+Tab
         wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
         wc.lpszClassName = L"EyeCaptureSettings";
         RegisterClassW(&wc);

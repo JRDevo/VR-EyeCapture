@@ -5,6 +5,9 @@
 //
 //   layer_e2e [--api d3d11|d3d12] [--layout two|array|wide|msaa] [--eye 1920x1080] [--seconds 6] [--record 4]
 //             [--out-dir dir] [--expect-dormant] [--jitter] [--hud] [--overlays] [--stale-pose] [--opaque-projection]
+//             [--no-output]
+// --no-output (with --record 0): no MP4 is expected; exit 0 = the frame loop completed (tests/run_live.ps1: the live
+// share consumer reads the frames meanwhile).
 // --overlays (record_overlays test; tests/run_e2e.ps1 has the expected pixel positions): every frame also submits, AFTER
 // the projection layer, four overlay layers drawn with clears into their own R8G8B8A8_UNORM_SRGB swapchains:
 //   A quad, projection (LOCAL) space, pose (0, 1.45, -2), 0.5 x 0.5 m, opaque green (alpha 255, SOURCE_ALPHA flag)
@@ -36,7 +39,8 @@
 // own 64x32 R8G8B8A8_UNORM_SRGB swapchain cleared every frame: V green (40, 200, 40) in a VIEW space at (0.12, -0.10, -1),
 // 0.10 x 0.06 m (head-locked, like the DLAA injector's panel), W magenta (200, 40, 200) in the projection (LOCAL) space
 // at (-0.25, 1.75, -2), 0.12 x 0.08 m (world-locked).
-// Prints the path of the produced MP4 ("E2E_OUTPUT=<path>"). Exit code 0 = a new MP4 appeared
+// Prints the time spent inside xrEndFrame ("E2E_ENDFRAME max <ms> (frame <n>), over 4 ms on <k> of <frames> frames (<j> after the first second)": the
+// game-thread cost of the layer + the mock) and the path of the produced MP4 ("E2E_OUTPUT=<path>"). Exit code 0 = a new MP4 appeared
 // (--expect-dormant: the layer must NOT record, e.g. no tray running; exit 0 = loop completed and no MP4 appeared).
 #include <windows.h>
 #include <d3d11_1.h>
@@ -101,7 +105,7 @@ int main(int argc, char** argv) {
     std::string api = "d3d11", layout = "two";
     unsigned eyeW = 1920, eyeH = 1080;
     double seconds = 6, record = 4;
-    bool expectDormant = false, jitter = false, eyeSet = false, overlays = false, stalePose = false, opaqueProj = false, hud = false;
+    bool expectDormant = false, noOutput = false, jitter = false, eyeSet = false, overlays = false, stalePose = false, opaqueProj = false, hud = false;
     std::wstring outDir = ExeDir() + L"\\e2e_out";
     for (int i = 1; i < argc; ++i) {
         std::string k = argv[i];
@@ -118,6 +122,7 @@ int main(int argc, char** argv) {
         else if (k == "--record") record = atof(next().c_str());
         else if (k == "--out-dir") outDir = Widen(next());
         else if (k == "--expect-dormant") expectDormant = true;
+        else if (k == "--no-output") noOutput = true;
         else { printf("unknown argument %s\n", k.c_str()); return 2; }
     }
     const bool d3d12 = api == "d3d12";
@@ -416,6 +421,11 @@ int main(int argc, char** argv) {
     // ---- frame loop ----
     const uint32_t frames = (uint32_t)(seconds * 90);
     XrTime t0ns = 0;
+    // game-thread time inside xrEndFrame (our layer's capture / live share / indicator + the mock): E2E_ENDFRAME line
+    LARGE_INTEGER efFreq;
+    QueryPerformanceFrequency(&efFreq);
+    double efMax = 0;
+    uint32_t efMaxFrame = 0, efSlow = 0, efSlowLate = 0;   // late: after the first second (90 frames)
     std::vector<PatRect> pat;
     for (uint32_t f = 0; f < frames; ++f) {
         XrFrameState fs{XR_TYPE_FRAME_STATE};
@@ -676,8 +686,19 @@ int main(int argc, char** argv) {
         fei.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
         fei.layerCount = nLayers;
         fei.layers = layers;
+        LARGE_INTEGER efQ0, efQ1;
+        QueryPerformanceCounter(&efQ0);
         CHECK(xrEndFrame(session, &fei));
+        QueryPerformanceCounter(&efQ1);
+        const double efMs = (double)(efQ1.QuadPart - efQ0.QuadPart) * 1000.0 / (double)efFreq.QuadPart;
+        if (efMs > efMax) { efMax = efMs; efMaxFrame = f; }
+        if (efMs > 4.0) {
+            ++efSlow;
+            if (f >= 90) ++efSlowLate;
+        }
     }
+    printf("E2E_ENDFRAME max %.2f ms (frame %u), over 4 ms on %u of %u frames (%u after the first second)\n", efMax, efMaxFrame,
+           efSlow, frames, efSlowLate);
 
     // ---- teardown (the layer finalizes in xrDestroySession if still recording) ----
     if (d3d12) { queue->Signal(fence.Get(), ++fenceVal); fence->SetEventOnCompletion(fenceVal, evt); WaitForSingleObject(evt, 5000); }
@@ -706,6 +727,10 @@ int main(int argc, char** argv) {
     if (expectDormant) {
         if (!best.empty()) { printf("E2E FAIL: dormant layer produced %ls\n", best.c_str()); return 1; }
         printf("E2E_DORMANT_OK frames=%u (loop completed, no recording)\n", frames);
+        return 0;
+    }
+    if (noOutput) {
+        printf("E2E_LOOP_OK frames=%u%s\n", frames, best.empty() ? "" : " (an MP4 appeared)");
         return 0;
     }
     if (best.empty()) { printf("E2E FAIL: no new MP4 in %ls\n", outDir.c_str()); return 1; }

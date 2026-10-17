@@ -34,6 +34,7 @@ struct IndicatorSettings {
     float x = 0.22f, y = -0.16f, z = -0.8f;  // indicator_x / _y / _z: centre in VIEW space, metres (-Z = ahead)
     float size = 0.02f;                      // indicator_size: edge length of the square quad, metres
     float opacity = 1.0f;                    // indicator_opacity: maximum alpha 0..1
+    bool  live = true;                       // indicator_live: a steady violet dot while a live viewer (OBS) receives frames
 };
 
 struct Config {
@@ -55,6 +56,7 @@ struct Config {
     bool         requireTray = true;     // require_tray: layer stays dormant unless EyeCaptureTray.exe is running
     bool         swapEyes = false;       // swap_eyes: put the right eye in the left half (for players that flip SBS)
     bool         recordOverlays = true;  // record_overlays: composite the game's / mods' overlay layers into the recording
+    bool         liveShare = true;       // live_share: hand the eyes (re-projected like a recording, or raw) to a live viewer (OBS plugin) when one appears (live_share.h)
     // Post-processing, done by EyeCaptureTray.exe after each recording (the layer parses but ignores these).
     bool         postMkv = true;         // post_mkv: remux (sbs_full) or re-encode (other layout_3d) the MP4 to <name>.mkv with the Matroska stereo_mode tag
     bool         keepMp4 = false;        // keep_mp4: keep the MP4 after a verified MKV (and flat) conversion
@@ -67,7 +69,7 @@ struct Config {
     Layout3d     layout3d = Layout3d::TbHalf;   // layout_3d = tb_half | sbs_half | sbs_full | tb_full (tray only; flat recordings)
     EyeCrop      eyeCrop = EyeCrop::Wide169;     // eye_crop = 16:9 | 4:3 | 4:3pad | none (tray only; flat recordings)
     std::wstring ffmpegPath;             // ffmpeg_path: empty = PATH, then WinGet packages, then <dll folder>\ffmpeg\ffmpeg.exe
-    IndicatorSettings indicator;         // vr_indicator, indicator_x/_y/_z, indicator_size, indicator_opacity
+    IndicatorSettings indicator;         // vr_indicator, indicator_x/_y/_z, indicator_size, indicator_opacity, indicator_live
     HeadSmoothingSettings head;          // head_smoothing, head_follow_deg, roll_lock, output_fov_scale, edge_guard, symmetric_fov
     DomeSettings dome;                   // [dome] projection, dome_width, dome_forward, fill, fill_fade_s, window_feather_deg
     LogLevel     logLevel = LogLevel::Info;

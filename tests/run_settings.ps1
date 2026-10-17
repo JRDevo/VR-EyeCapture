@@ -1,12 +1,12 @@
 <#
-    run_settings.ps1 -- tests for the tray's Settings window (no GPU, no game, does not touch the installed tray or config.ini).
+    run_settings.ps1 -- tests for the tray app window (no GPU, no game, does not touch the installed tray or config.ini).
       powershell -ExecutionPolicy Bypass -File tests\run_settings.ps1
     1. settings_test hotkeys : every key name the window can produce parses back through ParseHotkey; Pad: / Joy: bindings,
                                binding lists and refused inputs (src/hotkey.h).
     2. settings_test save    : the Save code path on a scratch copy of config.ini (bad values refused, three keys changed in
                                place, a missing section appended) -- the before / after diff must show ONLY those lines.
     3. settings_test drive   : a scratch tray (copy of EyeCaptureTray.exe in build\tt2, EYECAP_TRAY_TEST_SHM, scratch APPDATA)
-                               opens the REAL Settings window; "Capture..." F7, "Add..." + mouse X1 -> "F7, MouseX1",
+                               opens the REAL app window; "Capture..." F7, "Add..." + mouse X1 -> "F7, MouseX1",
                                "Capture..." F7 again -> "F7"; the test sets controls with SendMessage and clicks Save: a bad
                                value is refused (the tray logs what the message box would show), good values are written,
                                an untouched head_smoothing slider keeps its exact file text (0.57), the tooltip says
@@ -80,13 +80,13 @@ try {
     $log = Get-Content (Join-Path $t 'logs\tray.log') -Raw -Encoding UTF8
     Write-Host '--- tray.log (settings lines):'
     $log -split "`r?`n" | Where-Object { $_ -match 'settings|tooltip' -or $_ -match '^\s*line \d+' } | ForEach-Object { Write-Host "  $_" }
-    Step 'bad value went through the reporter (not a real message box)' ($log -match "settings message box \[Settings - Not Saved\][\s\S]*bad value '7' for output_fov_scale")
+    Step 'bad value went through the reporter (not a real message box)' ($log -match "settings message box \[Not Saved\][\s\S]*bad value '7' for output_fov_scale")
     Step 'tray.log lists the changed keys' ($log -match 'settings saved to .*changed hotkey ScrollLock->F7, codec hevc->av1, bitrate_mbps 0->250, swap_eyes 0->1, record_overlays 1->0, record_for_youtube 0->1, output_fov_scale 0\.9->0\.85, projection vr180->flat, layout_3d tb_half->sbs_half, post_yt8k 0->1, yt8k_bitrate_mbps 150->200, yt8k_codec hevc->av1, post_when game_exit->now, eye_crop 16:9->4:3, start_with_windows 0->1')
     Step 'tray.log: Resolution saved 3000 -> 3840 (4K), then 3840 -> 0 (Native)' (($log -match 'settings saved to .*changed max_width 3000->3840\s*(\r?\n|$)') -and ($log -match 'settings saved to .*changed max_width 3840->0\s*(\r?\n|$)'))
     Step 'tooltip says settings saved' ($log -match "tooltip now: settings saved \S+ applies to the next recording")
     Step 'tooltip restored after 5 s' ($log -match 'tooltip restored: OpenXR-EyeCapture: no OpenXR game running')
     $log -split "`r?`n" | Where-Object { $_ -match 'text does not fit|text fit check' } | ForEach-Object { Write-Host "  $_" }
-    Step 'Settings window text fit check ran and nothing is cut (labels, checks, buttons, drop-down items; GetTextExtentPoint32)' (($log -match 'settings: text fit check: \d{2,} controls, 0 cut') -and ($log -notmatch 'settings: text fit check: \d+ controls, [1-9]') -and ($log -notmatch 'text does not fit'))
+    Step 'App window text fit check ran and nothing is cut (labels, checks, buttons, drop-down items; GetTextExtentPoint32)' (($log -match 'settings: text fit check: \d{2,} controls, 0 cut') -and ($log -notmatch 'settings: text fit check: \d+ controls, [1-9]') -and ($log -notmatch 'text does not fit'))
 } finally {
     $env:APPDATA = $oldAppdata
     if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id }

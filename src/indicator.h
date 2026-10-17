@@ -8,7 +8,8 @@
 //                      with UpdateSubresource on the game's immediate context, only on frames where the dot is shown.
 //                      D3D12 / Vulkan: not implemented yet (logged once, the indicator stays off; capture unaffected).
 // Visual states: starting / finalizing = amber, steady; recording = red, pulsing (alpha 0.35 .. 1.0, 1 Hz);
-// saved = green for 1.5 s; failed = red X for 2 s; otherwise hidden (nothing is done at all).
+// saved = green for 1.5 s; failed = red X for 2 s; live = violet, steady, while a live viewer (the OBS plugin) receives
+// frames and none of the others is shown (indicator_live; recording wins); otherwise hidden (nothing is done at all).
 #pragma once
 #include <windows.h>
 #include <d3d11.h>
@@ -21,15 +22,16 @@
 #include "frame_source.h"
 #include "recorder.h"
 
-enum class IndShow { Hidden, Starting, Recording, Saved, Failed };
+enum class IndShow { Hidden, Starting, Recording, Saved, Failed, Live };
 const char* IndShowName(IndShow s);
 
 class IndicatorTracker {
 public:
     // Per frame. `message` is only read on a transition to Idle / Failed (pass a callback-free string: the caller
     // fetches Recorder::Status().message only when NeedsMessage() says so). now = seconds, any monotonic clock.
+    // live: a live viewer receives frames (LiveShare::Active, indicator_live on) -- shown only when nothing else is.
     bool NeedsMessage(RecState st) const;
-    IndShow Update(RecState st, const std::string& message, double now);
+    IndShow Update(RecState st, const std::string& message, double now, bool live = false);
 private:
     RecState prev_ = RecState::Idle;
     IndShow timed_ = IndShow::Hidden;

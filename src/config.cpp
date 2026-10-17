@@ -202,6 +202,8 @@ KeyResult ApplyKey(Config& c, const std::wstring& key, std::wstring val) {
         if (ParseBool(val, b)) c.swapEyes = b; else ok = false;
     } else if (key == L"record_overlays") {
         if (ParseBool(val, b)) c.recordOverlays = b; else ok = false;
+    } else if (key == L"live_share") {
+        if (ParseBool(val, b)) c.liveShare = b; else ok = false;
     } else if (key == L"post_mkv") {
         if (ParseBool(val, b)) c.postMkv = b; else ok = false;
     } else if (key == L"keep_mp4") {
@@ -264,6 +266,8 @@ KeyResult ApplyKey(Config& c, const std::wstring& key, std::wstring val) {
         if (ParseFloat(val, fl) && fl >= 0.0005f && fl <= 0.5f) c.indicator.size = fl; else ok = false;
     } else if (key == L"indicator_opacity") {
         if (ParseFloat(val, fl) && fl >= 0.0f && fl <= 1.0f) c.indicator.opacity = fl; else ok = false;
+    } else if (key == L"indicator_live") {
+        if (ParseBool(val, b)) c.indicator.live = b; else ok = false;
     } else if (key == L"symmetric_fov") {
         if (ParseBool(val, b)) c.head.symmetricFov = b; else ok = false;
     } else if (key == L"projection") {

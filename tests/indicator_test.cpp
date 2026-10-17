@@ -41,6 +41,16 @@ int main() {
               "finished without 'saved' -> red X");
         Check(t.Update(RecState::Starting, "", 20.5) == IndShow::Starting, "a new start replaces the timed state at once");
     }
+    {   // indicator_live: violet while a live viewer receives frames, only when nothing else is shown (recording wins)
+        IndicatorTracker t;
+        Check(t.Update(RecState::Idle, "", 0.0, true) == IndShow::Live, "idle + live viewer -> live");
+        Check(t.Update(RecState::Idle, "", 0.5, false) == IndShow::Hidden, "viewer gone -> hidden");
+        Check(t.Update(RecState::Starting, "", 1.0, true) == IndShow::Starting, "starting wins over live");
+        Check(t.Update(RecState::Recording, "", 1.5, true) == IndShow::Recording, "recording wins over live");
+        Check(t.Update(RecState::Stopping, "", 5.0, true) == IndShow::Starting, "finalizing wins over live");
+        Check(t.Update(RecState::Idle, "saved C:\\x.mp4", 5.2, true) == IndShow::Saved, "saved (green) wins over live");
+        Check(t.Update(RecState::Idle, "", 6.8, true) == IndShow::Live, "after the green: live again");
+    }
 
     // ---- picture ----
     std::vector<uint8_t> b((size_t)kIndicatorPx * kIndicatorPx * 4);
@@ -65,6 +75,9 @@ int main() {
     RenderIndicator(IndShow::Failed, 0.0, 1.0f, true, false, b.data());
     Check(Px(b, 32, 32)[3] == 255 && Px(b, 17, 17)[3] == 255 && Px(b, 46, 17)[3] == 255, "failed: X strokes opaque on both diagonals");
     Check(Px(b, 32, 12)[3] == 0 && Px(b, 12, 32)[3] == 0, "failed: transparent between the strokes (an X, not a disc)");
+    RenderIndicator(IndShow::Live, 0.75, 1.0f, true, false, b.data());
+    c = Px(b, 32, 32);
+    Check(c[0] == 150 && c[1] == 60 && c[2] == 235 && c[3] == 255, "live: violet, steady (no pulse at the trough time)", c[3]);
     RenderIndicator(IndShow::Hidden, 0.0, 1.0f, true, false, b.data());
     int any = 0;
     for (size_t i = 3; i < b.size(); i += 4) any += b[i];

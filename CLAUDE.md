@@ -9,6 +9,7 @@ Project memory lives in the Claude workspace for this folder (`~/.claude/project
   `"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" --build build --config Release`
 - 0 warnings in our sources is the bar. Tests: `tests\run_selftests.ps1`, `tests\run_e2e.ps1`, `tests\run_jitter.ps1`,
   `tests\run_dome.ps1`, `tests\run_settings.ps1`, `tests\run_reload.ps1`, `tests\run_yt8k.ps1` (tray 8K step, CPU only),
+  `tests\run_tag3d.ps1` (tray "Tag a video as 3D" via `--tag3d`, CPU only), `tests\run_live.ps1` (OBS live share, GPU),
   `tests\run_install.ps1` (registration:
   `install_test.exe` + the tray's `--register/--unregister/--status` and GUI flow on test keys under
   `HKCU\Software\OpenXR-EyeCapture-Test`; no admin, run it NON-elevated), plus the unit-test exes in `build\Release`.

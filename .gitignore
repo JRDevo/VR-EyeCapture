@@ -16,3 +16,6 @@ CMakeSettings.json
 # The tray's saved conversion queue (tray/postprocess.cpp SaveQueue), next to EyeCaptureTray.exe
 /queue.json
 /queue.json.tmp
+
+# Python bytecode from scripts/make_logo.py
+__pycache__/

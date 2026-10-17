@@ -31,13 +31,25 @@
           + stereo 3D side by side (vr180) / top and bottom (vr360); the exact ffprobe lines are printed. Plus the
           <name>.json sidecar and the _VR180 / _VR360 file name.
     Sets XR_EYE_CAPTURE_REQUIRE_TRAY=0 and XR_EYE_CAPTURE_TRAY_IPC=0 (a running tray must not post-process the MP4s).
-      powershell -ExecutionPolicy Bypass -File tests\run_dome.ps1
+      powershell -ExecutionPolicy Bypass -File tests\run_dome.ps1 [-BuildLayer]
+    -BuildLayer: test build\Release\eye_capture.dll instead of the installed (registered) copy, as in run_e2e.ps1.
 #>
-param([string]$FfmpegDir = '')
+param([string]$FfmpegDir = '', [switch]$BuildLayer)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $bin = Join-Path $root 'build\Release'
 $exe = Join-Path $bin 'layer_e2e.exe'
+if ($BuildLayer) {   # the same mechanism as run_e2e.ps1 -BuildLayer: nothing is copied or registered
+    $env:DISABLE_XR_APILAYER_JRDEVO_eye_capture = '1'
+    $lp = Join-Path $root 'build\e2e_layer'
+    New-Item -ItemType Directory -Force $lp | Out-Null
+    $m = Get-Content (Join-Path $bin 'XR_APILAYER_JRDEVO_eye_capture.json') -Raw | ConvertFrom-Json
+    $m.api_layer.library_path = (Join-Path $bin 'eye_capture.dll')
+    $m | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $lp 'XR_APILAYER_JRDEVO_eye_capture.json') -Encoding ascii
+    $env:XR_API_LAYER_PATH = $lp
+    $env:XR_ENABLE_API_LAYERS = 'XR_APILAYER_JRDEVO_eye_capture'
+    Write-Host "-BuildLayer: testing $bin\eye_capture.dll (registered copy disabled for these processes)" -ForegroundColor Yellow
+}
 if (-not (Test-Path $exe)) { throw "build first: $exe" }
 if (-not $FfmpegDir) {
     $cand = Get-ChildItem "$env:LOCALAPPDATA\Microsoft\WinGet\Packages" -Filter ffprobe.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1

@@ -118,6 +118,22 @@
 
 namespace pp {
 
+// YouTube plays at most 60 fps and the 8K conversion makes 60 fps, so a game frame rate that 60 does not divide evenly (72, 80,
+// 90, 144 ...) gives uneven motion. "Even" = 60, 120, 180, 240 (60 divides it) or 30, 20, 15 (it divides 60), within +-1.5 fps
+// of the measured value. fps <= 0 (unknown) is not flagged.
+inline bool UnevenFor60(double fps) {
+    if (!(fps > 0)) return false;
+    static const double even[] = {15, 20, 30, 60, 120, 180, 240};
+    for (double e : even) if (std::fabs(fps - e) <= 1.5) return false;
+    return true;
+}
+// The one-line warning shown in the window; shortForm (tray tooltip, narrow window) is shorter. "" when the rate is fine / unknown.
+inline std::wstring FpsWarningText(double fps, bool shortForm = false) {
+    if (!UnevenFor60(fps)) return L"";
+    return std::to_wstring((int)(fps + 0.5)) + (shortForm ? L" fps: YouTube video will stutter, use 120 Hz"
+                                                          : L" fps: the 60 fps YouTube video will stutter -- set the headset to 120 Hz");
+}
+
 // eye_crop target aspect as N:D (0 = no crop). 4:3pad crops to 4:3 (then pads, see PredictLayout).
 inline void EyeAspect(EyeCrop c, int& n, int& d) {
     const bool c43 = c == EyeCrop::Std43 || c == EyeCrop::Pad43;
@@ -305,6 +321,14 @@ Recording ReadSidecar(const std::wstring& mp4);
 // ffmpeg lookup: cfg.ffmpegPath if set; else ffmpeg on PATH, else a recursive search of
 // %LOCALAPPDATA%\Microsoft\WinGet\Packages, else <exeDir>\ffmpeg\ffmpeg.exe. Returns "" if none; `how` says where it came from.
 std::wstring ResolveFfmpeg(const Config& cfg, const std::wstring& exeDir, std::wstring& how);
+
+// "Tag a video as 3D" (tray menu, `EyeCaptureTray.exe --tag3d <sbs|tb> <file>`): a plain remux (-map 0 -c copy, no re-encode) of a
+// video made elsewhere (e.g. an OBS side-by-side recording) into <name>_3D.mkv next to it, with the Matroska stereo_mode tag
+// (left_right / top_bottom) that YouTube reads as 3D. Never overwrites ("<name>_3D (2).mkv" ...); written as .part and renamed
+// once ffprobe (when found) agrees on the duration. Synchronous, self-contained (its own ffmpeg process, not the conversion
+// queue): the caller runs it off the UI thread. True = `outPath` is the finished file; false = `why` says what went wrong.
+// Logs the command and the result (LOGI / LOGE).
+bool Tag3d(const Config& cfg, const std::wstring& exeDir, const std::wstring& in, bool topBottom, std::wstring& outPath, std::wstring& why);
 
 class Processor {
 public:

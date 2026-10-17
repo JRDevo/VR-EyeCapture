@@ -7,6 +7,10 @@
     Users only unzip and run EyeCaptureTray.exe: it registers the layer itself (one UAC prompt; tray/install.cpp) and
     unregisters it from its tray menu. scripts\install.ps1 / uninstall.ps1 are developer scripts and stay out of the zip.
 
+    Also produces dist\OpenXR-EyeCapture-OBS-v<version>.zip (a separate release asset, only for OBS users):
+        obs-eyecapture.dll, README.md (obs\README.md), LICENSE.md
+    The OBS plugin is never in the main zip.
+
     The version comes from project(... VERSION x.y.z) in CMakeLists.txt.
     Windows PowerShell 5.1 compatible.  powershell -ExecutionPolicy Bypass -File scripts\package.ps1
 #>
@@ -36,9 +40,9 @@ if ($onPath) { $cmake = $onPath.Source } else {
 }
 if (-not $cmake) { Fail 'cmake not found on PATH or under Visual Studio 2022' }
 
-& $cmake -B $buildDir -S $root -G 'Visual Studio 17 2022' -A x64
+& $cmake -B $buildDir -S $root -G 'Visual Studio 17 2022' -A x64 -DEYE_BUILD_OBS_PLUGIN=ON
 if ($LASTEXITCODE -ne 0) { Fail "cmake configure failed ($LASTEXITCODE)" }
-& $cmake --build $buildDir --config Release --target eye_capture EyeCaptureTray
+& $cmake --build $buildDir --config Release --target eye_capture EyeCaptureTray obs-eyecapture
 if ($LASTEXITCODE -ne 0) { Fail "cmake build failed ($LASTEXITCODE)" }
 
 $rel = Join-Path $buildDir 'Release'
@@ -77,4 +81,25 @@ Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip -Force
 Write-Host "`nCreated $zip" -ForegroundColor Green
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $archive = [System.IO.Compression.ZipFile]::OpenRead($zip)
+try { foreach ($e in $archive.Entries) { "  {0,10}  {1}" -f $e.Length, $e.FullName } } finally { $archive.Dispose() }
+
+# --- separate OBS plugin zip (own release asset; not in the main zip) ---
+$obsName = "OpenXR-EyeCapture-OBS-v$version"
+$obsStage = Join-Path $distDir $obsName
+$obsZip = Join-Path $distDir "$obsName.zip"
+if (Test-Path $obsStage) { Remove-Item -Recurse -Force $obsStage }
+if (Test-Path $obsZip) { Remove-Item -Force $obsZip }
+New-Item -ItemType Directory -Force -Path $obsStage | Out-Null
+$obsFiles = @(
+    @{ src = (Join-Path $rel 'obs-eyecapture.dll'); name = 'obs-eyecapture.dll' },
+    @{ src = (Join-Path $root 'obs\README.md'); name = 'README.md' },
+    @{ src = (Join-Path $root 'LICENSE.md'); name = 'LICENSE.md' }
+)
+foreach ($f in $obsFiles) {
+    if (-not (Test-Path $f.src)) { Fail "missing: $($f.src)" }
+    Copy-Item -LiteralPath $f.src -Destination (Join-Path $obsStage $f.name) -Force
+}
+Compress-Archive -Path (Join-Path $obsStage '*') -DestinationPath $obsZip -Force
+Write-Host "`nCreated $obsZip" -ForegroundColor Green
+$archive = [System.IO.Compression.ZipFile]::OpenRead($obsZip)
 try { foreach ($e in $archive.Entries) { "  {0,10}  {1}" -f $e.Length, $e.FullName } } finally { $archive.Dispose() }

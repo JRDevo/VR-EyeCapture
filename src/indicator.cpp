@@ -35,6 +35,7 @@ const char* IndShowName(IndShow s) {
     case IndShow::Recording: return "recording";
     case IndShow::Saved:     return "saved";
     case IndShow::Failed:    return "failed";
+    case IndShow::Live:      return "live";
     default:                 return "hidden";
     }
 }
@@ -43,7 +44,7 @@ bool IndicatorTracker::NeedsMessage(RecState st) const {
     return st != prev_ && st == RecState::Idle && IsActive(prev_);
 }
 
-IndShow IndicatorTracker::Update(RecState st, const std::string& message, double now) {
+IndShow IndicatorTracker::Update(RecState st, const std::string& message, double now, bool live) {
     if (st != prev_) {
         if (st == RecState::Idle && IsActive(prev_)) {
             const bool saved = message.compare(0, 6, "saved ") == 0;
@@ -61,13 +62,14 @@ IndShow IndicatorTracker::Update(RecState st, const std::string& message, double
     if (st == RecState::Starting || st == RecState::Stopping) return IndShow::Starting;
     if (timed_ != IndShow::Hidden && now < until_) return timed_;
     timed_ = IndShow::Hidden;
-    return IndShow::Hidden;
+    return live ? IndShow::Live : IndShow::Hidden;
 }
 
 void RenderIndicator(IndShow show, double now, float opacity, bool srgbTexture, bool bgra, uint8_t* out) {
     double r = 235, g = 35, b = 35;                                           // sRGB 0..255
     if (show == IndShow::Starting) { r = 255; g = 176; b = 0; }
     else if (show == IndShow::Saved) { r = 40; g = 205; b = 70; }
+    else if (show == IndShow::Live) { r = 150; g = 60; b = 235; }   // violet, steady
     double scale = std::min(1.0, std::max(0.0, (double)opacity));
     if (show == IndShow::Recording) scale *= 0.675 + 0.325 * std::sin(2 * kPi * now);   // 0.35 .. 1.0 at 1 Hz
     if (show == IndShow::Hidden) scale = 0;
