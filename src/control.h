@@ -5,6 +5,8 @@
 //   start OK       1 tone  880 Hz
 //   stop           2 tones 660 Hz
 //   failed / none  1 long low tone 220 Hz (no capture-capable session, start failed, or no frames for 6 s)
+// config beeps = 0 silences all of them (Beep plays on the default device, which is often the WASAPI loopback device the
+// recording captures, so the cues would end up in the video).
 #pragma once
 #include <functional>
 #include <string>
@@ -25,6 +27,9 @@ struct ControlHooks {
 
 void ControlStart(const Config& cfg, const std::wstring& logPath, const std::wstring& configPath, ControlHooks hooks);
 void ControlStop();   // joins (bounded wait)
+// config beeps (re-read at every recording start): the control thread copies the Config once at ControlStart, so a reload
+// hands the new value over here. Any thread; logged when it changes.
+void ControlSetBeeps(bool on);
 
 // Publishes the result of a finalized recording ("saved <file>" / failure message, file, counters) to the tray's status
 // block immediately and synchronously, from any thread -- the 250 ms publish loop may already be gone (game quit right after

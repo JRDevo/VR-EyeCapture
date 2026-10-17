@@ -42,7 +42,14 @@ const Field kFields[] = {
      L"H.265 / HEVC (recommended)|H.264 / AVC|AV1 (hardware: RTX 40 / 50)"},
     {L"bitrate_mbps",      L"capture",         Kind::Combo, ID_BITRATE,    L"0|150|200|250|300",
      L"Default (120 Mbit/s)|150 Mbit/s|200 Mbit/s|250 Mbit/s|300 Mbit/s", L"Custom (%s Mbit/s)"},
+    {L"rate_control",      L"capture",         Kind::Combo, ID_RATECONTROL, L"vbr|cbr|qp",
+     L"VBR (default)|CBR (constant bitrate)|Constant QP (quality)"},
+    {L"qp",                L"capture",         Kind::Edit,  ID_QP,         nullptr},
+    {L"quality_vs_speed",  L"capture",         Kind::Combo, ID_PRESET,     L"auto|0|25|50|75|100",
+     L"Auto (default)|Fastest|Fast|Balanced|Quality|Best quality", L"Custom (%s)"},
     {L"max_fps",           L"capture",         Kind::Edit,  ID_MAXFPS,     nullptr},
+    {L"constant_frame_rate", L"capture",       Kind::Check, ID_CFR,        nullptr},
+    {L"beeps",             L"capture",         Kind::Check, ID_BEEPS,      nullptr},
     {L"max_width",         L"capture",         Kind::Combo, ID_MAXWIDTH,   L"0|3840|2560|1920",
      L"Native (full resolution)|3840 px (4K)|2560 px (2K)|1920 px (1080p)", L"Custom (%s px)"},
     {L"require_tray",      L"capture",         Kind::Check, ID_REQTRAY,    nullptr},
@@ -116,7 +123,13 @@ std::wstring Norm(const std::wstring& key, const std::wstring& raw) {
         if (l == L"0" || l == L"false" || l == L"no" || l == L"off") return L"0";
         return l;
     }
+    if (key == L"quality_vs_speed" && Lower(v) == L"auto") return L"auto";   // else numeric (below)
+    if (key == L"rate_control") {
+        const std::wstring l = Lower(v);
+        return l == L"cqp" ? L"qp" : l;   // the parser takes cqp for qp
+    }
     if (f->kind == Kind::Track || key == L"bitrate_mbps" || key == L"yt8k_bitrate_mbps" || key == L"max_fps" || key == L"max_width" || key == L"output_fov_scale" ||
+        key == L"qp" || key == L"quality_vs_speed" ||
         key == L"fill_fade_s" || key == L"indicator_x" || key == L"indicator_y" || key == L"indicator_z" ||
         key == L"indicator_size" || key == L"indicator_opacity") {
         wchar_t* end = nullptr;
@@ -275,7 +288,12 @@ KeyValues FromConfig(const Config& c) {
     kv.emplace_back(L"output_dir", c.outputDir);
     kv.emplace_back(L"codec", FromUtf8(VideoCodecKey(c.codec)));
     kv.emplace_back(L"bitrate_mbps", std::to_wstring(c.bitrateMbps));
+    kv.emplace_back(L"rate_control", FromUtf8(RateControlKey(c.rateControl)));
+    kv.emplace_back(L"qp", std::to_wstring(c.qp));
+    kv.emplace_back(L"quality_vs_speed", c.qualityVsSpeed < 0 ? std::wstring(L"auto") : std::to_wstring(c.qualityVsSpeed));
     kv.emplace_back(L"max_fps", std::to_wstring(c.maxFps));
+    kv.emplace_back(L"constant_frame_rate", B(c.constantFrameRate));
+    kv.emplace_back(L"beeps", B(c.beeps));
     kv.emplace_back(L"max_width", std::to_wstring(c.maxWidth));
     kv.emplace_back(L"require_tray", B(c.requireTray));
     kv.emplace_back(L"swap_eyes", B(c.swapEyes));
@@ -552,6 +570,27 @@ const Help kHelp[] = {
                   L"Applies to the next recording."},
     {ID_MAXFPS, L"Limits the frame rate of the recording. 0 records every frame that the headset displays (72 or 90 fps). "
                 L"60 or 30 fps produces smaller files and a lower GPU load. YouTube plays 60 fps."},
+    {ID_RATECONTROL, L"How the encoder spends the bitrate.\r\n"
+                     L"VBR (default): variable bitrate around the Bitrate setting; complex scenes get more, simple ones less.\r\n"
+                     L"CBR: a constant bitrate (the Bitrate setting) whatever the scene; predictable file size, simple scenes waste "
+                     L"bits.\r\n"
+                     L"Constant QP: every frame at the same quality (the QP field); the Bitrate setting is not used and the file size "
+                     L"follows the picture, so fast, detailed scenes make much larger files. With AV1 the QP is passed to the encoder "
+                     L"as a quality value (the NVIDIA AV1 encoder takes no QP). Applies to the next recording."},
+    {ID_QP, L"Constant QP only (greyed for VBR and CBR): the quantizer of every frame, 0 = best quality (huge files) to 51 = "
+            L"worst. About 18 to 24 looks very good; each step of 6 roughly halves or doubles the file size. Default 24."},
+    {ID_PRESET, L"Encoder preset: how much effort the GPU encoder spends per frame (quality_vs_speed in config.ini). Fastest uses "
+                L"the least GPU time; Best quality compresses better (a sharper picture at the same bitrate) but is slower and can "
+                L"drop frames at high resolutions and frame rates, especially with Constant QP. Auto uses the encoder's default; "
+                L"with AV1 above 1 Gpixel/s (8K at 72 / 90 fps) Auto picks a fast setting so no frames are dropped. A value set in "
+                L"config.ini that is not in the list is shown as Custom and is preserved."},
+    {ID_CFR, L"Writes exactly one video frame per frame period (the recording's frame rate, at most the Frame rate limit), with equal "
+             L"durations. Video editors such as DaVinci Resolve handle such files better. A frame that arrives twice in one period "
+             L"is dropped and a missing one repeats the previous frame (at most 5 seconds in a row). Cleared (default), the real "
+             L"frame times are kept (variable frame rate), which plays perfectly in players and on YouTube. The sound is not changed."},
+    {ID_BEEPS, L"Plays a short beep when a recording starts (one beep), stops (two beeps) or cannot start (one long low beep). The "
+               L"beeps play on the Windows default playback device. When that is the device being recorded (the usual setup), "
+               L"the beeps are heard in the recording; clear this option to keep them out. Applies to the next recording."},
     {ID_OUTDIR, L"Folder in which recordings are saved; the converted files go next to them. If empty, the 'captures' folder next to "
                 L"eye_capture.dll is used. Pick a folder on a drive with plenty of free space (about 54 GB per hour at the default bitrate)."},
     {ID_BROWSE, L"Selects the output folder, on any drive. The free space of that drive is shown below the field."},
@@ -943,6 +982,19 @@ void UpdateBitrateHint() {
 // The 8K bitrate and 8K codec only matter when "YouTube output" makes the 8K file (items 1 and 2) of a flat recording: the
 // 8K step is skipped for VR180 / VR360 (projection items 1 and 2) and for recordings made in the YouTube layout
 // (record_for_youtube: the recording already is the 8K file). Their labels are greyed with them.
+// Rate control: the QP edit (+ its "QP:" label and hint) only applies to Constant QP; the bitrate drop-down (+ its label and the
+// size hint) does not apply to it. Called on CBN_SELCHANGE of ID_RATECONTROL and from SetControls.
+HWND g_bitrateLabel = nullptr;
+std::vector<HWND> g_qpLabels;
+void UpdateRateControlEnabled() {
+    const bool qp = ComboValue(ID_RATECONTROL) == L"qp";
+    EnableWindow(Ctl(ID_QP), qp);
+    for (HWND l : g_qpLabels) EnableWindow(l, qp);
+    EnableWindow(Ctl(ID_BITRATE), !qp);
+    EnableWindow(Ctl(ID_BITRATEHINT), !qp);
+    if (g_bitrateLabel) EnableWindow(g_bitrateLabel, !qp);
+}
+
 HWND g_yt8kBitrateLabel = nullptr, g_yt8kCodecLabel = nullptr;
 void UpdateYt8kEnabled() {
     const int sel = (int)SendMessageW(Ctl(ID_YTMODE), CB_GETCURSEL, 0, 0);
@@ -1321,6 +1373,7 @@ void SetControls(const KeyValues& kv) {
     YtModeFromChecks();
     UpdateLayoutEnabled();
     UpdateBitrateHint();
+    UpdateRateControlEnabled();
     UpdateYt8kEnabled();
     UpdateFreeSpace();
     UpdatePreview();
@@ -1727,13 +1780,15 @@ void CommandHandler(int id, int code) {
     if (id == ID_RECORDYT && code == BN_CLICKED) { UpdateYt8kEnabled(); UpdateLayoutPreview(); }
     if (id == ID_PROJECTION && code == CBN_SELCHANGE) UpdateLayoutEnabled();
     if ((id == ID_BITRATE || id == ID_CODEC) && code == CBN_SELCHANGE) UpdateBitrateHint();
+    if (id == ID_RATECONTROL && code == CBN_SELCHANGE) UpdateRateControlEnabled();
     if ((id == ID_YTMODE || id == ID_PROJECTION) && code == CBN_SELCHANGE) UpdateYt8kEnabled();
     if (id == ID_OUTDIR && code == EN_CHANGE) SetTimer(g_dlg, kFreeSpaceTimer, kFreeSpaceDelayMs, nullptr);   // debounced: not per key
     if ((id == ID_PROJECTION || id == ID_YTMODE || id == ID_LAYOUT3D || id == ID_EYECROP || id == ID_MAXWIDTH || id == ID_CODEC) &&
         code == CBN_SELCHANGE)
         UpdateLayoutPreview();
     if ((id == ID_PROJECTION || id == ID_YTMODE || id == ID_LAYOUT3D || id == ID_POSTWHEN || id == ID_EYECROP ||
-         id == ID_MAXWIDTH || id == ID_BITRATE || id == ID_YT8KBITRATE || id == ID_YT8KCODEC) && code == CBN_SELCHANGE) {
+         id == ID_MAXWIDTH || id == ID_BITRATE || id == ID_YT8KBITRATE || id == ID_YT8KCODEC || id == ID_RATECONTROL ||
+         id == ID_PRESET) && code == CBN_SELCHANGE) {
         ShowHelp(HelpText(id));
         return;
     }
@@ -1941,6 +1996,7 @@ LRESULT CALLBACK DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         g_footer.clear();
         g_made.clear();
         g_domeLabels.clear();
+        g_qpLabels.clear();
         g_helpMinH = g_helpPad = g_naturalH = 0;
         g_contentEnd = 0;
         g_footerRaised = false;
@@ -2083,6 +2139,7 @@ int BuildControls(HWND dlg, Builder::Pass pass, int clientW, int clientH, int sc
         g_dim.clear();
         g_footer.clear();
         g_domeLabels.clear();
+        g_qpLabels.clear();
         g_tip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_NOPREFIX | TTS_ALWAYSTIP, CW_USEDEFAULT,
                                 CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, dlg, nullptr, GetModuleHandleW(nullptr), nullptr);
         if (g_tip) {
@@ -2106,10 +2163,10 @@ int BuildControls(HWND dlg, Builder::Pass pass, int clientW, int clientH, int sc
     const int pitch = 30, top = 22, gap = 8;
     auto groupH = [&](int rows) { return top + rows * pitch + 2; };
     const int unitGap = 6;
-    // column heights (rows): left Recording 7 + Video 4 + Stereo 3D 5; right Recording Indicator 5 + Export + Advanced 1. The
+    // column heights (rows): left Recording 7 + Video 5 + Stereo 3D 4; right Recording Indicator 5 + Export + Advanced 1. The
     // shorter column's groups get the difference (left: leftEx on Stereo 3D; right: spare, below).
-    const int kExportRows = 10;
-    const int leftH = groupH(7) + gap + groupH(4) + gap + groupH(5) + gap;
+    const int kExportRows = 10, kRecordingRows = 7, kVideoRows = 5, kStereoRows = 4;
+    const int leftH = groupH(kRecordingRows) + gap + groupH(kVideoRows) + gap + groupH(kStereoRows) + gap;
     const int rightH = groupH(5) + gap + groupH(kExportRows) + gap + groupH(1) + gap;
     const int leftEx = rightH > leftH ? rightH - leftH : 0;
     int y = 6;
@@ -2127,8 +2184,32 @@ int BuildControls(HWND dlg, Builder::Pass pass, int clientW, int clientH, int sc
     y += 32 + 4;
     const int yTop = y;
 
+    // Rows that carry two settings (Audio + Device, Codec + Encoder preset, Frame rate limit + Constant frame rate, Head
+    // smoothing + FOV scale) keep both columns at 16 rows, so the window still fits a 1920x1080 screen. Texts that depend on
+    // the room are picked for the NARROWEST layout (cwMin), so the Create and Move passes always agree.
+    const int cwMin = colWMin - 12 - 132;
+    auto pickText = [&](int room, std::initializer_list<const wchar_t*> texts, int pad) {
+        for (const wchar_t* t : texts) if (b.TextW(t) + pad <= room) return t;
+        return *(texts.end() - 1);
+    };
+    // width of a drop-down that shows its widest item (+ `extra`, e.g. a Custom item) without cutting it (CheckTextFit's rule)
+    auto comboW = [&](int id, const wchar_t* extra) {
+        const Field* f = FindFieldById(id);
+        int w = extra ? b.TextW(extra) : 0;
+        const std::wstring o = f ? (f->labels ? f->labels : f->options) : L"";
+        size_t pos = 0;
+        while (pos <= o.size()) {
+            size_t bar = o.find(L'|', pos);
+            if (bar == std::wstring::npos) bar = o.size();
+            const int t = b.TextW(o.substr(pos, bar - pos).c_str());
+            if (t > w) w = t;
+            pos = bar + 1;
+        }
+        return w + GetSystemMetrics(SM_CXVSCROLL) + 14;
+    };
+
     // ---- Recording
-    b.Group(gx, y, gw, groupH(7), L"Recording");
+    b.Group(gx, y, gw, groupH(kRecordingRows), L"Recording");
     int r = y + top;
     b.Label(lx, r, labelW, L"Hotkey:", ID_HOTKEY);
     b.Edit(ID_HOTKEY, cx, r, cw);
@@ -2149,25 +2230,48 @@ int BuildControls(HWND dlg, Builder::Pass pass, int clientW, int clientH, int sc
     SetWindowLongPtrW(b.Hint(cx, r, cw, L"", ID_OUTFREE), GWLP_ID, ID_OUTFREE);   // the hint is updated by UpdateFreeSpace
     r += pitch;
     b.Label(lx, r, labelW, L"Audio:", ID_AUDIO);
-    b.Check(ID_AUDIO, cx, r, L"Record system audio");
-    r += pitch;
-    b.Label(lx, r, labelW, L"Audio device:", ID_AUDIODEV);
-    b.Edit(ID_AUDIODEV, cx, r, 190);
-    b.Hint(cx + 190 + 8, r, cw - 198, L"Empty = default playback device", ID_AUDIODEV);
+    {   // one row: the audio check, then "Device:" + the device field (its "empty = default" note is the field's cue banner)
+        const int aw = b.Check(ID_AUDIO, cx, r, L"Record system audio");
+        const int dx = cx + aw + 16, dlw = b.TextW(L"Device:") + 6;
+        b.Label(dx, r, dlw, L"Device:", ID_AUDIODEV);
+        b.Edit(ID_AUDIODEV, dx + dlw + 2, r, cx + cw - (dx + dlw + 2));
+        if (create) SendMessageW(GetDlgItem(dlg, ID_AUDIODEV), EM_SETCUEBANNER, FALSE, (LPARAM)L"Empty = default playback device");
+    }
     r += pitch;
     b.Label(lx, r, labelW, L"Overlays:", ID_OVERLAYS);
     b.Check(ID_OVERLAYS, cx, r, L"Include overlay layers (menus, mod panels)");
-    y += groupH(7) + gap;
+    r += pitch;
+    b.Label(lx, r, labelW, L"Beeps:", ID_BEEPS);
+    b.Check(ID_BEEPS, cx, r, L"Beep in the headset when recording starts / stops");
+    y += groupH(kRecordingRows) + gap;
 
-    // ---- Video
-    b.Group(gx, y, gw, groupH(4), L"Video");
+    // ---- Video (the QP edit is greyed unless Rate control is Constant QP, the Bitrate drop-down greyed for it)
+    b.Group(gx, y, gw, groupH(kVideoRows), L"Video");
     r = y + top;
     b.Label(lx, r, labelW, L"Codec:", ID_CODEC);
-    b.Combo(ID_CODEC, cx, r, 240);
+    {   // one row: Codec, then "Encoder preset:" (quality_vs_speed), which takes the rest of the row
+        const int ccw = comboW(ID_CODEC, nullptr), pcw = comboW(ID_PRESET, L"Custom (100)");
+        const int px = cx + ccw + 16;
+        const wchar_t* pl = pickText(cwMin - (ccw + 16) - pcw, {L"Encoder preset:", L"Preset:"}, 6);
+        const int plw = b.TextW(pl) + 6;
+        b.Combo(ID_CODEC, cx, r, ccw);
+        b.Label(px, r, plw, pl, ID_PRESET);
+        b.Combo(ID_PRESET, px + plw, r, cx + cw - (px + plw));
+    }
     r += pitch;
-    b.Label(lx, r, labelW, L"Bitrate:", ID_BITRATE);
+    g_bitrateLabel = b.Label(lx, r, labelW, L"Bitrate:", ID_BITRATE);
     b.Combo(ID_BITRATE, cx, r, 190);
     SetWindowLongPtrW(b.Hint(cx + 190 + 8, r, cw - 198, L"", ID_BITRATEHINT), GWLP_ID, ID_BITRATEHINT);   // updated by UpdateBitrateHint
+    r += pitch;
+    b.Label(lx, r, labelW, L"Rate control:", ID_RATECONTROL);
+    b.Combo(ID_RATECONTROL, cx, r, 190);
+    {   // same row: "QP:" + the 60 px edit + its range hint
+        const int qx = cx + 190 + 12, qw = b.TextW(L"QP:") + 6;
+        keep(g_qpLabels, b.Label(qx, r, qw, L"QP:", ID_QP));
+        b.Edit(ID_QP, qx + qw + 2, r, 60);
+        const int hx = qx + qw + 2 + 60 + 8;
+        keep(g_qpLabels, b.Hint(hx, r, cx + cw - hx, L"0 = best, 51 = worst", ID_QP));
+    }
     r += pitch;
     b.Label(lx, r, labelW, L"Resolution:", ID_MAXWIDTH);
     b.Combo(ID_MAXWIDTH, cx, r, 190);
@@ -2176,12 +2280,18 @@ int BuildControls(HWND dlg, Builder::Pass pass, int clientW, int clientH, int sc
     b.Label(lx, r, labelW, L"Frame rate limit:", ID_MAXFPS);
     b.Edit(ID_MAXFPS, cx, r, 60);
     b.Label(cx + 60 + unitGap, r, 24, L"fps", ID_MAXFPS);
-    b.Hint(cx + 60 + unitGap + 30, r, 200, L"0 = unlimited", ID_MAXFPS);
-    y += groupH(4) + gap;
+    {   // same row, after the "0 = unlimited" hint: the constant_frame_rate check
+        const int hx = cx + 60 + unitGap + 30, hw = b.TextW(L"0 = unlimited") + 4;
+        b.Hint(hx, r, hw, L"0 = unlimited", ID_MAXFPS);
+        const int fx = hx + hw + 16;
+        b.Check(ID_CFR, fx, r, pickText(cwMin - (fx - cx), {L"Constant frame rate (for video editors such as DaVinci Resolve)",
+                                                             L"Constant frame rate (for video editors)", L"Constant frame rate"}, 24));
+    }
+    y += groupH(kVideoRows) + gap;
 
     // ---- Stereo 3D (Output layout lives in the Export group: it only shapes the files made for YouTube, or the recording
     // itself with record_for_youtube). Dome fill / Fade after are greyed unless Projection is VR180 / VR360.
-    b.Group(gx, y, gw, groupH(5) + leftEx, L"Stereo 3D");
+    b.Group(gx, y, gw, groupH(kStereoRows) + leftEx, L"Stereo 3D");
     r = y + top;
     b.Label(lx, r, labelW, L"Projection:", ID_PROJECTION);
     b.Combo(ID_PROJECTION, cx, r, 240);
@@ -2204,20 +2314,24 @@ int BuildControls(HWND dlg, Builder::Pass pass, int clientW, int clientH, int sc
     }
     r += pitch;
     b.Label(lx, r, labelW, L"Head smoothing:", ID_SMOOTH);
-    HWND tb = b.Make(L"msctls_trackbar32", L"", WS_TABSTOP | TBS_HORZ | TBS_AUTOTICKS, cx, r - 3, 340, 28, ID_SMOOTH);
-    b.Tip(tb, HelpText(ID_SMOOTH));
-    if (create) {
-        SendMessageW(tb, TBM_SETRANGE, TRUE, MAKELONG(0, 20));
-        SendMessageW(tb, TBM_SETTICFREQ, 2, 0);
-        SendMessageW(tb, TBM_SETPAGESIZE, 0, 2);
-        SendMessageW(tb, TBM_SETLINESIZE, 0, 1);
+    {   // one row: the slider (takes the rest), its value, then the field of view scale (it only matters with smoothing on)
+        const wchar_t* fl = pickText(cwMin - 200 - (8 + 44 + 16) - 60, {L"Field of view scale:", L"FOV scale:"}, 6);
+        const int flw = b.TextW(fl) + 6;
+        const int sw = cw - (8 + 44 + 16) - flw - 60;
+        HWND tb = b.Make(L"msctls_trackbar32", L"", WS_TABSTOP | TBS_HORZ | TBS_AUTOTICKS, cx, r - 3, sw, 28, ID_SMOOTH);
+        b.Tip(tb, HelpText(ID_SMOOTH));
+        if (create) {
+            SendMessageW(tb, TBM_SETRANGE, TRUE, MAKELONG(0, 20));
+            SendMessageW(tb, TBM_SETTICFREQ, 2, 0);
+            SendMessageW(tb, TBM_SETPAGESIZE, 0, 2);
+            SendMessageW(tb, TBM_SETLINESIZE, 0, 1);
+        }
+        b.Make(L"STATIC", L"0.00", SS_LEFT | SS_NOPREFIX, cx + sw + 8, r + 4, 44, 16, ID_SMOOTHVAL);
+        const int fx = cx + sw + 8 + 44 + 16;
+        b.Label(fx, r, flw, fl, ID_FOVSCALE);
+        b.Edit(ID_FOVSCALE, fx + flw, r, 60);
     }
-    b.Make(L"STATIC", L"0.00", SS_LEFT | SS_NOPREFIX, cx + 348, r + 4, 44, 16, ID_SMOOTHVAL);
-    r += pitch;
-    b.Label(lx, r, labelW, L"Field of view scale:", ID_FOVSCALE);
-    b.Edit(ID_FOVSCALE, cx, r, 60);
-    b.Hint(cx + 60 + 8, r, 120, L"0.5 – 1.0", ID_FOVSCALE);
-    y += groupH(5) + leftEx + gap;
+    y += groupH(kStereoRows) + leftEx + gap;
     const int yLeftEnd = y;
     y = yTop;
     setCol(margin + colW + colGap, colW);

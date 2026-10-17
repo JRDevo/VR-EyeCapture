@@ -93,7 +93,12 @@ enum : int {
     ID_QSTARTALL,               // "Start all": every waiting job (not a config key)
     ID_RECORDYT,                // "Record directly in the YouTube layout" check bound to record_for_youtube (appended: existing ids do not move)
     ID_LOGO,                    // owner-drawn logo (mark + wordmark) at the top of the window (not a config key; appended: existing ids do not move)
-    ID_ABOUTLINK                // SysLink in the footer: GitHub link + copyright / license (not a config key; appended: existing ids do not move)
+    ID_ABOUTLINK,               // SysLink in the footer: GitHub link + copyright / license (not a config key; appended: existing ids do not move)
+    ID_BEEPS,                   // "Beep in the headset ..." check bound to beeps (appended: existing ids do not move)
+    ID_RATECONTROL,             // "Rate control" drop-down bound to rate_control (appended for the same reason)
+    ID_QP,                      // "QP" edit bound to qp; enabled only for rate_control = qp (appended for the same reason)
+    ID_PRESET,                  // "Encoder preset" drop-down bound to quality_vs_speed (appended for the same reason)
+    ID_CFR                      // "Constant frame rate ..." check bound to constant_frame_rate (appended for the same reason)
 };
 // ID_QSTART reads "Start" and acts on every selected item of ID_QLIST (a multi-select list box: LB_SETSEL / LB_GETSELITEMS).
 extern const wchar_t* const kWindowTitle;

@@ -8,6 +8,7 @@
 #include <mfidl.h>
 #include <mfreadwrite.h>
 #include <mftransform.h>
+#include <strmif.h>     // ICodecAPI
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -229,6 +230,40 @@ std::string HrText(HRESULT hr) {
     return b;
 }
 
+// CODECAPI_AVEncVideoEncodeQP / _FrameTypeQP (UINT64): bits 0-15 the default QP, 16-31 I, 32-47 P, 48-63 B frames.
+UINT64 PackQp(unsigned q) {
+    const UINT64 v = q > 51 ? 51 : q;
+    return v | (v << 16) | (v << 32) | (v << 48);
+}
+
+// The video encoder MFT the sink writer created for `stream` (exists after SetInputMediaType), as ICodecAPI; null if none.
+ComPtr<ICodecAPI> EncoderCodecApi(IMFSinkWriter* w, DWORD stream) {
+    ComPtr<IMFSinkWriterEx> ex;
+    if (!w || FAILED(w->QueryInterface(IID_PPV_ARGS(&ex)))) return nullptr;
+    for (DWORD i = 0; i < 8; ++i) {
+        GUID cat{};
+        ComPtr<IMFTransform> t;
+        if (FAILED(ex->GetTransformForStream(stream, i, &cat, &t)) || !t) break;
+        if (cat != MFT_CATEGORY_VIDEO_ENCODER) continue;
+        ComPtr<ICodecAPI> api;
+        if (SUCCEEDED(t.As(&api))) return api;
+    }
+    return nullptr;
+}
+// "3", "0x0018001800180018" or "n/a" (GetValue failed / not supported)
+std::string CodecApiGetText(ICodecAPI* api, const GUID& g) {
+    VARIANT var;
+    VariantInit(&var);
+    if (!api || FAILED(api->GetValue(&g, &var))) return "n/a";
+    char b[40];
+    if (var.vt == VT_UI8 || var.vt == VT_I8) snprintf(b, sizeof(b), "0x%016llx", (unsigned long long)var.ullVal);
+    else if (var.vt == VT_UI4 || var.vt == VT_I4 || var.vt == VT_UINT || var.vt == VT_INT) snprintf(b, sizeof(b), "%lu", (unsigned long)var.ulVal);
+    else if (var.vt == VT_BOOL) snprintf(b, sizeof(b), "%s", var.boolVal ? "true" : "false");
+    else snprintf(b, sizeof(b), "(vt %u)", (unsigned)var.vt);
+    VariantClear(&var);
+    return b;
+}
+
 // Highest AAC bitrate (bytes/s) the system AAC encoder accepts for 48 kHz stereo; 0 = no AAC encoder.
 UINT32 ProbeAacBytesPerSecond() {
     MFT_REGISTER_TYPE_INFO outInfo{MFMediaType_Audio, MFAudioFormat_AAC};
@@ -292,6 +327,17 @@ struct Recorder::Impl {
     VideoCodec codec = VideoCodec::Hevc;   // the codec actually used (after a fallback)
     UINT bitrate = 0;
     UINT av1Speed = 0;                     // AV1: CODECAPI_AVEncCommonQualityVsSpeed set (0 = encoder default; see CreateWriter)
+    int  qvsSet = -1;                      // CODECAPI_AVEncCommonQualityVsSpeed actually set (-1 = encoder default)
+    std::string rcText;                    // rate control as applied ("VBR 120 Mb/s", "constant QP 24", ...; CreateWriter)
+    // constant_frame_rate (worker thread): last written grid slot (-1 = none yet), the NV12 pool surface that holds the last
+    // written frame (-1 = none: no repeat source), counters for the summary
+    bool cfr = false;
+    int64_t cfrLastSlot = -1;
+    int cfrPrevIdx = -1;
+    std::atomic<uint64_t> cfrRepeated{0}, cfrDropped{0};
+    uint64_t cfrCapped = 0;                // gaps longer than 5 s (only their first 5 s were repeated)
+    int64_t cfrRealSlot = -1;              // slot of the last frame that came from the game (the 5 s cap counts from it)
+    bool cfrGapCapped = false;             // the current gap reached the cap (reset by the next game frame)
 
     // private encoder device (kept across recordings while the adapter is the same)
     ComPtr<ID3D11Device> enc;
@@ -431,6 +477,9 @@ struct Recorder::Impl {
     HRESULT CreateWriter(VideoCodec c, bool hardware, std::string& why);
     void LogTransforms();
     void Process(const Item& it);
+    bool WriteVideoSample(int n, int64_t time);
+    void CfrFill(int64_t slot);
+    void CfrIdleFill();
     void FreeSlot(UINT slot, uint64_t freeValue, bool updateValue);
     void OnAudio(const int16_t* pcm, uint32_t frames, int64_t startQpc);
     void Cleanup();
@@ -462,6 +511,10 @@ bool Recorder::Start(IFrameSource* src, const RecorderSettings& s, UINT w, UINT 
     m.nextDue = INT64_MIN;
     m.lastWrittenTs = 0;
     m.written = 0; m.dropRing = 0; m.dropGpu = 0; m.dropPool = 0; m.dropDup = 0; m.decimated = 0; m.audioFrames = 0; m.writeErrors = 0;
+    m.cfr = s.constantFrameRate;
+    m.cfrLastSlot = -1; m.cfrPrevIdx = -1; m.cfrRepeated = 0; m.cfrDropped = 0; m.cfrCapped = 0;
+    m.cfrRealSlot = -1; m.cfrGapCapped = false;
+    m.qvsSet = -1; m.rcText.clear();
     m.t0Disp = 0;
     m.loggedFirst = false;
     m.dome = DomeSize();
@@ -756,14 +809,21 @@ void Recorder::Impl::Run() {
     ULONGLONG lastDiskCheck = GetTickCount64();
     for (;;) {
         Item it{};
+        bool idle = false;
         {
             std::unique_lock<std::mutex> lk(qm);
-            qcv.wait(lk, [&] { return !queue.empty() || stopReq.load(); });
-            if (queue.empty()) break;
-            it = queue.front();
-            queue.pop_front();
+            auto ready = [&] { return !queue.empty() || stopReq.load(); };
+            // constant_frame_rate: wake every 20 ms without a frame to write the slots of a stall as time passes (CfrIdleFill)
+            if (cfr) idle = !qcv.wait_for(lk, std::chrono::milliseconds(20), ready);
+            else qcv.wait(lk, ready);
+            if (!idle) {
+                if (queue.empty()) break;
+                it = queue.front();
+                queue.pop_front();
+            }
         }
-        Process(it);
+        if (idle) CfrIdleFill();
+        else Process(it);
         // low-space guard: every 2 s; below MinFreeToContinue the recording stops like a hotkey stop (finalized, saved)
         const ULONGLONG nowTick = GetTickCount64();
         if (lowDisk.empty() && nowTick - lastDiskCheck >= 2000) {
@@ -829,16 +889,22 @@ void Recorder::Impl::Run() {
     else if (yt) snprintf(layoutText, sizeof(layoutText), "YouTube %s (eye_crop %s, st3d %s)", YtPackingKey(s.layout3d),
                           YtCropKey(s.eyeCrop), ytTb ? "top-bottom" : "left-right");
     else snprintf(layoutText, sizeof(layoutText), "SBS");
-    char sum[800];
+    char rateText[160];
+    if (cfr)
+        snprintf(rateText, sizeof(rateText), "constant frame rate %u fps, %llu repeated, %llu dropped%s", fps,
+                 (unsigned long long)cfrRepeated.load(), (unsigned long long)cfrDropped.load(),
+                 cfrCapped ? " (a gap over 5 s was only partly filled)" : "");
+    else snprintf(rateText, sizeof(rateText), "variable frame rate (real timestamps)");
+    char sum[1000];
     snprintf(sum, sizeof(sum),
-             "recording summary: %s | %s | %ux%u %s @%u fps nominal | layout %s | frames written %llu, dropped %llu "
-             "(ring full %llu, gpu busy %llu, encoder stall %llu), duplicates %llu, over max_fps %llu | duration %.2f s | "
+             "recording summary: %s | %s | %ux%u %s %s @%u fps nominal | layout %s | frames written %llu, dropped %llu "
+             "(ring full %llu, gpu busy %llu, encoder stall %llu), duplicates %llu, over max_fps %llu | %s | duration %.2f s | "
              "audio %s (%llu frames = %.2f s) | finalize %s | %s",
-             fileOk ? "OK" : "FAILED", file.c_str(), outW, outH, VideoCodecName(codec), fps, layoutText,
+             fileOk ? "OK" : "FAILED", file.c_str(), outW, outH, VideoCodecName(codec), rcText.c_str(), fps, layoutText,
              (unsigned long long)frames,
              (unsigned long long)(dropRing.load() + dropGpu.load() + dropPool.load()),
              (unsigned long long)dropRing.load(), (unsigned long long)dropGpu.load(), (unsigned long long)dropPool.load(),
-             (unsigned long long)dropDup.load(), (unsigned long long)decimated.load(), dur,
+             (unsigned long long)dropDup.load(), (unsigned long long)decimated.load(), rateText, dur,
              hasAudio ? "AAC" : "none", (unsigned long long)audioFrames.load(), audioFrames.load() / 48000.0,
              HrText(fhr).c_str(), st3dReport.c_str());
     if (fileOk) LOGI("%s", sum); else LOGE("%s", sum);
@@ -893,9 +959,15 @@ bool Recorder::Impl::Init() {
     if (!FitOutputSize()) return false;
     bitrate = s.bitrate ? s.bitrate : VideoCodecDefaultMbps(codec) * 1000000u;
 
-    LOGI("recorder: init %s -- SBS %ux%u (left %u) %s %s -> %ux%u %s %.0f Mb/s, %u fps nominal, GOP %u",
+    char qpNote[48] = "";
+    if (s.rateControl == RateControl::Qp) snprintf(qpNote, sizeof(qpNote), " (QP %u; the bitrate is not used)", s.qp);
+    LOGI("recorder: init %s -- SBS %ux%u (left %u) %s %s -> %ux%u %s %.0f Mb/s, %u fps nominal, GOP %u, rate_control %s%s",
          GfxApiName(src->Api()), W, H, leftW, DxgiFormatName(fmt), srgb ? "sRGB-encoded" : "linear", outW, outH,
-         VideoCodecName(codec), bitrate / 1e6, fps, fps * 2);
+         VideoCodecName(codec), bitrate / 1e6, fps, fps * 2, RateControlKey(s.rateControl), qpNote);
+    if (cfr)
+        LOGI("recorder: constant frame rate %u fps: one frame every %.3f ms at k / %u s with constant durations (a frame in an "
+             "already written slot is dropped, a missing slot repeats the previous frame, at most 5 s per gap); audio keeps its real "
+             "timestamps", fps, 1000.0 / fps, fps);
 
     if (dome.valid) {
         const char* pn = DomeProjectionName(s.dome.projection);
@@ -1060,6 +1132,19 @@ bool Recorder::Impl::Init() {
     }
     if (FAILED(hr)) { SetMessage("no usable video encoder"); return false; }
     LogTransforms();
+    {   // what the encoder MFT reports back (ICodecAPI::GetValue; "n/a" = it does not say)
+        ComPtr<ICodecAPI> api;
+        {
+            std::lock_guard<std::mutex> lk(wm);
+            api = EncoderCodecApi(writer.Get(), vStream);
+        }
+        if (api)
+            LOGI("recorder: encoder reports: rate control mode %s (0 CBR, 2 unconstrained VBR, 3 quality), mean bitrate %s, "
+                 "QP %s, quality vs speed %s", CodecApiGetText(api.Get(), CODECAPI_AVEncCommonRateControlMode).c_str(),
+                 CodecApiGetText(api.Get(), CODECAPI_AVEncCommonMeanBitRate).c_str(),
+                 CodecApiGetText(api.Get(), CODECAPI_AVEncVideoEncodeQP).c_str(),
+                 CodecApiGetText(api.Get(), CODECAPI_AVEncCommonQualityVsSpeed).c_str());
+    }
     if (FAILED(devMgr->OpenDeviceHandle(&devHandle))) devHandle = nullptr;
     if (stopReq.load()) LOGW("recorder: stop requested during start");
     return true;
@@ -1568,39 +1653,100 @@ HRESULT Recorder::Impl::CreateWriter(VideoCodec c, bool hardware, std::string& w
     in->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
     setColour(in.Get());
 
-    ComPtr<IMFAttributes> enc;
-    MFCreateAttributes(&enc, 4);
-    enc->SetUINT32(CODECAPI_AVEncCommonRateControlMode, eAVEncCommonRateControlMode_UnconstrainedVBR);
-    enc->SetUINT32(CODECAPI_AVEncCommonMeanBitRate, bitrate);
-    enc->SetUINT32(CODECAPI_AVEncMPVGOPSize, fps * 2);
+    // Rate control (rate_control): vbr = unconstrained VBR at the mean bitrate (the behaviour before the key existed), cbr = CBR
+    // at it, qp = Media Foundation's "quality" mode (eAVEncCommonRateControlMode_Quality) with a constant QP; bitrate_mbps is
+    // not set at all there (the file size follows the content).
+    // Constant QP, measured on an RTX 5090 (NVIDIA MFTs, encoder_selftest --detail: a noisy picture that changes every frame,
+    // 960x540 per eye, 5 s at 90 fps; file sizes at qp 20 / qp 45):
+    //   HEVC  : CODECAPI_AVEncVideoEncodeQP honoured (171 MB / 0.09 MB); the encoder reports back exactly that QP.
+    //   H.264 : AVEncVideoEncodeQP honoured (160 MB / 0.03 MB), but only with CODECAPI_AVLowLatencyMode: without it the MFT
+    //           keeps all 4 NV12 surfaces of the pool and the recording stalls after 4 frames (also when the QP is set through
+    //           ICodecAPI on the transform). Low-latency mode is set for H.264 in qp mode only.
+    //   AV1   : the MFT refuses AVEncVideoEncodeQP (SetInputMediaType: MF_E_INVALIDMEDIATYPE; ICodecAPI::SetValue on the
+    //           transform: E_INVALIDARG; AVEncVideoEncodeFrameTypeQP and a 0..255 scale are refused the same way), so the
+    //           second attempt sets CODECAPI_AVEncCommonQuality = 100 - qp * 100 / 51 instead: honoured (80 MB / 0.3 MB).
+    //   AVEncCommonQuality must NOT be combined with AVEncVideoEncodeQP: the HEVC MFT then takes the quality value and
+    //   ignores the QP (it reported QP 27 for qp 20 and QP 41 for qp 45).
+    // CBR / VBR were not measured for size here (the existing VBR path is unchanged); both record and play.
+    const RateControl rc = s.rateControl;
+    const unsigned qp = s.qp > 51 ? 51u : s.qp;
+    const UINT32 qualityFromQp = 100u - qp * 100u / 51u;
+    const char* rcParams = rc == RateControl::Qp ? "constant-QP/GOP" : rc == RateControl::Cbr ? "CBR/bitrate/GOP" : "VBR/bitrate/GOP";
     // AV1 speed. Measured on an RTX 5090 (NVIDIA AV1 Encoder MFT, 5 s of 8K test content fed in real time): at the MFT's
     // default quality / speed it encodes only ~51 fps at 8192x4348 (~1.8 Gpixel/s), so a 72 / 90 Hz recording would drop
     // about a third of its frames; CODECAPI_AVEncCommonQualityVsSpeed <= 25 keeps 90 fps even at 8192x4632 (30 is the slow
     // setting again). So above 1 Gpixel/s (any 8K frame at 72 / 90 fps, 5760x3240 at 60) AV1 asks for 25: the slowest
     // setting that measured fast enough, with headroom for the game's own GPU load. Smaller frames keep the default
     // (4096x2304 at 90 fps = 0.85 Gpixel/s kept up at the default).
+    // quality_vs_speed: an explicit 0..100 is set for every codec (and replaces the AV1 rule); auto (-1) keeps the rule.
     av1Speed = 0;
-    if (c == VideoCodec::Av1 && (double)outW * outH * fps > 1.0e9) {
+    qvsSet = -1;
+    if (s.qualityVsSpeed >= 0) {
+        qvsSet = s.qualityVsSpeed;
+    } else if (c == VideoCodec::Av1 && (double)outW * outH * fps > 1.0e9) {
         av1Speed = 25;
-        enc->SetUINT32(CODECAPI_AVEncCommonQualityVsSpeed, av1Speed);
+        qvsSet = (int)av1Speed;
     }
-    hr = w->SetInputMediaType(vStream, in.Get(), enc.Get());
-    if (FAILED(hr) && av1Speed) {   // keep the speed setting: without it 8K AV1 cannot keep VR frame rates
-        LOGW("recorder: encoder rejected the VBR/bitrate/GOP parameters (hr=0x%08lx) -- retrying with only quality vs speed %u "
-             "and the GOP size", (unsigned long)hr, av1Speed);
+    // qpAsQuality: rate_control = qp through AVEncCommonQuality (the second attempt; see above)
+    auto encoderParams = [&](bool qpAsQuality) {
+        ComPtr<IMFAttributes> a;
+        MFCreateAttributes(&a, 6);
+        if (rc == RateControl::Qp) {
+            a->SetUINT32(CODECAPI_AVEncCommonRateControlMode, eAVEncCommonRateControlMode_Quality);
+            if (qpAsQuality) {
+                a->SetUINT32(CODECAPI_AVEncCommonQuality, qualityFromQp);
+            } else {
+                a->SetUINT64(CODECAPI_AVEncVideoEncodeQP, PackQp(qp));
+                if (c == VideoCodec::H264) a->SetUINT32(CODECAPI_AVLowLatencyMode, TRUE);
+            }
+        } else {
+            a->SetUINT32(CODECAPI_AVEncCommonRateControlMode, rc == RateControl::Cbr ? (UINT32)eAVEncCommonRateControlMode_CBR
+                                                                                     : (UINT32)eAVEncCommonRateControlMode_UnconstrainedVBR);
+            a->SetUINT32(CODECAPI_AVEncCommonMeanBitRate, bitrate);
+        }
+        a->SetUINT32(CODECAPI_AVEncMPVGOPSize, fps * 2);
+        if (qvsSet >= 0) a->SetUINT32(CODECAPI_AVEncCommonQualityVsSpeed, (UINT32)qvsSet);
+        return a;
+    };
+    char rcBuf[128];
+    if (rc == RateControl::Qp) snprintf(rcBuf, sizeof(rcBuf), "constant QP %u", qp);
+    else snprintf(rcBuf, sizeof(rcBuf), "%s %.0f Mb/s", RateControlName(rc), bitrate / 1e6);
+    rcText = rcBuf;
+    hr = w->SetInputMediaType(vStream, in.Get(), encoderParams(false).Get());
+    if (FAILED(hr) && rc == RateControl::Qp) {
+        LOGW("recorder: encoder rejected the quality mode with AVEncVideoEncodeQP %u (hr=0x%08lx) -- retrying with the quality "
+             "mode and AVEncCommonQuality %u (= 100 - qp * 100 / 51)", qp, (unsigned long)hr, qualityFromQp);
+        hr = w->SetInputMediaType(vStream, in.Get(), encoderParams(true).Get());
+        if (SUCCEEDED(hr)) {
+            snprintf(rcBuf, sizeof(rcBuf), "constant quality %u (from qp %u; this encoder takes no QP)", qualityFromQp, qp);
+            rcText = rcBuf;
+        }
+    }
+    if (FAILED(hr) && qvsSet >= 0) {   // keep the speed setting: without it 8K AV1 cannot keep VR frame rates
+        LOGW("recorder: encoder rejected the %s parameters (hr=0x%08lx) -- retrying with only quality vs speed %u "
+             "and the GOP size", rcParams, (unsigned long)hr, (unsigned)qvsSet);
         ComPtr<IMFAttributes> speed;
         MFCreateAttributes(&speed, 2);
-        speed->SetUINT32(CODECAPI_AVEncCommonQualityVsSpeed, av1Speed);
+        speed->SetUINT32(CODECAPI_AVEncCommonQualityVsSpeed, (UINT32)qvsSet);
         speed->SetUINT32(CODECAPI_AVEncMPVGOPSize, fps * 2);
         hr = w->SetInputMediaType(vStream, in.Get(), speed.Get());
+        if (SUCCEEDED(hr)) {
+            rcText = std::string("encoder default (rate_control ") + RateControlKey(rc) + " not accepted)";
+            LOGW("recorder: rate_control = %s was not accepted -- the encoder uses its default rate control", RateControlKey(rc));
+        }
     }
     if (FAILED(hr)) {
-        LOGW("recorder: encoder rejected the VBR/GOP parameters (hr=0x%08lx) -- using its defaults", (unsigned long)hr);
+        LOGW("recorder: encoder rejected the %s parameters (hr=0x%08lx) -- using its defaults", rc == RateControl::Vbr ? "VBR/GOP" : rcParams,
+             (unsigned long)hr);
         if (av1Speed) {
             LOGW("recorder: the AV1 speed setting (quality vs speed %u) was not accepted -- 8K at VR frame rates may drop frames",
                  av1Speed);
             av1Speed = 0;
+        } else if (qvsSet >= 0) {
+            LOGW("recorder: quality_vs_speed = %d was not accepted -- the encoder uses its default", qvsSet);
         }
+        qvsSet = -1;
+        rcText = std::string("encoder default (rate_control ") + RateControlKey(rc) + " not accepted)";
         hr = w->SetInputMediaType(vStream, in.Get(), nullptr);
     }
     if (FAILED(hr)) { why = "SetInputMediaType(video NV12)"; return hr; }
@@ -1633,7 +1779,17 @@ HRESULT Recorder::Impl::CreateWriter(VideoCodec c, bool hardware, std::string& w
     if (av1Speed)
         LOGI("recorder: AV1 %ux%u at %u fps = %.2f Gpixel/s (> 1) -- encoder quality vs speed %u (its default speed cannot keep "
              "up with 8K at VR frame rates)", outW, outH, fps, (double)outW * outH * fps / 1e9, av1Speed);
-    LOGI("recorder: sink writer ready (%s, %s transforms%s)", VideoCodecName(c), hardware ? "hardware" : "software",
+    else if (qvsSet >= 0) {
+        LOGI("recorder: encoder quality vs speed %d (quality_vs_speed; 0 = fastest, 100 = best quality)", qvsSet);
+        if (c == VideoCodec::Av1 && qvsSet > 25 && (double)outW * outH * fps > 1.0e9)
+            LOGW("recorder: AV1 %ux%u at %u fps = %.2f Gpixel/s with quality vs speed %d (> 25) -- the encoder may not keep up "
+                 "(dropped frames); quality_vs_speed = auto uses 25 here", outW, outH, fps, (double)outW * outH * fps / 1e9, qvsSet);
+    }
+    if (rc == RateControl::Qp && rcText.compare(0, 9, "constant ") == 0)
+        LOGI("recorder: rate_control = qp: %s (qp 0 = best, 51 = worst) -- bitrate_mbps is ignored, the file size follows the "
+             "content", rcText.c_str());
+    LOGI("recorder: sink writer ready (%s, %s transforms, rate control %s%s)", VideoCodecName(c), hardware ? "hardware" : "software",
+         rcText.c_str(),
          hasAudio ? (aacBytes >= 32000 ? ", AAC 256 kb/s" : aacBytes >= 24000 ? ", AAC 192 kb/s" : ", AAC <192 kb/s") : ", no audio");
     return S_OK;
 }
@@ -1775,6 +1931,21 @@ void Recorder::Impl::Process(const Item& it) {
         cpuTicks += QpcNow100ns() - c0;
     }
 
+    // constant_frame_rate: the frame's slot on the 1/fps grid (integer maths: no float, no drift). A slot that already has
+    // its frame drops this one; missing slots are filled with the previous frame BEFORE this frame's video processor pass
+    // can reuse the NV12 surface that still holds the previous frame.
+    int64_t cfrSlot = -1;
+    if (cfr) {
+        const int64_t rel0 = it.ts - t0.load();
+        cfrSlot = rel0 < 0 ? -1 : (rel0 * (int64_t)fps + 5000000) / 10000000;
+        if (cfrSlot <= cfrLastSlot) {
+            ++cfrDropped;
+            FreeSlot(it.slot, 0, false);   // no GPU work was queued on the slot
+            return;
+        }
+        if (cfrLastSlot >= 0 && cfrSlot > cfrLastSlot + 1) CfrFill(cfrSlot);
+    }
+
     const int n = pool->Acquire(3000);
     if (n < 0) {
         ++dropPool;
@@ -1875,24 +2046,36 @@ void Recorder::Impl::Process(const Item& it) {
     if (FAILED(hr)) {
         pool->Release(n);
         ++dropPool;
+        if (n == cfrPrevIdx) cfrPrevIdx = -1;   // the surface may be half overwritten: no repeat source until the next frame
         LOGE("recorder: VideoProcessorBlt failed hr=0x%08lx", (unsigned long)hr);
         return;
     }
 
-    const int64_t rel = it.ts - t0.load();
+    if (cfr) {   // constant_frame_rate: written at its grid slot; this surface is now the repeat source
+        cfrLastSlot = cfrRealSlot = cfrSlot;
+        cfrGapCapped = false;
+        cfrPrevIdx = WriteVideoSample(n, cfrSlot * 10000000LL / fps) ? n : -1;
+        return;
+    }
+    WriteVideoSample(n, it.ts - t0.load());
+}
+
+// NV12 pool surface n -> one video sample at `time` (100 ns, relative to t0), duration 1 / fps. The tracked sample hands n
+// back to the pool when Media Foundation releases it; on the paths that never hand it over, n is released here.
+bool Recorder::Impl::WriteVideoSample(int n, int64_t time) {
     ComPtr<IMFMediaBuffer> buf;
     ComPtr<IMF2DBuffer> b2;
     ComPtr<IMFTrackedSample> tracked;
     ComPtr<IMFSample> sample;
     DWORD len = 0;
-    hr = MFCreateDXGISurfaceBuffer(__uuidof(ID3D11Texture2D), nv12[(size_t)n].Get(), 0, FALSE, &buf);
+    HRESULT hr = MFCreateDXGISurfaceBuffer(__uuidof(ID3D11Texture2D), nv12[(size_t)n].Get(), 0, FALSE, &buf);
     if (SUCCEEDED(hr)) hr = buf.As(&b2);
     if (SUCCEEDED(hr)) hr = b2->GetContiguousLength(&len);
     if (SUCCEEDED(hr)) hr = buf->SetCurrentLength(len);
     if (SUCCEEDED(hr)) hr = MFCreateTrackedSample(&tracked);
     if (SUCCEEDED(hr)) hr = tracked.As(&sample);
     if (SUCCEEDED(hr)) hr = sample->AddBuffer(buf.Get());
-    if (SUCCEEDED(hr)) hr = sample->SetSampleTime(rel);
+    if (SUCCEEDED(hr)) hr = sample->SetSampleTime(time);
     if (SUCCEEDED(hr)) hr = sample->SetSampleDuration(10000000LL / fps);
     if (SUCCEEDED(hr)) hr = tracked->SetAllocator(poolCb[(size_t)n].Get(), nullptr);
     else pool->Release(n);
@@ -1902,10 +2085,68 @@ void Recorder::Impl::Process(const Item& it) {
     }
     if (FAILED(hr)) {
         if (++writeErrors <= 5) LOGE("recorder: video WriteSample failed hr=0x%08lx", (unsigned long)hr);
-        return;
+        return false;
     }
     ++written;
-    lastWrittenTs = rel;
+    lastWrittenTs = time;
+    return true;
+}
+
+// constant_frame_rate: fills the grid slots cfrLastSlot + 1 .. slot - 1 with the last written frame (cfrPrevIdx): a pool
+// surface is acquired, the previous frame copied into it on the encoder device and written at the missing slot's time.
+// The pool can hand out the very surface that holds the previous frame (the encoder released it, nothing overwrote it:
+// only this thread writes pool surfaces): then it is written as it is. Each copy becomes the new repeat source. At most 5 s
+// of frames after the last game frame (a frozen game must not write thousands of frames); the rest of a longer gap stays a
+// gap. Called when a frame arrives after a gap, and by CfrIdleFill while no frame arrives.
+void Recorder::Impl::CfrFill(int64_t slot) {
+    if (cfrPrevIdx < 0 || cfrRealSlot < 0) return;
+    const int64_t cap = 5 * (int64_t)fps;
+    int64_t last = slot - 1;
+    if (last > cfrRealSlot + cap) {
+        last = cfrRealSlot + cap;
+        if (!cfrGapCapped) {
+            cfrGapCapped = true;
+            if (++cfrCapped == 1)
+                LOGW("recorder: constant frame rate: no frame from the game for more than 5 s -- the last frame was repeated for 5 s "
+                     "(%lld frames); the rest of the gap stays a gap in the video (logged once)", (long long)cap);
+        }
+    }
+    const int64_t missing = last - cfrLastSlot;
+    for (int64_t j = 0; j < missing; ++j) {
+        const int m = pool->Acquire(3000);
+        if (m < 0) {
+            ++dropPool;
+            if (dropPool.load() == 1) LOGW("recorder: encoder stalled for 3 s (no free NV12 surface) -- dropping frames");
+            return;
+        }
+        if (m != cfrPrevIdx) {
+            ComPtr<ID3D11Device> locked;
+            const bool haveLock = devHandle && SUCCEEDED(devMgr->LockDevice(devHandle, IID_PPV_ARGS(&locked), TRUE));
+            encCtx->CopyResource(nv12[(size_t)m].Get(), nv12[(size_t)cfrPrevIdx].Get());
+            encCtx->Flush();
+            if (haveLock) devMgr->UnlockDevice(devHandle, FALSE);
+        }
+        const int64_t k = cfrLastSlot + 1;
+        if (!WriteVideoSample(m, k * 10000000LL / fps)) { cfrPrevIdx = -1; return; }
+        cfrLastSlot = k;
+        cfrPrevIdx = m;
+        ++cfrRepeated;
+    }
+}
+
+// constant_frame_rate, worker idle (no frame for 20 ms): repeats the last frame into the slots whose time has clearly
+// passed, so a stall is written while it happens instead of in one burst when the game resumes (a burst of hundreds of
+// encodes would hold up the worker and make the game thread drop the frames that follow: measured 75 dropped frames after a
+// 6 s stall at 3840x1080, many more at 8K). "Clearly passed" = older than now - 250 ms: a frame's time is its predicted
+// display time, which is ahead of the moment it is submitted, so a frame that is still on its way never lands in a slot
+// filled here (one that does is dropped like any second frame of a slot).
+void Recorder::Impl::CfrIdleFill() {
+    const int64_t t0v = t0.load();
+    if (cfrPrevIdx < 0 || cfrRealSlot < 0 || t0v == INT64_MIN || cfrGapCapped) return;
+    const int64_t rel = QpcNow100ns() - t0v - 2500000;
+    if (rel <= 0) return;
+    const int64_t passed = rel * (int64_t)fps / 10000000;   // the last slot whose time is over (floor)
+    if (passed > cfrLastSlot) CfrFill(passed + 1);
 }
 
 void Recorder::Impl::OnAudio(const int16_t* pcm, uint32_t frames, int64_t startQpc) {

@@ -8,6 +8,17 @@
 //                    [--max-width N] [--max-fps N]
 //                    [--head-smoothing S] [--fov-scale K] [--follow-deg D] [--roll-lock] [--no-edge-guard] [--no-symmetric]
 //                    [--youtube tb_half|sbs_half|sbs_full|tb_full] [--eye-crop 16:9|4:3|4:3pad|none]
+//                    [--rate-control vbr|cbr|qp] [--qp N] [--bitrate MBPS] [--quality-vs-speed auto|0..100]
+//                    [--cfr] [--ts-jitter] [--ts-gap SECONDS] [--detail]
+// --detail (D3D11, layout two; for the rate-control measurements in run_selftests.ps1): instead of the test pattern each
+// eye shows one of 8 pre-made pictures of a gradient with per-pixel noise (+-20 levels), changing every frame, so the
+// encoder has to spend bits (the flat test pattern compresses to almost nothing at any QP or bitrate). No pixel checks.
+// --rate-control / --qp / --bitrate / --quality-vs-speed: config.ini rate_control, qp, bitrate_mbps, quality_vs_speed.
+// --cfr: constant_frame_rate = 1. --ts-jitter (deterministic; for the CFR tests in run_jitter.ps1): frame 0 is exact, every
+// other frame is submitted up to +-35 % of a period off its due time, every 29th frame is not submitted at all (a gap of
+// one slot: CFR repeats the previous frame) and every 31st frame is followed by an extra submission 45 % of a period after
+// its due time (the same grid slot: CFR drops it). --ts-gap S: no frame is submitted for S seconds from a quarter into the
+// run (a frozen game: CFR repeats at most 5 s of it).
 // Head smoothing: every view is submitted with an identity pose and a +-0.8 rad fov, so with --fov-scale 1 the
 // re-projection is an exact identity mapping and verify_mp4.ps1's pixel checks (grey steps, eye id) still apply:
 // that proves the stage keeps the colour path (sRGB data and the linear pre-pass) unchanged. symmetric_fov is on by
@@ -43,6 +54,11 @@ struct Args {
     bool youtube = false;
     Layout3d layout3d = Layout3d::TbHalf;
     EyeCrop eyeCrop = EyeCrop::Wide169;
+    RateControl rateControl = RateControl::Vbr;
+    unsigned qp = 24, bitrateMbps = 0;
+    int qualityVsSpeed = -1;
+    bool cfr = false, tsJitter = false, detail = false;
+    double tsGap = 0;
 };
 
 std::wstring ExeDir() {
@@ -108,7 +124,27 @@ int main(int argc, char** argv) {
             else if (v == "sbs_full") a.layout3d = Layout3d::SbsFull;
             else if (v == "tb_full") a.layout3d = Layout3d::TbFull;
             else { printf("bad --youtube %s\n", v.c_str()); return 2; }
-        } else if (k == "--eye-crop") {
+        } else if (k == "--rate-control") {
+            const std::string v = next();
+            if (v == "vbr") a.rateControl = RateControl::Vbr;
+            else if (v == "cbr") a.rateControl = RateControl::Cbr;
+            else if (v == "qp") a.rateControl = RateControl::Qp;
+            else { printf("bad --rate-control %s\n", v.c_str()); return 2; }
+        } else if (k == "--qp") {
+            const int v = atoi(next().c_str());
+            if (v < 0 || v > 51) { printf("bad --qp %d (0..51)\n", v); return 2; }
+            a.qp = (unsigned)v;
+        } else if (k == "--bitrate") {
+            a.bitrateMbps = (unsigned)atoi(next().c_str());
+        } else if (k == "--quality-vs-speed") {
+            const std::string v = next();
+            a.qualityVsSpeed = v == "auto" ? -1 : atoi(v.c_str());
+            if (a.qualityVsSpeed < -1 || a.qualityVsSpeed > 100) { printf("bad --quality-vs-speed %s\n", v.c_str()); return 2; }
+        } else if (k == "--cfr") a.cfr = true;
+        else if (k == "--ts-jitter") a.tsJitter = true;
+        else if (k == "--detail") a.detail = true;
+        else if (k == "--ts-gap") a.tsGap = atof(next().c_str());
+        else if (k == "--eye-crop") {
             const std::string v = next();
             if (v == "16:9") a.eyeCrop = EyeCrop::Wide169;
             else if (v == "4:3") a.eyeCrop = EyeCrop::Std43;
@@ -119,14 +155,17 @@ int main(int argc, char** argv) {
         else { printf("unknown argument %s\n", k.c_str()); return 2; }
     }
     const bool d3d12 = a.api == "d3d12";
+    if (a.detail && (d3d12 || a.layout != "two")) { printf("--detail needs --api d3d11 --layout two\n"); return 2; }
     const std::wstring dir = ExeDir();
     elog::Init(dir + L"\\encoder_selftest.log", true);
     elog::SetLevel(LogLevel::Debug);
     if (a.out.empty()) a.out = dir + L"\\selftest_" + elog::Widen(a.api + "_" + a.layout + "_" + a.format + "_" + a.codec) + L".mp4";
-    LOGI("=== encoder_selftest: api=%s layout=%s eye=%ux%u format=%s codec=%s %.1f s @ %u fps%s%s%s%s -> %s", a.api.c_str(),
+    LOGI("=== encoder_selftest: api=%s layout=%s eye=%ux%u format=%s codec=%s %.1f s @ %u fps%s%s%s%s rate_control %s qp %u "
+         "bitrate %u quality_vs_speed %d%s%s gap %.1f s -> %s", a.api.c_str(),
          a.layout.c_str(), a.eyeW, a.eyeH, a.format.c_str(), a.codec.c_str(), a.seconds, a.fps, a.youtube ? " youtube " : "",
          a.youtube ? YtPackingKey(a.layout3d) : "", a.youtube ? " eye_crop " : "", a.youtube ? YtCropKey(a.eyeCrop) : "",
-         elog::Narrow(a.out).c_str());
+         RateControlKey(a.rateControl), a.qp, a.bitrateMbps, a.qualityVsSpeed, a.cfr ? " cfr" : "", a.tsJitter ? " ts-jitter" : "",
+         a.tsGap, elog::Narrow(a.out).c_str());
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
 
     ComPtr<IDXGIAdapter1> adapter = PickAdapter();
@@ -234,6 +273,30 @@ int main(int argc, char** argv) {
         src = CreateD3D12FrameSource(dev12.Get(), queue12.Get());
     }
     if (!src) { LOGE("frame source creation failed"); return 1; }
+    // --detail: 8 noisy gradient pictures per eye size, copied into the eye textures (CopyResource: same size and format)
+    std::vector<ComPtr<ID3D11Texture2D>> detailTex;
+    if (a.detail) {
+        std::vector<uint8_t> px((size_t)w * h * 4);
+        uint32_t seed = 777;
+        for (int k = 0; k < 8; ++k) {
+            for (UINT y = 0; y < h; ++y)
+                for (UINT x = 0; x < w; ++x) {
+                    seed = seed * 1664525u + 1013904223u;
+                    const int n = (int)((seed >> 24) % 41) - 20;
+                    uint8_t* p = &px[((size_t)y * w + x) * 4];
+                    const int base = (int)(48 + 160 * x / w), base2 = (int)(48 + 160 * y / h);
+                    auto cl = [](int v) { return (uint8_t)(v < 0 ? 0 : v > 255 ? 255 : v); };
+                    p[0] = cl(base + n); p[1] = cl(base2 + n); p[2] = cl((base + base2) / 2 + n); p[3] = 255;
+                }
+            D3D11_TEXTURE2D_DESC d{};
+            d.Width = w; d.Height = h; d.MipLevels = 1; d.ArraySize = 1; d.Format = texFmt;
+            d.SampleDesc.Count = 1; d.Usage = D3D11_USAGE_DEFAULT; d.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            D3D11_SUBRESOURCE_DATA sd{px.data(), w * 4, 0};
+            ComPtr<ID3D11Texture2D> t;
+            if (FAILED(dev11->CreateTexture2D(&d, &sd, &t))) { LOGE("--detail texture failed"); return 1; }
+            detailTex.push_back(t);
+        }
+    }
 
     // ---- eye views, exactly as the layer builds them from XrCompositionLayerProjectionView ----
     EyeView eyes[2];
@@ -258,6 +321,11 @@ int main(int argc, char** argv) {
     RecorderSettings rs;
     rs.path = a.out;
     rs.codec = a.codec == "h264" ? VideoCodec::H264 : a.codec == "av1" ? VideoCodec::Av1 : VideoCodec::Hevc;
+    rs.bitrate = a.bitrateMbps * 1000000u;
+    rs.rateControl = a.rateControl;
+    rs.qp = a.qp;
+    rs.qualityVsSpeed = a.qualityVsSpeed;
+    rs.constantFrameRate = a.cfr;
     rs.fps = a.fps;
     rs.audio = a.audio;
     rs.maxWidth = a.maxWidth;
@@ -295,15 +363,28 @@ int main(int argc, char** argv) {
     const int64_t period = 10000000LL / a.fps;
     const int64_t base = QpcNow100ns() + 50000;
     std::vector<PatRect> pat;
-    UINT submitted = 0;
+    UINT submitted = 0, skipped = 0, extras = 0, gapFrames = 0;
     double cpuMax = 0, cpuSum = 0;
+    uint32_t lcg = 12345;   // --ts-jitter: deterministic pseudo-random offsets
+    const UINT gapFirst = frames / 4, gapLen = (UINT)(a.tsGap * a.fps + 0.5);
     for (UINT f = 0; f < frames; ++f) {
         const int64_t due = base + (int64_t)f * period;
         for (int64_t now = QpcNow100ns(); now < due; now = QpcNow100ns()) {
             if (due - now > 20000) Sleep(1);
         }
+        if (gapLen && f >= gapFirst && f < gapFirst + gapLen) { ++gapFrames; continue; }   // --ts-gap: the game froze
+        int64_t ts = due;
+        bool extra = false;
+        if (a.tsJitter && f > 0) {
+            if (f % 29 == 13) { ++skipped; continue; }   // a missing frame
+            lcg = lcg * 1664525u + 1013904223u;
+            ts = due + (int64_t)(((double)(lcg >> 8) / 16777216.0 * 0.7 - 0.35) * period);
+            extra = f % 31 == 7;
+        }
         // draw both eyes
-        if (!d3d12) {
+        if (!d3d12 && a.detail) {
+            for (int e = 0; e < 2; ++e) ctx11->CopyResource(sc[(size_t)e].t11.Get(), detailTex[(f * 3 + (UINT)e) % 8].Get());
+        } else if (!d3d12) {
             for (int e = 0; e < 2; ++e) {
                 FakeSwapchain& s = sc[(arr || wide) ? 0 : (size_t)e];
                 ID3D11RenderTargetView* rtv = s.rtv11[arr ? (size_t)e : 0].Get();
@@ -331,15 +412,20 @@ int main(int argc, char** argv) {
         }
         // the layer's xrEndFrame work
         const int64_t c0 = QpcNow100ns();
-        if (rec.SubmitFrame(due, eyes[0], eyes[1], due * 100)) ++submitted;
+        if (rec.SubmitFrame(ts, eyes[0], eyes[1], ts * 100)) ++submitted;
+        if (extra) {   // a second frame in the same grid slot (45 % of a period after the due time; the jitter is <= 35 %)
+            const int64_t ts2 = due + period * 45 / 100;
+            if (rec.SubmitFrame(ts2, eyes[0], eyes[1], ts2 * 100)) ++submitted;
+            ++extras;
+        }
         const double ms = (QpcNow100ns() - c0) / 1e4;
         cpuSum += ms;
         if (ms > cpuMax) cpuMax = ms;
         if (!d3d12) ctx11->Flush();
     }
     timeEndPeriod(1);
-    LOGI("frame loop done: %u frames, %u submitted, game-thread SubmitFrame cost avg %.3f ms max %.3f ms", frames, submitted,
-         cpuSum / frames, cpuMax);
+    LOGI("frame loop done: %u frames, %u submitted (%u not submitted by --ts-jitter, %u extra, %u in the --ts-gap), game-thread "
+         "SubmitFrame cost avg %.3f ms max %.3f ms", frames, submitted, skipped, extras, gapFrames, cpuSum / frames, cpuMax);
 
     rec.Stop();
     const bool idle = rec.WaitIdle(60000);
@@ -354,7 +440,10 @@ int main(int argc, char** argv) {
         WaitForSingleObject(fenceEvt, 5000);
     }
     CloseHandle(fenceEvt);
-    const UINT expected = (a.maxFps && a.maxFps < a.fps) ? frames * a.maxFps / a.fps : frames;
+    // CFR: one frame per slot, a gap repeated up to 5 s; VFR: the frames that were submitted once per due time
+    UINT expected = (a.maxFps && a.maxFps < a.fps) ? frames * a.maxFps / a.fps : frames;
+    if (a.cfr) { const UINT cap = 5 * a.fps; expected -= gapFrames > cap ? gapFrames - cap : 0; }
+    else expected -= skipped + gapFrames;
     const bool ok = idle && st.framesWritten >= expected * 9 / 10 && GetFileAttributesW(a.out.c_str()) != INVALID_FILE_ATTRIBUTES;
     LOGI("=== encoder_selftest %s", ok ? "PASS" : "FAIL");
     return ok ? 0 : 1;

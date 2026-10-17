@@ -569,6 +569,61 @@ int TestSave(const std::wstring& path) {
               "codec defaults: AV1 80 / HEVC 120 / H.264 80 Mbit/s; frame limit AV1 8192, H.264 4096");
         DeleteFileW(pc.c_str());
     }
+    // 14. issue #1 keys: beeps, rate_control, qp, quality_vs_speed, constant_frame_rate. Defaults; missing keys + defaults leave
+    // the file alone; each non-default value is appended to [capture] and read back; bad values are reported and keep the default.
+    {
+        Config def;
+        Check(def.beeps && def.rateControl == RateControl::Vbr && def.qp == 24 && def.qualityVsSpeed == -1 && !def.constantFrameRate,
+              "defaults: beeps 1, rate_control vbr, qp 24, quality_vs_speed auto (-1), constant_frame_rate 0");
+        const std::wstring pn = path + L".issue1-test.ini";
+        const std::string base = "[capture]\r\nswap_eyes = 0\r\n\r\n[debug]\r\nlog_level = info\r\n";
+        { std::ofstream f(pn, std::ios::binary); f << base; }
+        Config n;
+        ParseHotkey(L"Ctrl+Shift+F10", n.hotkey);
+        settings::SaveResult r0;
+        Check(settings::SaveSettingsToFile(pn, n, r0) && r0.changed.empty() && ReadAll(pn) == base,
+              "missing beeps / rate_control / qp / quality_vs_speed / constant_frame_rate + defaults: the file is left alone");
+        n.beeps = false; n.rateControl = RateControl::Qp; n.qp = 18; n.qualityVsSpeed = 75; n.constantFrameRate = true;
+        settings::SaveResult r1;
+        const bool ok1 = settings::SaveSettingsToFile(pn, n, r1);
+        Config back;
+        std::vector<std::wstring> prb;
+        ParseConfigFile(pn, back, prb);
+        const std::string t1 = ReadAll(pn);
+        Check(ok1 && r1.changed.size() == 5 && prb.empty() && !back.beeps && back.rateControl == RateControl::Qp && back.qp == 18 &&
+                  back.qualityVsSpeed == 75 && back.constantFrameRate && t1.find("rate_control = qp\r\n") != std::string::npos &&
+                  t1.find("quality_vs_speed = 75\r\n") != std::string::npos && t1.find("[debug]") > t1.find("constant_frame_rate = 1"),
+              "beeps 0, rate_control qp, qp 18, quality_vs_speed 75, constant_frame_rate 1: appended to [capture] and read back");
+        n.qualityVsSpeed = -1; n.rateControl = RateControl::Cbr;
+        settings::SaveResult r2;
+        const bool ok2 = settings::SaveSettingsToFile(pn, n, r2);
+        ParseConfigFile(pn, back, prb);
+        const std::string t2 = ReadAll(pn);
+        Check(ok2 && r2.changed.size() == 2 && back.qualityVsSpeed == -1 && back.rateControl == RateControl::Cbr &&
+                  t2.find("quality_vs_speed = auto\r\n") != std::string::npos && t2.find("rate_control = cbr\r\n") != std::string::npos,
+              "quality_vs_speed back to auto and rate_control cbr: changed in place");
+        // Norm: "AUTO" / "Auto" and "cqp" are the same values (no change reported)
+        { std::ofstream f(pn, std::ios::binary); f << "[capture]\r\nquality_vs_speed = AUTO\r\nrate_control = cqp\r\nqp = 024\r\n"; }
+        Config same;
+        std::vector<std::wstring> prs;
+        ParseConfigFile(pn, same, prs);
+        settings::SaveResult r3;
+        Check(prs.empty() && same.qualityVsSpeed == -1 && same.rateControl == RateControl::Qp && same.qp == 24 &&
+                  settings::SaveSettingsToFile(pn, same, r3) && r3.changed.empty(),
+              "quality_vs_speed = AUTO, rate_control = cqp, qp = 024 parse and count as unchanged on Save");
+        // bad values: qp 52, quality_vs_speed 101 / fast, rate_control abr, beeps maybe, constant_frame_rate 2
+        { std::ofstream f(pn, std::ios::binary);
+          f << "[capture]\r\nqp = 52\r\nquality_vs_speed = 101\r\nrate_control = abr\r\nbeeps = maybe\r\nconstant_frame_rate = 2\r\n"
+               "quality_vs_speed = fast\r\n"; }
+        Config bad;
+        std::vector<std::wstring> prx;
+        ParseConfigFile(pn, bad, prx);
+        for (const auto& p : prx) printf("    problem: %s\n", N(p).c_str());
+        Check(prx.size() == 6 && bad.qp == 24 && bad.qualityVsSpeed == -1 && bad.rateControl == RateControl::Vbr && bad.beeps &&
+                  !bad.constantFrameRate,
+              "qp 52, quality_vs_speed 101 / fast, rate_control abr, beeps maybe, constant_frame_rate 2: 6 bad values, defaults kept");
+        DeleteFileW(pn.c_str());
+    }
     return g_fail;
 }
 struct FindCtx { DWORD pid; HWND found; };

@@ -18,11 +18,13 @@ ControlHooks      s_hooks;
 // Guards the shared status block between the control thread and ControlPublishFinal (called from the game's
 // xrDestroySession thread). Lock order: s_pubLock -> g_lock (snapshot()); nobody calls into control holding g_lock.
 std::mutex        s_pubLock;
+std::atomic<bool> s_beeps{true};         // config beeps (ControlStart, ControlSetBeeps at every config reload)
 EyeCapShared*     s_shm = nullptr;       // valid while the control thread runs (set / cleared under s_pubLock)
 bool              s_owner = false;
 ULONGLONG         s_lastPublish = 0;
 
 void Cue(int kind) {
+    if (!s_beeps.load()) return;   // beeps = 0: the cues play on the default device, which is often the recorded loopback one
     switch (kind) {
     case 0: Beep(880, 160); break;
     case 1: Beep(660, 90); Sleep(70); Beep(660, 90); break;
@@ -227,6 +229,7 @@ void ControlStart(const Config& cfg, const std::wstring& logPath, const std::wst
         s_eventName = std::wstring(testShm) + L"-Command";
     }
     s_cfg = cfg;
+    s_beeps = cfg.beeps;
     s_logPath = logPath;
     s_configPath = configPath;
     s_hooks = std::move(hooks);
@@ -239,8 +242,12 @@ void ControlStart(const Config& cfg, const std::wstring& logPath, const std::wst
         LOGE("control: CreateThread failed -- hotkey and tray control disabled");
         return;
     }
-    LOGI("control: hotkey %s (keyboard / mouse: exact modifiers; Pad: / Joy: are read by the tray), tray IPC %s", elog::Narrow(cfg.hotkey.text).c_str(),
-         elog::Narrow(s_shmName).c_str());
+    LOGI("control: hotkey %s (keyboard / mouse: exact modifiers; Pad: / Joy: are read by the tray), tray IPC %s, beeps %s",
+         elog::Narrow(cfg.hotkey.text).c_str(), elog::Narrow(s_shmName).c_str(), cfg.beeps ? "on" : "off");
+}
+
+void ControlSetBeeps(bool on) {
+    if (s_beeps.exchange(on) != on) LOGI("control: beeps %s (config reload)", on ? "on" : "off");
 }
 
 void ControlStop() {

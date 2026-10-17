@@ -203,14 +203,18 @@ void InitProcess() {
     GetModuleFileNameW(nullptr, exe, MAX_PATH);
     LOGI("==== " LAYER_NAME " v%s loaded into %s (pid %lu)", EYE_CAPTURE_VERSION, elog::Narrow(exe).c_str(),
          (unsigned long)GetCurrentProcessId());
-    LOGI("layer dll folder %s | config %s | output %s | hotkey %s | codec %s %u Mb/s | max_width %u | max_fps %u | "
-         "audio %s%s%s | gamma %s",
+    char qvsText[16];
+    if (g_cfg.qualityVsSpeed >= 0) snprintf(qvsText, sizeof(qvsText), "%d", g_cfg.qualityVsSpeed);
+    else snprintf(qvsText, sizeof(qvsText), "auto");
+    LOGI("layer dll folder %s | config %s | output %s | hotkey %s | codec %s %u Mb/s | rate_control %s | qp %u | "
+         "quality_vs_speed %s | max_width %u | max_fps %u | constant_frame_rate %d | audio %s%s%s | gamma %s | beeps %d",
          elog::Narrow(g_dllDir).c_str(), g_cfg.loadedFrom.empty() ? "(defaults)" : elog::Narrow(g_cfg.loadedFrom).c_str(),
          elog::Narrow(g_cfg.outputDir).c_str(), elog::Narrow(g_cfg.hotkey.text).c_str(), VideoCodecName(g_cfg.codec),
-         g_cfg.bitrateMbps ? g_cfg.bitrateMbps : VideoCodecDefaultMbps(g_cfg.codec), g_cfg.maxWidth, g_cfg.maxFps,
+         g_cfg.bitrateMbps ? g_cfg.bitrateMbps : VideoCodecDefaultMbps(g_cfg.codec), RateControlKey(g_cfg.rateControl), g_cfg.qp,
+         qvsText, g_cfg.maxWidth, g_cfg.maxFps, g_cfg.constantFrameRate ? 1 : 0,
          g_cfg.audioEnabled ? "on" : "off", g_cfg.audioDevice.empty() ? "" : " device~",
          elog::Narrow(g_cfg.audioDevice).c_str(),
-         g_cfg.gamma == GammaMode::Auto ? "auto" : g_cfg.gamma == GammaMode::Srgb ? "srgb" : "linear");
+         g_cfg.gamma == GammaMode::Auto ? "auto" : g_cfg.gamma == GammaMode::Srgb ? "srgb" : "linear", g_cfg.beeps ? 1 : 0);
     if (g_cfg.head.Enabled())
         LOGI("head smoothing: head_smoothing %.2f (time constant %.3f s) | head_follow_deg %.1f | roll_lock %d | "
              "output_fov_scale %.2f | edge_guard %d",
@@ -336,6 +340,10 @@ void StartRecording(SessionData* sd, const EyeView& L, const EyeView& R) {
     rs.path = g_cfg.outputDir + L"\\" + name;
     rs.codec = g_cfg.codec;
     rs.bitrate = g_cfg.bitrateMbps * 1000000u;
+    rs.rateControl = g_cfg.rateControl;
+    rs.qp = g_cfg.qp;
+    rs.qualityVsSpeed = g_cfg.qualityVsSpeed;
+    rs.constantFrameRate = g_cfg.constantFrameRate;
     rs.fps = fps;
     rs.maxFps = g_cfg.maxFps;
     rs.maxWidth = g_cfg.maxWidth;
@@ -378,7 +386,8 @@ int64_t VideoClock(SessionData* sd, XrTime displayTime) {
 
 // Re-read config.ini at the start of each recording (the tray's Settings window edits it): only keys that can change
 // per recording are copied over; hotkey, require_tray, vr_indicator / indicator_* keep their game-start values
-// (post_* belong to the tray). Called with g_lock held, on the game thread, before the swap_eyes decision.
+// (post_* belong to the tray). beeps goes to the control thread (ControlSetBeeps), before the start cue plays.
+// Called with g_lock held, on the game thread, before the swap_eyes decision.
 void ReloadConfigForRecording() {
     Config n;
     LoadConfig(g_dllDir, n);
@@ -403,9 +412,14 @@ void ReloadConfigForRecording() {
     Config& c = g_cfg;
     note("output_dir", elog::Narrow(c.outputDir), elog::Narrow(n.outputDir));
     note("codec", VideoCodecKey(c.codec), VideoCodecKey(n.codec));
+    auto Q = [](int q) { return q < 0 ? std::string("auto") : std::to_string(q); };
     note("bitrate_mbps", U(c.bitrateMbps), U(n.bitrateMbps));
+    note("rate_control", RateControlKey(c.rateControl), RateControlKey(n.rateControl));
+    note("qp", U(c.qp), U(n.qp));
+    note("quality_vs_speed", Q(c.qualityVsSpeed), Q(n.qualityVsSpeed));
     note("fps", U(c.fps), U(n.fps));
     note("max_fps", U(c.maxFps), U(n.maxFps));
+    note("constant_frame_rate", B(c.constantFrameRate), B(n.constantFrameRate));
     note("max_width", U(c.maxWidth), U(n.maxWidth));
     note("record_for_youtube", B(c.recordForYoutube), B(n.recordForYoutube));
     note("layout_3d", YtPackingKey(c.layout3d), YtPackingKey(n.layout3d));
@@ -416,6 +430,7 @@ void ReloadConfigForRecording() {
     note("record_overlays", B(c.recordOverlays), B(n.recordOverlays));
     note("audio_enabled", B(c.audioEnabled), B(n.audioEnabled));
     note("audio_device", elog::Narrow(c.audioDevice), elog::Narrow(n.audioDevice));
+    note("beeps", B(c.beeps), B(n.beeps));
     note("symmetric_fov", B(c.head.symmetricFov), B(n.head.symmetricFov));
     note("head_smoothing", F(c.head.smoothing), F(n.head.smoothing));
     note("head_follow_deg", F(c.head.followDeg), F(n.head.followDeg));
@@ -433,6 +448,9 @@ void ReloadConfigForRecording() {
 
     const bool outChanged = c.outputDir != n.outputDir;
     c.outputDir = n.outputDir; c.codec = n.codec; c.bitrateMbps = n.bitrateMbps; c.fps = n.fps; c.maxFps = n.maxFps;
+    c.rateControl = n.rateControl; c.qp = n.qp; c.qualityVsSpeed = n.qualityVsSpeed; c.constantFrameRate = n.constantFrameRate;
+    c.beeps = n.beeps;
+    ControlSetBeeps(c.beeps);   // the control thread copied the Config at its start; the start / stop cues follow this
     c.maxWidth = n.maxWidth; c.gamma = n.gamma; c.swapEyes = n.swapEyes; c.recordOverlays = n.recordOverlays;
     c.recordForYoutube = n.recordForYoutube; c.layout3d = n.layout3d; c.eyeCrop = n.eyeCrop;   // record_for_youtube layout
     c.audioEnabled = n.audioEnabled;

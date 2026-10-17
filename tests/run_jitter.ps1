@@ -36,13 +36,24 @@
               turn, catch-up) -- with smoothing it follows the smoothed camera (OverlayHeadLock), a steady HUD; the
               world-locked quad keeps its angular distance to the world marker (std-dev <= 0.05 deg, jitter phase, both
               eyes), i.e. it moves with the world exactly like the rendered scene.
+    constant_frame_rate (CFR):
+      cfr     (layer) as raw with constant_frame_rate = 1 (XR_EYE_CAPTURE_CONFIG): every video packet lasts exactly 1/fps,
+              r_frame_rate == avg_frame_rate, the summary says "constant frame rate N fps, X repeated, Y dropped", the marker
+              still follows the mock pose (RMS < 0.15 deg) and the frame count matches the recorded time.
+      cfrjit  (encoder_selftest, no layer) two recordings of the same deterministic jittered timestamps (--ts-jitter: up to
+              +-35 % of a period off, every 29th frame missing, every 31st followed by a second frame in the same period):
+              VFR (unchanged: real timestamps, "variable frame rate") and --cfr: CFR has constant packet durations,
+              r_frame_rate == avg_frame_rate, frame count == round(seconds * fps) +- 1, repeated > 0 and dropped > 0 (the
+              missing / extra frames), and its stream duration is within 1 % of the VFR file's.
+      cfrgap  (encoder_selftest --cfr --ts-gap 6) a 6 s stall: the last frame is repeated for 5 s only (logged once, the summary
+              says so), the rest stays a single gap; constant durations otherwise; no frames dropped by the ring after the stall.
     The recording cases set XR_EYE_CAPTURE_REQUIRE_TRAY=0 and XR_EYE_CAPTURE_CONFIG (test-only overrides; projection=flat
     pins the flat path whatever config.ini says).
-      powershell -ExecutionPolicy Bypass -File tests\run_jitter.ps1 [-BuildLayer] [-OnlyHud]
+      powershell -ExecutionPolicy Bypass -File tests\run_jitter.ps1 [-BuildLayer] [-OnlyHud] [-OnlyCfr]
       -BuildLayer: test build\Release\eye_capture.dll instead of the installed (registered) copy, as in run_e2e.ps1.
-      -OnlyHud: run only the hud cases.
+      -OnlyHud: run only the hud cases. -OnlyCfr: run only the constant_frame_rate cases.
 #>
-param([string]$FfmpegDir = '', [switch]$BuildLayer, [switch]$OnlyHud)
+param([string]$FfmpegDir = '', [switch]$BuildLayer, [switch]$OnlyHud, [switch]$OnlyCfr)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $bin = Join-Path $root 'build\Release'
@@ -178,9 +189,12 @@ $cases = @(
     @{ name = 'noguard'; cfg = 'projection=flat;head_smoothing=0.6;output_fov_scale=0.9;edge_guard=0'; k = 0.9; tans = $symTans },
     @{ name = 'hudraw';    cfg = 'projection=flat;head_smoothing=0';                        k = 1.0; tans = $symTans; hud = $true },
     @{ name = 'hudsmooth'; cfg = 'projection=flat;head_smoothing=0.6;output_fov_scale=0.9'; k = 0.9; tans = $symTans; hud = $true },
-    @{ name = 'small';   cfg = 'projection=flat;head_smoothing=0;max_width=1280';                      k = 1.0; tans = $symTans }
+    @{ name = 'small';   cfg = 'projection=flat;head_smoothing=0;max_width=1280';                      k = 1.0; tans = $symTans },
+    @{ name = 'cfr';     cfg = 'projection=flat;head_smoothing=0;constant_frame_rate=1';               k = 1.0; tans = $symTans; cfr = $true }
 )
 if ($OnlyHud) { $cases = @($cases | Where-Object { $_.hud }) }
+if ($OnlyCfr) { $cases = @($cases | Where-Object { $_.cfr }) }
+$files = @{}
 $hudData = @{}
 $dims = @{}
 $logs = @{}
@@ -203,6 +217,7 @@ foreach ($c in $cases) {
     $mOut = [regex]::Match($o, 'E2E_OUTPUT=(.+)'); $mT0 = [regex]::Match($o, 'E2E_T0_NS=(\d+)')
     if ($LASTEXITCODE -ne 0 -or -not $mOut.Success -or -not $mT0.Success) { Write-Host $o; Check $false "$($c.name): e2e run"; continue }
     $file = $mOut.Groups[1].Value.Trim()
+    $files[$c.name] = $file
     $log = Get-Content (Join-Path $out 'eye_capture.log') -Raw -Encoding UTF8
     $mFirst = [regex]::Match($log, 'first video frame \(t = 0 in the file\): displayTime (\d+) ns')
     $mSum = [regex]::Match($log, 're-projection summary[^\r\n]+')
@@ -298,7 +313,7 @@ function Settle($rows) {
 }
 
 Write-Host "`n=== checks" -ForegroundColor Cyan
-foreach ($name in @('raw', 'rawasym', 'small')) {
+foreach ($name in @('raw', 'rawasym', 'small', 'cfr')) {
     if (-not $data.ContainsKey($name)) { continue }
     $lim = if ($name -eq 'small') { 0.3 } else { 0.15 }
     $se = 0; $cnt = 0; $missing = 0
@@ -352,8 +367,8 @@ if ($summ.ContainsKey('smooth')) {
     $sm = $summ['smooth']
     Check ($sm.uncovered -eq 0) ("smooth: layer summary reports 0 frames with uncovered output (got {0})" -f $sm.uncovered)
     Check ($sm.guarded -gt 0) ("smooth: the edge guard acted ({0} frames)" -f $sm.guarded)
-} elseif (-not $OnlyHud) { Check $false 'smooth: re-projection summary line in the log' }
-if (-not $OnlyHud) {
+} elseif (-not $OnlyHud -and -not $OnlyCfr) { Check $false 'smooth: re-projection summary line in the log' }
+if (-not $OnlyHud -and -not $OnlyCfr) {
     if ($dims.ContainsKey('small') -and $logs.ContainsKey('small')) {
         $sw = $dims['small'][0]; $sh = $dims['small'][1]
         $mR = [regex]::Match($logs['small'], 're-projection rendered at (\d+)x(\d+) \(left (\d+) \| right (\d+); max_width 1280;[^\r\n]*?(\d)x\d bilinear taps')
@@ -370,6 +385,7 @@ function StdDev($v) {
     $m = ($a | Measure-Object -Average).Average; $q = 0; foreach ($x in $a) { $q += ($x - $m) * ($x - $m) }; return [math]::Sqrt($q / $a.Count)
 }
 foreach ($name in @('hudraw', 'hudsmooth')) {
+    if ($OnlyCfr) { break }
     if (-not $hudData.ContainsKey($name)) { Check $false "${name}: recording"; continue }
     $rows = $hudData[$name].ToArray()
     foreach ($e in 0, 1) {
@@ -391,6 +407,72 @@ foreach ($name in @('hudraw', 'hudsmooth')) {
         Check ($wMiss -eq 0 -and $sw -le 0.05) ("{0}: world-locked quad, {1} eye: angle to the world marker std-dev {2:N4} deg (<= 0.05; jitter phase, {3} frames, missing {4}); it moves with the world: position std-dev {5:N2} / {6:N2} px; VIEW quad vs marker {7:N3} deg" -f $name, $eye, $sw, $j.Count, $wMiss, $wx, $wy, $sv)
     }
 }
-if ($fails.Count -eq 0) { Write-Host "`nPASS head smoothing" -ForegroundColor Green; exit 0 }
-Write-Host "`nFAIL head smoothing ($($fails.Count) checks)" -ForegroundColor Red
+# ---- constant_frame_rate
+# Video packets of a file: pts (s, sorted) and the distinct packet durations (s, as ffprobe prints them, 6 decimals)
+function Packets($file) {
+    $rows = & $ffprobe -v error -select_streams v:0 -show_entries packet=pts_time,duration_time -of csv=p=0 $file | Where-Object { $_ -match '\d' }
+    $pts = @($rows | ForEach-Object { [double]($_.Split(',')[0]) } | Sort-Object)
+    $dur = @($rows | ForEach-Object { $_.Split(',')[1].Trim() } | Sort-Object -Unique)
+    $steps = @(); for ($i = 1; $i -lt $pts.Count; $i++) { $steps += ($pts[$i] - $pts[$i - 1]) }
+    return @{ n = $pts.Count; pts = $pts; dur = $dur; steps = $steps }
+}
+function StreamInfo($file) {
+    $j = & $ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate,avg_frame_rate,duration -of json $file | Out-String | ConvertFrom-Json
+    return $j.streams[0]
+}
+if (-not $OnlyHud) {
+    Write-Host "`n=== constant_frame_rate" -ForegroundColor Cyan
+    # cfr (layer): the config key reaches the recorder through the layer
+    if ($files.ContainsKey('cfr') -and $logs.ContainsKey('cfr')) {
+        $pk = Packets $files['cfr']; $si = StreamInfo $files['cfr']
+        $mS = [regex]::Match($logs['cfr'], 'recording summary: OK [^\r\n]*\| constant frame rate (\d+) fps, (\d+) repeated, (\d+) dropped')
+        Write-Host ("  [cfr] {0} packets, durations {1}, r_frame_rate {2}, avg_frame_rate {3}, stream duration {4} s" -f $pk.n, ($pk.dur -join ' '), $si.r_frame_rate, $si.avg_frame_rate, $si.duration)
+        Check ($mS.Success) ("cfr: layer summary says {0}" -f $(if ($mS.Success) { $mS.Value.Substring($mS.Value.IndexOf('constant frame rate')) } else { "'constant frame rate N fps, X repeated, Y dropped' (missing)" }))
+        Check ($pk.dur.Count -eq 1 -and $si.r_frame_rate -eq $si.avg_frame_rate) ("cfr: every packet {0} s, r_frame_rate {1} == avg_frame_rate {2}" -f ($pk.dur -join ' / '), $si.r_frame_rate, $si.avg_frame_rate)
+        if ($mS.Success) {
+            $fpsN = [int]$mS.Groups[1].Value
+            $want = [math]::Round(([double]$pk.pts[-1] + 1.0 / $fpsN) * $fpsN)
+            Check ([math]::Abs($pk.n - $want) -le 1) ("cfr: {0} frames for {1:N3} s at {2} fps (want {3} +- 1)" -f $pk.n, ($pk.pts[-1] + 1.0 / $fpsN), $fpsN, $want)
+        }
+    } else { Check $false 'cfr: layer recording' }
+    # cfrjit / cfrgap (encoder_selftest): jittered, missing and doubled timestamps; a 6 s stall
+    $selftest = Join-Path $bin 'encoder_selftest.exe'
+    $cdir = Join-Path $root 'build\e2e_out\jitter_cfr_selftest'
+    if (Test-Path $cdir) { Remove-Item -Recurse -Force $cdir }
+    New-Item -ItemType Directory -Force $cdir | Out-Null
+    $sec = 6; $fps = 90
+    $vfr = Join-Path $cdir 'vfr.mp4'; $cfr = Join-Path $cdir 'cfr.mp4'; $gap = Join-Path $cdir 'gap.mp4'
+    $logV = @(& $selftest --no-tone --seconds $sec --fps $fps --ts-jitter --out $vfr); $okV = $LASTEXITCODE -eq 0
+    $logC = @(& $selftest --no-tone --seconds $sec --fps $fps --ts-jitter --cfr --out $cfr); $okC = $LASTEXITCODE -eq 0
+    $logG = @(& $selftest --no-tone --seconds 12 --fps $fps --cfr --ts-gap 6 --out $gap); $okG = $LASTEXITCODE -eq 0
+    Check ($okV -and $okC -and $okG) "cfrjit / cfrgap: encoder_selftest runs exit 0 (VFR $okV, CFR $okC, gap $okG)"
+    if ($okV -and $okC) {
+        $tV = $logV -join "`n"; $tC = $logC -join "`n"
+        $mLoop = [regex]::Match($tC, '(\d+) not submitted by --ts-jitter, (\d+) extra')
+        $mC = [regex]::Match($tC, 'constant frame rate (\d+) fps, (\d+) repeated, (\d+) dropped')
+        Check ($tV -match 'recording summary: OK [^\r\n]*\| variable frame rate \(real timestamps\)') 'cfrjit: the VFR recording is unchanged (summary: variable frame rate (real timestamps))'
+        $pV = Packets $vfr; $pC = Packets $cfr; $sV = StreamInfo $vfr; $sC = StreamInfo $cfr
+        Write-Host ("  [cfrjit] VFR: {0} packets, {1} distinct durations, r {2}, avg {3}, duration {4} s" -f $pV.n, $pV.dur.Count, $sV.r_frame_rate, $sV.avg_frame_rate, $sV.duration)
+        Write-Host ("  [cfrjit] CFR: {0} packets, durations {1}, r {2}, avg {3}, duration {4} s" -f $pC.n, ($pC.dur -join ' '), $sC.r_frame_rate, $sC.avg_frame_rate, $sC.duration)
+        if ($mLoop.Success) { Write-Host ("  [cfrjit] submitted: {0} frames left out, {1} extra frames in an occupied period" -f $mLoop.Groups[1].Value, $mLoop.Groups[2].Value) }
+        Check ($pC.dur.Count -eq 1 -and $sC.r_frame_rate -eq $sC.avg_frame_rate) ("cfrjit: CFR packets all {0} s, r_frame_rate {1} == avg_frame_rate {2}" -f ($pC.dur -join ' / '), $sC.r_frame_rate, $sC.avg_frame_rate)
+        $want = [math]::Round($sec * $fps)
+        Check ([math]::Abs($pC.n - $want) -le 1) ("cfrjit: CFR frame count {0} (want round({1} s x {2} fps) = {3} +- 1)" -f $pC.n, $sec, $fps, $want)
+        Check ($mC.Success -and [int]$mC.Groups[2].Value -gt 0 -and [int]$mC.Groups[3].Value -gt 0) ("cfrjit: {0}" -f $(if ($mC.Success) { $mC.Value + ' (both > 0)' } else { 'summary line missing' }))
+        $dV = [double]$sV.duration; $dC = [double]$sC.duration
+        Check ($dV -gt 0 -and [math]::Abs($dC - $dV) / $dV -le 0.01) ("cfrjit: CFR duration {0:N4} s within 1 % of the VFR duration {1:N4} s ({2:N3} %)" -f $dC, $dV, (100 * [math]::Abs($dC - $dV) / [math]::Max(1e-9, $dV)))
+    }
+    if ($okG) {
+        $tG = $logG -join "`n"
+        $pG = Packets $gap
+        $big = @($pG.steps | Where-Object { $_ -gt 0.02 })
+        $mG = [regex]::Match($tG, 'frames written (\d+), dropped (\d+) \(ring full (\d+)[^\r\n]*\| constant frame rate (\d+) fps, (\d+) repeated, (\d+) dropped( \(a gap over 5 s was only partly filled\))?')
+        Write-Host ("  [cfrgap] {0} packets, durations {1}, pts steps > 20 ms: {2}" -f $pG.n, ($pG.dur -join ' '), (($big | ForEach-Object { '{0:N4}' -f $_ }) -join ' '))
+        Check ($tG -match 'no frame from the game for more than 5 s -- the last frame was repeated for 5 s') 'cfrgap: the 5 s cap is logged'
+        Check ($mG.Success -and $mG.Groups[7].Success -and [int]$mG.Groups[5].Value -eq 5 * $fps -and [int]$mG.Groups[3].Value -eq 0) ("cfrgap: {0}" -f $(if ($mG.Success) { $mG.Value + " (want $(5 * $fps) repeated, ring full 0)" } else { 'summary line missing' }))
+        Check ($big.Count -eq 1 -and [math]::Abs($big[0] - (1.0 + 1.0 / $fps)) -le 0.003) ("cfrgap: one gap of {0} s left in the video (want 6 - 5 s + one period = {1:N4} s)" -f $(if ($big.Count) { ($big | ForEach-Object { '{0:N4}' -f $_ }) -join ' / ' } else { 'none' }), (1.0 + 1.0 / $fps))
+    }
+}
+if ($fails.Count -eq 0) { Write-Host "`nPASS head smoothing / constant frame rate" -ForegroundColor Green; exit 0 }
+Write-Host "`nFAIL head smoothing / constant frame rate ($($fails.Count) checks)" -ForegroundColor Red
 exit 1

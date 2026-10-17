@@ -75,7 +75,8 @@ if ($v) {
 $bytes = [System.IO.File]::ReadAllBytes($File)
 $txt = [System.Text.Encoding]::ASCII.GetString($bytes)
 $i = $txt.LastIndexOf('st3d')
-$j = [math]::Max([math]::Max($txt.LastIndexOf('hvc1'), $txt.LastIndexOf('avc1')), $txt.LastIndexOf('av01'))
+# the video sample entry: hvc1 / avc1 / av01, or hev1 / avc3 (parameter sets in the stream: H.264 in constant-QP low-latency mode)
+$j = (@('hvc1', 'hev1', 'avc1', 'avc3', 'av01') | ForEach-Object { $txt.LastIndexOf($_) } | Measure-Object -Maximum).Maximum
 Check ($i -gt 0 -and $j -gt 0 -and $i -gt $j -and $bytes[$i + 8] -eq $wantMode) "st3d box bytes after the sample entry, stereo_mode=$(if ($i -gt 0) { $bytes[$i + 8] } else { '?' }) (want $wantMode)"
 
 if ($ExpectAudio) {

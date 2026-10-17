@@ -32,6 +32,13 @@ struct RecorderSettings {
     std::wstring path;               // output .mp4
     VideoCodec   codec = VideoCodec::Hevc;   // AV1: hardware MFT only; falls back to HEVC when it cannot be set up
     unsigned     bitrate = 0;        // bits/s; 0 = 120 Mb/s HEVC, 80 Mb/s H.264, 80 Mb/s AV1 (VideoCodecDefaultMbps)
+    RateControl  rateControl = RateControl::Vbr;   // vbr / cbr: at `bitrate`; qp: constant QP `qp`, `bitrate` ignored
+    unsigned     qp = 24;            // 0..51 (rate_control = qp)
+    int          qualityVsSpeed = -1;   // CODECAPI_AVEncCommonQualityVsSpeed 0..100; -1 = auto (AV1 above 1 Gpixel/s: 25)
+    // constant_frame_rate: exactly one frame per 1/fps (fps = the nominal rate below, after max_fps) at k / fps with constant
+    // durations: a frame that lands in an already written slot is dropped, a missing slot repeats the previous frame
+    // (at most 5 s per gap). Off = the real timestamps (variable frame rate).
+    bool         constantFrameRate = false;
     unsigned     fps = 90;           // nominal frame rate written to the stream (timestamps are the real ones)
     unsigned     maxFps = 0;         // 0 = keep every submitted frame
     unsigned     maxWidth = 0;       // 0 = native

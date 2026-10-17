@@ -28,9 +28,19 @@
     bottom") / left-right and samples each eye in its packed rectangle; the log must have the "YouTube layout: ..." line,
     "re-projection rendered at <frame>" with the expected taps and the summary's "layout YouTube <packing>"; the sidecar
     <name>.json must be exactly the one line the tray reads.
-      powershell -ExecutionPolicy Bypass -File tests\run_selftests.ps1 [-Quick]
+    Rate control / encoder preset / constant frame rate (issue #1): *_cbr (rate_control = cbr; hevc, h264, av1), *_qp24
+    (rate_control = qp, qp 24; hevc and h264 take the QP -- the encoder must report it back -- and av1 gets the quality value
+    53, logged "constant quality 53 (from qp 24"), *_qvs0 / *_qvs100 (quality_vs_speed 0 / 100; hevc, av1; the encoder
+    must report it back) and *_cfr (constant_frame_rate = 1): normal pixel checks plus the log lines. Then the QP size check:
+    encoder_selftest --detail (a noisy picture that changes every frame, 960x540 per eye) at qp 20 and qp 45 for hevc, h264
+    and av1: the qp 45 file must be at least 4x smaller (measured on an RTX 5090: hundreds of times). The qvs100 cases run at
+    960x540 per eye: at 1920x1080 per eye and 90 fps the HEVC encoder's best-quality preset is too slow on an RTX 5090 (3 % of
+    the frames dropped) -- the case checks that the preset is applied, not the encoder's speed. H.264 in constant QP mode
+    (low-latency mode) writes an 'avc3' sample entry (parameter sets in the stream) instead of 'avc1'.
+      powershell -ExecutionPolicy Bypass -File tests\run_selftests.ps1 [-Quick] [-Only <regex>]
+      -Only: run only the cases whose name matches (e.g. -Only 'qp24|qvs'; 'qpsize' = only the QP size check).
 #>
-param([switch]$Quick)
+param([switch]$Quick, [string]$Only = '')
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $exe = Join-Path $root 'build\Release\encoder_selftest.exe'
@@ -75,7 +85,19 @@ $cases = @(
        ytlog = 'eye 1920x1080 -> crop 16:9 1920x1080 -> tb_half frame 960x540 (each eye 960x270; short side 540, long side <= 8192), st3d top-bottom';
        ytextra = 'record_for_youtube: symmetric_fov = 0 overridden' },
     @{ api = 'd3d11'; layout = 'two';   eye = '1920x1080'; fmt = 'srgb';  codec = 'hevc'; sound = $false; yt = 'tb_half';  ytshort = 0; out = '7680x4320'; fps = 72; rendered = '7680x4320'; taps = 1;
-       ytlog = 'eye 1920x1080 -> crop 16:9 1920x1080 -> tb_half frame 7680x4320 (each eye 7680x2160; short side 4320, long side <= 8192), st3d top-bottom' }
+       ytlog = 'eye 1920x1080 -> crop 16:9 1920x1080 -> tb_half frame 7680x4320 (each eye 7680x2160; short side 4320, long side <= 8192), st3d top-bottom' },
+    # issue #1: rate control, encoder preset, constant frame rate
+    @{ api = 'd3d11'; layout = 'two';   eye = '1920x1080'; fmt = 'srgb';  codec = 'hevc'; sound = $false; rc = 'cbr'; rclog = 'rate control CBR 120 Mb/s'; rcrep = 'rate control mode 0 ' },
+    @{ api = 'd3d11'; layout = 'two';   eye = '1920x1080'; fmt = 'srgb';  codec = 'h264'; sound = $false; rc = 'cbr'; rclog = 'rate control CBR 80 Mb/s'; rcrep = 'rate control mode 0 ' },
+    @{ api = 'd3d11'; layout = 'two';   eye = '1920x1080'; fmt = 'srgb';  codec = 'av1';  sound = $false; rc = 'cbr'; rclog = 'rate control CBR 80 Mb/s'; rcrep = 'rate control mode 0 ' },
+    @{ api = 'd3d11'; layout = 'two';   eye = '1920x1080'; fmt = 'srgb';  codec = 'hevc'; sound = $false; rc = 'qp'; qp = 24; rclog = 'rate control constant QP 24'; rcrep = 'rate control mode 3 [^\r\n]*QP 0x0000000000000018' },
+    @{ api = 'd3d11'; layout = 'two';   eye = '1920x1080'; fmt = 'srgb';  codec = 'h264'; sound = $false; rc = 'qp'; qp = 24; rclog = 'rate control constant QP 24'; rcrep = 'rate control mode 3 [^\r\n]*QP 0x0000000000000018' },
+    @{ api = 'd3d11'; layout = 'two';   eye = '1920x1080'; fmt = 'srgb';  codec = 'av1';  sound = $false; rc = 'qp'; qp = 24; rclog = 'rate control constant quality 53 \(from qp 24'; rcrep = 'rate control mode 3 ' },
+    @{ api = 'd3d11'; layout = 'two';   eye = '1920x1080'; fmt = 'srgb';  codec = 'hevc'; sound = $false; qvs = 0;   rclog = 'encoder quality vs speed 0 \(quality_vs_speed'; rcrep = 'quality vs speed 0$' },
+    @{ api = 'd3d11'; layout = 'two';   eye = '960x540';   fmt = 'srgb';  codec = 'hevc'; sound = $false; qvs = 100; rclog = 'encoder quality vs speed 100 \(quality_vs_speed'; rcrep = 'quality vs speed 100$' },
+    @{ api = 'd3d11'; layout = 'two';   eye = '1920x1080'; fmt = 'srgb';  codec = 'av1';  sound = $false; qvs = 0;   rclog = 'encoder quality vs speed 0 \(quality_vs_speed'; rcrep = 'quality vs speed 0$' },
+    @{ api = 'd3d11'; layout = 'two';   eye = '960x540';   fmt = 'srgb';  codec = 'av1';  sound = $false; qvs = 100; rclog = 'encoder quality vs speed 100 \(quality_vs_speed'; rcrep = 'quality vs speed 100$' },
+    @{ api = 'd3d11'; layout = 'two';   eye = '1920x1080'; fmt = 'srgb';  codec = 'hevc'; sound = $false; cfr = $true; rclog = 'constant frame rate 90 fps, 0 repeated, 0 dropped' }
 )
 if ($Quick) { $cases = $cases[0..1] }
 
@@ -88,6 +110,10 @@ foreach ($c in $cases) {
     if ($c.yt) { $name += "_yt_$($c.yt)"; if ($c.crop) { $name += '_' + $c.crop.Replace(':', 'x') }; if ($c.ytshort) { $name += "_s$($c.ytshort)" }; if ($c.raw) { $name += '_nosym' } }
     if ($c.mw) { $name += "_mw$($c.mw)" }
     if ($c.fps) { $name += "_$($c.fps)fps" }
+    if ($c.rc) { $name += "_$($c.rc)"; if ($c.rc -eq 'qp') { $name += "$($c.qp)" } }
+    if ($null -ne $c.qvs) { $name += "_qvs$($c.qvs)" }
+    if ($c.cfr) { $name += '_cfr' }
+    if ($Only -and $name -notmatch $Only) { continue }
     $out = Join-Path $outDir "$name.mp4"
     $targs = @('--api', $c.api, '--layout', $c.layout, '--eye', $c.eye, '--format', $c.fmt, '--codec', $c.codec, '--out', $out)
     if (-not $c.sound) { $targs += '--no-tone' }
@@ -96,6 +122,9 @@ foreach ($c in $cases) {
     if ($c.raw) { $targs += '--no-symmetric' }
     if ($c.mw) { $targs += @('--max-width', "$($c.mw)") }
     if ($c.yt) { $targs += @('--youtube', $c.yt); if ($c.crop) { $targs += @('--eye-crop', $c.crop) } }
+    if ($c.rc) { $targs += @('--rate-control', $c.rc); if ($c.qp) { $targs += @('--qp', "$($c.qp)") } }
+    if ($null -ne $c.qvs) { $targs += @('--quality-vs-speed', "$($c.qvs)") }
+    if ($c.cfr) { $targs += '--cfr' }
     Write-Host "`n=== $name" -ForegroundColor Cyan
     if ($c.noav1) { $env:XR_EYE_CAPTURE_TEST_NO_AV1 = '1' }
     if ($c.ytshort) { $env:XR_EYE_CAPTURE_TEST_YT_SHORT = "$($c.ytshort)" }
@@ -105,11 +134,13 @@ foreach ($c in $cases) {
     $runOk = ($LASTEXITCODE -eq 0)
     Remove-Item Env:\XR_EYE_CAPTURE_TEST_NO_AV1 -ErrorAction SilentlyContinue
     Remove-Item Env:\XR_EYE_CAPTURE_TEST_YT_SHORT -ErrorAction SilentlyContinue
-    $log | Select-String -Pattern 'recording summary|re-projection summary|re-projection rendered|symmetric fov|YouTube layout|record_for_youtube|TEST_YT_SHORT|sidecar|SubmitFrame cost|quality vs speed|fell back|=== encoder_selftest|ERROR|WARN' | ForEach-Object { Write-Host "  $($_.Line.Substring([math]::Min(33, $_.Line.Length)))" }
+    $log | Select-String -Pattern 'recording summary|re-projection summary|re-projection rendered|symmetric fov|YouTube layout|record_for_youtube|TEST_YT_SHORT|sidecar|SubmitFrame cost|quality vs speed|fell back|sink writer ready|encoder reports|=== encoder_selftest|ERROR|WARN' | ForEach-Object { Write-Host "  $($_.Line.Substring([math]::Min(33, $_.Line.Length)))" }
     # log-line checks (each must match, else the case fails)
     $logText = $log -join "`n"
     $want = @()
     if ($c.noav1) { $want += 'AV1 unavailable -- fell back to HEVC' }
+    if ($c.rclog) { $want += $c.rclog }
+    if ($c.rcrep) { $want += '(?m)recorder: encoder reports: [^\r\n]*' + $c.rcrep }
     if ($c.rendered) {
         $rx = 're-projection rendered at ' + $c.rendered + ' \('
         if ($c.taps) { $rx += '[^\r\n]*' + $c.taps + 'x' + $c.taps + ' bilinear taps per output pixel\) -- the video processor does not scale' }
@@ -143,6 +174,23 @@ foreach ($c in $cases) {
         else { Write-Host "  FAIL sidecar $gotJson (want $wantJson)" -ForegroundColor Red; $verOk = $false }
     }
     $results += [pscustomobject]@{ case = $name; run = $runOk; verify = $verOk; log = $logOk }
+}
+# QP size check: the constant QP must reach the encoder (a file at qp 45 is far smaller than one at qp 20 on detailed content)
+if (-not $Quick -and (-not $Only -or 'qpsize' -match $Only)) {
+    foreach ($codec in 'hevc', 'h264', 'av1') {
+        $size = @{}
+        $ok = $true
+        foreach ($q in 20, 45) {
+            $f = Join-Path $outDir "qpsize_$($codec)_qp$q.mp4"
+            $l = @(& $exe --codec $codec --rate-control qp --qp $q --detail --eye 960x540 --no-audio --no-tone --out $f)
+            if ($LASTEXITCODE -ne 0) { $ok = $false; $l | Select-String 'recording summary|ERROR|WARN' | ForEach-Object { Write-Host "  $($_.Line)" } }
+            $size[$q] = if (Test-Path $f) { (Get-Item $f).Length } else { 0 }
+        }
+        $ratio = if ($size[45] -gt 0) { $size[20] / $size[45] } else { 0 }
+        $pass = $ok -and $ratio -ge 4
+        Write-Host ("=== qp size {0}: qp 20 {1:N2} MB, qp 45 {2:N2} MB -> {3:N1}x smaller {4}" -f $codec, ($size[20] / 1MB), ($size[45] / 1MB), $ratio, $(if ($pass) { 'ok' } else { 'FAIL (want >= 4x, both runs exit 0)' })) -ForegroundColor $(if ($pass) { 'Green' } else { 'Red' })
+        $results += [pscustomobject]@{ case = "qp size $codec (20 vs 45: $([math]::Round($ratio, 1))x)"; run = $ok; verify = $pass; log = $true }
+    }
 }
 Write-Host ''
 $results | Format-Table -AutoSize

@@ -168,6 +168,22 @@ KeyResult ApplyKey(Config& c, const std::wstring& key, std::wstring val) {
         if (ParseUInt(val, u) && u >= 10 && u <= 240) c.fps = u; else ok = false;
     } else if (key == L"max_fps") {
         if (ParseUInt(val, u) && u <= 240) c.maxFps = u; else ok = false;
+    } else if (key == L"rate_control") {
+        const std::wstring l = Lower(val);
+        if (l == L"vbr") c.rateControl = RateControl::Vbr;
+        else if (l == L"cbr") c.rateControl = RateControl::Cbr;
+        else if (l == L"qp" || l == L"cqp") c.rateControl = RateControl::Qp;
+        else ok = false;
+    } else if (key == L"qp") {
+        if (ParseUInt(val, u) && u <= 51) c.qp = u; else ok = false;
+    } else if (key == L"quality_vs_speed") {
+        if (Lower(val) == L"auto") c.qualityVsSpeed = -1;
+        else if (ParseUInt(val, u) && u <= 100) c.qualityVsSpeed = (int)u;
+        else ok = false;
+    } else if (key == L"constant_frame_rate") {
+        if (ParseBool(val, b)) c.constantFrameRate = b; else ok = false;
+    } else if (key == L"beeps") {
+        if (ParseBool(val, b)) c.beeps = b; else ok = false;
     } else if (key == L"max_width") {
         if (ParseUInt(val, u) && (u == 0 || (u >= 256 && u <= 16384))) c.maxWidth = u & ~1u; else ok = false;
     } else if (key == L"audio_enabled") {

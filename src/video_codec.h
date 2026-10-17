@@ -14,3 +14,12 @@ inline const char* VideoCodecName(VideoCodec c) { return c == VideoCodec::H264 ?
 inline unsigned VideoCodecDefaultMbps(VideoCodec c) { return c == VideoCodec::Hevc ? 120u : 80u; }
 // Largest frame side the encoder takes (H.264 level 5.2 / NVENC: 4096; HEVC and AV1 NVENC: 8192).
 inline unsigned VideoCodecMaxSide(VideoCodec c) { return c == VideoCodec::H264 ? 4096u : 8192u; }
+
+// rate_control = vbr (default) | cbr | qp: how the recorder's encoder spends bits (src/recorder.cpp, CreateWriter).
+// vbr = unconstrained VBR at the mean bitrate (bitrate_mbps); cbr = constant bitrate at bitrate_mbps; qp = constant QP
+// (Media Foundation "quality" mode with a fixed QP, config key qp 0..51; bitrate_mbps is ignored, the size follows the content).
+enum class RateControl { Vbr, Cbr, Qp };
+// Config value ("vbr" / "cbr" / "qp").
+inline const char* RateControlKey(RateControl r) { return r == RateControl::Cbr ? "cbr" : r == RateControl::Qp ? "qp" : "vbr"; }
+// Display name ("VBR" / "CBR" / "constant QP").
+inline const char* RateControlName(RateControl r) { return r == RateControl::Cbr ? "CBR" : r == RateControl::Qp ? "constant QP" : "VBR"; }
