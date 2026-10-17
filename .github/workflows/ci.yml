@@ -90,7 +90,7 @@ jobs:
         run: powershell -NoProfile -ExecutionPolicy Bypass -File tests\run_yt8k.ps1 -FfmpegDir $env:EYECAP_FFMPEG_DIR
 
       - name: run_tag3d (tray "Tag a video as 3D", ffmpeg remux)
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File testsun_tag3d.ps1 -FfmpegDir $env:EYECAP_FFMPEG_DIR
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tests\run_tag3d.ps1 -FfmpegDir $env:EYECAP_FFMPEG_DIR
 
       - name: Upload logs on failure
         if: failure()
