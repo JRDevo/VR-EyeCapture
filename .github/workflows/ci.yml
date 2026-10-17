@@ -49,12 +49,15 @@ jobs:
       - name: Build Release
         run: cmake --build build --config Release --parallel
 
+      # openvr_hook_test / steamvr_install_test: the SteamVR proxy's helpers and the tray's SteamVR games library (a fake
+      # game tree in %TEMP%, mock_openvr.dll as the Valve DLL; the HKCU test key only, never a real game folder).
       - name: Unit tests (CPU only)
         run: |
           New-Item -ItemType Directory -Force build\ci_unit | Out-Null
           Push-Location build\ci_unit
           $failed = @()
-          foreach ($t in 'overlay_test', 'head_smoothing_test', 'indicator_test', 'install_test', 'control_final_test') {
+          foreach ($t in 'overlay_test', 'head_smoothing_test', 'indicator_test', 'install_test', 'control_final_test',
+                         'openvr_hook_test', 'steamvr_install_test') {
             Write-Host "=== $t"
             & "..\Release\$t.exe" 2>&1 | Tee-Object -FilePath "$t.log"
             if ($LASTEXITCODE -ne 0) { Write-Host "$t FAILED (exit $LASTEXITCODE)"; $failed += $t }
@@ -67,6 +70,10 @@ jobs:
 
       - name: run_settings (Settings window)
         run: powershell -NoProfile -ExecutionPolicy Bypass -File tests\run_settings.ps1
+
+      # The tray's "SteamVR games" window on a fake game tree under build\tt_svr (the HKCU test key only).
+      - name: run_steamvr_ui (SteamVR games window)
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tests\run_steamvr_ui.ps1
 
       # Test keys under HKCU only (EYECAP_TRAY_TEST_REG_ROOTS / _RUN_KEY); the script also checks that the real HKLM / HKCU
       # OpenXR keys are unchanged. The runner is an admin account, hence -AllowElevated (see docs/DEVELOPMENT.md, "CI").

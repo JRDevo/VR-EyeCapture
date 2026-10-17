@@ -21,7 +21,8 @@ Root g_lm{HKEY_LOCAL_MACHINE, kImplicitKey};
 Root g_cu{HKEY_CURRENT_USER, kImplicitKey};
 
 const wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
-const wchar_t kRunValue[] = L"OpenXR-EyeCapture";
+const wchar_t kRunValue[] = L"VR EyeCapture";
+const wchar_t kOldRunValue[] = L"OpenXR-EyeCapture";   // the value name before the rename (MigrateAutostartName)
 const wchar_t kTrayExe[] = L"EyeCaptureTray.exe";
 const wchar_t kApprovedKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run";
 std::wstring g_runKey = kRunKey;   // HKCU subkey holding the Run value (tests redirect it)
@@ -382,6 +383,43 @@ bool SetAutostart(bool on, const std::wstring& exeDir, std::wstring& err) {
         if (e != ERROR_SUCCESS && e != ERROR_FILE_NOT_FOUND) { err = L"cannot remove " + std::wstring(kRunValue) + L" from " + what + L": " + Win32Text(e); return false; }
     }
     return DeleteApproval(err);
+}
+
+namespace {
+// Copies value `from` of HKCU\<sub> to `to` (same type and data) unless `to` exists, then deletes `from`. Returns true when
+// `from` existed and is gone; *data (optional) gets the REG_SZ text. A missing key / value = false, nothing changed.
+bool RenameValue(const std::wstring& sub, const wchar_t* from, const wchar_t* to, std::wstring* data, bool* toExisted = nullptr) {
+    if (toExisted) *toExisted = false;
+    HKEY k = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, sub.c_str(), 0, KEY_QUERY_VALUE | KEY_SET_VALUE | kView, &k) != ERROR_SUCCESS) return false;
+    DWORD type = REG_NONE, size = 0;
+    bool ok = RegQueryValueExW(k, from, nullptr, &type, nullptr, &size) == ERROR_SUCCESS;
+    std::vector<BYTE> buf(size + 2 * sizeof(wchar_t), 0);
+    if (ok) ok = RegQueryValueExW(k, from, nullptr, &type, buf.data(), &size) == ERROR_SUCCESS;
+    if (ok && data && (type == REG_SZ || type == REG_EXPAND_SZ)) *data = (const wchar_t*)buf.data();
+    const bool existed = ok && RegQueryValueExW(k, to, nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS;
+    if (toExisted) *toExisted = existed;
+    if (ok && !existed) ok = RegSetValueExW(k, to, 0, type, buf.data(), size) == ERROR_SUCCESS;
+    if (ok) ok = RegDeleteValueW(k, from) == ERROR_SUCCESS;
+    RegCloseKey(k);
+    return ok;
+}
+} // namespace
+
+bool MigrateAutostartName(std::wstring* what) {
+    if (what) what->clear();
+    std::wstring data;
+    bool hadNew = false;
+    const bool run = RenameValue(g_runKey, kOldRunValue, kRunValue, &data, &hadNew);
+    const bool rec = RenameValue(g_approvedKey, kOldRunValue, kRunValue, nullptr);   // the user's enabled / disabled choice follows
+    if (what && (run || rec)) {
+        if (run && hadNew)
+            *what = L"HKCU\\" + g_runKey + L": old value \"" + kOldRunValue + L"\" removed (new one \"" + kRunValue + L"\" already present)";
+        else
+            *what = L"HKCU\\" + g_runKey + L": \"" + kOldRunValue + L"\" -> \"" + kRunValue + L"\" = " + data;
+        if (rec) *what += L" (StartupApproved record moved too)";
+    }
+    return run || rec;
 }
 
 bool SyncAutostart(const std::wstring& exeDir) {

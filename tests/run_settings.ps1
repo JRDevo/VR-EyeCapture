@@ -60,9 +60,9 @@ Step 'save diff is exactly the 3 changed lines' ($d.Count -eq 6 -and -not (Compa
 $t = Join-Path $root 'build\tt2'
 Get-Process EyeCaptureTray -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$t*" } | Stop-Process
 if (Test-Path $t) { Remove-Item -Recurse -Force $t }
-New-Item -ItemType Directory (Join-Path $t 'appdata\OpenXR-EyeCapture') | Out-Null
+New-Item -ItemType Directory (Join-Path $t 'appdata\VR EyeCapture') | Out-Null
 Copy-Item (Join-Path $bin 'EyeCaptureTray.exe') $t
-$ini = Join-Path $t 'appdata\OpenXR-EyeCapture\config.ini'
+$ini = Join-Path $t 'appdata\VR EyeCapture\config.ini'
 $trayIni = Get-Content (Join-Path $root 'config.ini') -Raw
 # record_for_youtube must be a line of the file (so Save rewrites it in place: one changed line): 0, added to [capture] if missing
 if ($trayIni -match '(?m)^record_for_youtube\s*=') { $trayIni = $trayIni -replace '(?m)^record_for_youtube\s*=[^\r\n]*', 'record_for_youtube = 0' }
@@ -84,7 +84,7 @@ try {
     Step 'tray.log lists the changed keys' ($log -match 'settings saved to .*changed hotkey ScrollLock->F7, codec hevc->av1, bitrate_mbps 0->250, swap_eyes 0->1, record_overlays 1->0, record_for_youtube 0->1, output_fov_scale 0\.9->0\.85, projection vr180->flat, layout_3d tb_half->sbs_half, post_yt8k 0->1, yt8k_bitrate_mbps 150->200, yt8k_codec hevc->av1, post_when game_exit->now, eye_crop 16:9->4:3, start_with_windows 0->1')
     Step 'tray.log: Resolution saved 3000 -> 3840 (4K), then 3840 -> 0 (Native)' (($log -match 'settings saved to .*changed max_width 3000->3840\s*(\r?\n|$)') -and ($log -match 'settings saved to .*changed max_width 3840->0\s*(\r?\n|$)'))
     Step 'tooltip says settings saved' ($log -match "tooltip now: settings saved \S+ applies to the next recording")
-    Step 'tooltip restored after 5 s' ($log -match 'tooltip restored: OpenXR-EyeCapture: no OpenXR game running')
+    Step 'tooltip restored after 5 s' ($log -match 'tooltip restored: VR EyeCapture: no VR game running')
     $log -split "`r?`n" | Where-Object { $_ -match 'text does not fit|text fit check' } | ForEach-Object { Write-Host "  $_" }
     Step 'App window text fit check ran and nothing is cut (labels, checks, buttons, drop-down items; GetTextExtentPoint32)' (($log -match 'settings: text fit check: \d{2,} controls, 0 cut') -and ($log -notmatch 'settings: text fit check: \d+ controls, [1-9]') -and ($log -notmatch 'text does not fit'))
 } finally {

@@ -1,7 +1,7 @@
 <#
     run_reload.ps1 -- the layer re-reads config.ini at the start of every recording (no headset, mock runtime, needs the INSTALLED layer).
       powershell -ExecutionPolicy Bypass -File tests\run_reload.ps1
-    A scratch %APPDATA%\OpenXR-EyeCapture\config.ini (projection = flat, bitrate_mbps = 20) is used. layer_e2e records 3 s;
+    A scratch %APPDATA%\VR EyeCapture\config.ini (projection = flat, bitrate_mbps = 20, codec = hevc pinned) is used. layer_e2e records 3 s;
     XR_EYE_CAPTURE_AUTORECORD2 (test-only) starts a second 3 s recording 1 s after the first one stopped, in the SAME
     process. The script rewrites the scratch config (projection = vr180, bitrate_mbps = 60, constant_frame_rate = 1,
     beeps = 0) as soon as the first MP4 appears. Expected: the first file is *_SBS.mp4, the second *_VR180.mp4; the recorder's
@@ -33,11 +33,12 @@ if ($BuildLayer) {   # the same mechanism as run_e2e.ps1 -BuildLayer: nothing is
 if (Get-Process amtrucks, eurotrucks2, obs64 -ErrorAction SilentlyContinue) { Write-Host 'SKIP: a GPU-heavy app is running'; exit 0 }
 $b = Join-Path $root 'build\tt_b'
 if (Test-Path $b) { Remove-Item -Recurse -Force $b }
-New-Item -ItemType Directory (Join-Path $b 'appdata\OpenXR-EyeCapture'), (Join-Path $b 'out') | Out-Null
-$ini = Join-Path $b 'appdata\OpenXR-EyeCapture\config.ini'
-$cfg = (Get-Content (Join-Path $root 'config.ini') -Raw) -replace '(?m)^projection = \w+', 'projection = flat' -replace '(?m)^bitrate_mbps = \d+', 'bitrate_mbps = 20' -replace '(?m)^head_smoothing = [\d.]+', 'head_smoothing = 0' -replace '(?m)^constant_frame_rate = \w+', 'constant_frame_rate = 0' -replace '(?m)^beeps = \w+', 'beeps = 1'
-# keys a config.ini from before they existed lacks: pinned at the top of [capture]
-foreach ($k in 'constant_frame_rate = 0', 'beeps = 1') { if ($cfg -notmatch ('(?m)^' + $k.Split(' ')[0] + ' =')) { $cfg = $cfg -replace '(?m)^\[capture\][ \t]*(\r?\n)', "[capture]`$1$k`$1" } }
+New-Item -ItemType Directory (Join-Path $b 'appdata\VR EyeCapture'), (Join-Path $b 'out') | Out-Null
+$ini = Join-Path $b 'appdata\VR EyeCapture\config.ini'
+$cfg = (Get-Content (Join-Path $root 'config.ini') -Raw) -replace '(?m)^projection = \w+', 'projection = flat' -replace '(?m)^bitrate_mbps = \d+', 'bitrate_mbps = 20' -replace '(?m)^head_smoothing = [\d.]+', 'head_smoothing = 0' -replace '(?m)^constant_frame_rate = \w+', 'constant_frame_rate = 0' -replace '(?m)^beeps = \w+', 'beeps = 1' -replace '(?m)^codec = \w+', 'codec = hevc'
+# keys a config.ini from before they existed lacks: pinned at the top of [capture]. codec = hevc: the check below reads
+# "HEVC <n> Mb/s" from the recorder's init line, whatever codec the live config.ini uses
+foreach ($k in 'constant_frame_rate = 0', 'beeps = 1', 'codec = hevc') { if ($cfg -notmatch ('(?m)^' + $k.Split(' ')[0] + ' =')) { $cfg = $cfg -replace '(?m)^\[capture\][ \t]*(\r?\n)', "[capture]`$1$k`$1" } }
 Set-Content $ini $cfg -NoNewline -Encoding utf8
 $old = @{}
 foreach ($n in 'APPDATA', 'XR_EYE_CAPTURE_REQUIRE_TRAY', 'XR_EYE_CAPTURE_TRAY_IPC', 'XR_EYE_CAPTURE_AUTORECORD2', 'XR_EYE_CAPTURE_CONFIG') { $old[$n] = [Environment]::GetEnvironmentVariable($n) }

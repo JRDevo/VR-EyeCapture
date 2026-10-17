@@ -49,13 +49,13 @@ $c = Join-Path $t 'c'   # short path: status_sim's "saved <path>" message must s
 Get-Process EyeCaptureTray -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$t*" } | Stop-Process
 Get-Process fake_ffmpeg -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$t*" } | Stop-Process
 if (Test-Path $t) { Remove-Item -Recurse -Force $t }
-New-Item -ItemType Directory (Join-Path $t 'appdata\OpenXR-EyeCapture'), $c, (Join-Path $t 'ff') | Out-Null
+New-Item -ItemType Directory (Join-Path $t 'appdata\VR EyeCapture'), $c, (Join-Path $t 'ff') | Out-Null
 Copy-Item (Join-Path $bin 'EyeCaptureTray.exe') $t
 $fake = Join-Path $t 'ff\fake_ffmpeg.exe'
 Copy-Item (Join-Path $bin 'fake_ffmpeg.exe') $fake
 $sim = Join-Path $bin 'status_sim.exe'
 $shm = 'eyecap-hold-test'
-$ini = Join-Path $t 'appdata\OpenXR-EyeCapture\config.ini'
+$ini = Join-Path $t 'appdata\VR EyeCapture\config.ini'
 $baseIni = Get-Content (Join-Path $root 'config.ini') -Raw
 function WriteConfig($when) {
     $s = $baseIni -replace '(?m)^post_mkv = \S+', 'post_mkv = 1' -replace '(?m)^post_flat = \S+', 'post_flat = 0' `
@@ -258,7 +258,7 @@ try {
     $l = LogText
     Step 'H0: picked .mkv / _FLAT.mp4 refused (logged, one balloon "Not a recording: ..."), nothing queued, both files intact' (
         @(Items $o | Where-Object { $_ -match 'hq_old' }).Count -eq 0 -and ($l -match 'hq_old\.mkv is not a recording') -and ($l -match 'hq_old_FLAT\.mp4 is not a recording') -and
-        ($l -match 'balloon \[OpenXR-EyeCapture\] Not a recording: hq_old\.mkv, hq_old_FLAT\.mp4') -and
+        ($l -match 'balloon \[VR EyeCapture\] Not a recording: hq_old\.mkv, hq_old_FLAT\.mp4') -and
         @($bad | Where-Object { (Test-Path $_) -and (Get-Item $_).Length -eq 200000 }).Count -eq 2)
     Set-Content $pick -Value $hq -Encoding utf8
     $o = Queue @('add', '3', '0'); $okA = $qExit -eq 0
@@ -350,7 +350,7 @@ try {
     Step 'I: hi_SBS.mkv untouched, no "hi_SBS (2).mkv", hi_SBS_FLAT.mp4 made, no .part left' ((Get-Item $hiMkv).Length -eq $mkvSize -and
         -not (Test-Path (Join-Path $c 'hi_SBS (2).mkv')) -and (Test-Path $hiFlat) -and -not (Test-Path $hiPart) -and @(Get-ChildItem $c -Filter '*.part').Count -eq 0)
     Step 'I: snapshot keep_mp4 = 0 applied (MP4 deleted), balloon names both files' (-not (Test-Path $hi) -and ($seg -match 'job: deleted hi_SBS\.mp4 \(keep_mp4 = 0\)') -and
-        ($l -match 'balloon \[OpenXR-EyeCapture\] Ready for YouTube: hi_SBS\.mkv\s+Flat 2D: hi_SBS_FLAT\.mp4'))
+        ($l -match 'balloon \[VR EyeCapture\] Ready for YouTube: hi_SBS\.mkv\s+Flat 2D: hi_SBS_FLAT\.mp4'))
     $qText = if (Test-Path $qj) { Get-Content $qj -Raw } else { '' }
     Step 'I: queue.json is empty again' ($qText -notmatch 'hi_SBS')
 } finally {

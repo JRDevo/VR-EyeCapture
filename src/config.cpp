@@ -92,14 +92,51 @@ void ParseFileInto(const std::wstring& path, Config& c, std::vector<std::wstring
 }
 } // namespace
 
-std::wstring ConfigPath(const std::wstring& dllDir) {
+const char* SteamVrModeKey(SteamVrMode m) {
+    switch (m) {
+    case SteamVrMode::Quick: return "quick";
+    case SteamVrMode::Off: return "off";
+    default: return "per_game";
+    }
+}
+
+const char* SteamVrPoseSourceKey(SteamVrPoseSource s) {
+    switch (s) {
+    case SteamVrPoseSource::Submit: return "submit";
+    case SteamVrPoseSource::WaitGetPoses: return "waitgetposes";
+    default: return "auto";
+    }
+}
+
+namespace {
+// %APPDATA%\<folder>\config.ini, or "" when APPDATA is not set.
+std::wstring AppDataConfig(const wchar_t* folder) {
     wchar_t appdata[MAX_PATH];
     const DWORD n = GetEnvironmentVariableW(L"APPDATA", appdata, MAX_PATH);
-    if (n > 0 && n < MAX_PATH) {
-        const std::wstring p = std::wstring(appdata) + L"\\OpenXR-EyeCapture\\config.ini";
-        if (FileExists(p)) return p;
+    if (n == 0 || n >= MAX_PATH) return std::wstring();
+    return std::wstring(appdata) + L"\\" + folder + L"\\config.ini";
+}
+} // namespace
+
+std::wstring ConfigPath(const std::wstring& dllDir) {
+    for (const wchar_t* folder : {kAppDataFolder, kOldAppDataFolder}) {
+        const std::wstring p = AppDataConfig(folder);
+        if (!p.empty() && FileExists(p)) return p;
     }
     return dllDir + L"\\config.ini";
+}
+
+int MigrateAppDataConfig(std::wstring* from, std::wstring* to) {
+    const std::wstring oldP = AppDataConfig(kOldAppDataFolder), newP = AppDataConfig(kAppDataFolder);
+    if (from) *from = oldP;
+    if (to) *to = newP;
+    if (oldP.empty() || newP.empty() || FileExists(newP) || !FileExists(oldP)) return 0;
+    CreateDirectoryW(newP.substr(0, newP.find_last_of(L'\\')).c_str(), nullptr);
+    if (!CopyFileW(oldP.c_str(), newP.c_str(), TRUE)) {
+        const DWORD e = GetLastError();
+        return e == ERROR_FILE_EXISTS ? 0 : -(int)(e ? e : 1);
+    }
+    return 1;
 }
 
 void LoadConfig(const std::wstring& dllDir, Config& c) {
@@ -109,7 +146,7 @@ void LoadConfig(const std::wstring& dllDir, Config& c) {
 
     const std::wstring path = ConfigPath(dllDir);
     if (!FileExists(path)) {
-        LOGW("config: no config.ini found (looked in %%APPDATA%%\\OpenXR-EyeCapture and %s); using defaults",
+        LOGW("config: no config.ini found (looked in %%APPDATA%%\\VR EyeCapture, %%APPDATA%%\\OpenXR-EyeCapture and %s); using defaults",
              elog::Narrow(dllDir).c_str());
         return;
     }
@@ -291,6 +328,22 @@ KeyResult ApplyKey(Config& c, const std::wstring& key, std::wstring val) {
         if (ParseFloat(val, fl) && fl >= 0.0f && fl <= 3600.0f) c.dome.fadeS = fl; else ok = false;
     } else if (key == L"window_feather_deg") {
         if (ParseFloat(val, fl) && fl >= 0.0f && fl <= 20.0f) c.dome.featherDeg = fl; else ok = false;
+    } else if (key == L"steamvr_enabled") {
+        if (ParseBool(val, b)) c.steamvr.enabled = b; else ok = false;
+    } else if (key == L"steamvr_mode") {
+        const std::wstring l = Lower(val);
+        if (l == L"per_game" || l == L"pergame") c.steamvr.mode = SteamVrMode::PerGame;
+        else if (l == L"quick") c.steamvr.mode = SteamVrMode::Quick;
+        else if (l == L"off") c.steamvr.mode = SteamVrMode::Off;
+        else ok = false;
+    } else if (key == L"steamvr_indicator") {
+        if (ParseBool(val, b)) c.steamvr.indicator = b; else ok = false;
+    } else if (key == L"steamvr_pose_source") {
+        const std::wstring l = Lower(val);
+        if (l == L"auto") c.steamvr.poseSource = SteamVrPoseSource::Auto;
+        else if (l == L"submit") c.steamvr.poseSource = SteamVrPoseSource::Submit;
+        else if (l == L"waitgetposes") c.steamvr.poseSource = SteamVrPoseSource::WaitGetPoses;
+        else ok = false;
     } else if (key == L"log_level") {
         const std::wstring l = Lower(val);
         if (l == L"none" || l == L"off") c.logLevel = LogLevel::None;

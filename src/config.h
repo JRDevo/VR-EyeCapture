@@ -1,6 +1,7 @@
 // config -- config.ini parsing (key = value lines; '[sections]', ';' and '#' comments ignored).
 //
-// Lookup order: %APPDATA%\OpenXR-EyeCapture\config.ini if it exists, else config.ini next to the DLL.
+// Lookup order: %APPDATA%\VR EyeCapture\config.ini, then the folder of the old name %APPDATA%\OpenXR-EyeCapture\config.ini
+// (before the rename, docs/RENAME_PLAN.md), then config.ini next to the DLL -- the first that exists.
 // Unknown keys and bad values are logged and ignored (the default is kept).
 #pragma once
 #include <string>
@@ -37,6 +38,24 @@ struct IndicatorSettings {
     bool  live = true;                       // indicator_live: a steady violet dot while a live viewer (OBS) receives frames
 };
 
+// SteamVR (OpenVR) proxy ([steamvr] section; src/openvr/). Ignored by the OpenXR layer and the tray.
+// steamvr_pose_source: which head pose a recorded SteamVR frame gets (head smoothing / symmetric_fov / dome need one):
+// auto = the pose the game submitted with the frame (Submit_TextureWithPose), else the last WaitGetPoses render pose;
+// submit = only the submitted pose; waitgetposes = only the WaitGetPoses pose. No pose = the raw eyes are recorded.
+enum class SteamVrPoseSource { Auto, Submit, WaitGetPoses };
+// steamvr_mode: per_game (default) = only games where the proxy is enabled are recorded; quick = also SteamVR's mirror
+// texture through EyeCaptureMirror.exe (no setup per game; lower quality, SteamVR's menus visible, flat only), a game with
+// the proxy still records through the proxy; off = nothing SteamVR is recorded (the proxy only passes calls through).
+enum class SteamVrMode { PerGame, Quick, Off };
+struct SteamVrSettings {
+    SteamVrMode       mode = SteamVrMode::PerGame;   // steamvr_mode = per_game | quick | off
+    bool              enabled = true;      // steamvr_enabled: 0 = the proxy is a pure forwarder (no capture, no hooks)
+    bool              indicator = true;    // steamvr_indicator: in-headset dot (phase 2; parsed, not used yet)
+    SteamVrPoseSource poseSource = SteamVrPoseSource::Auto;   // steamvr_pose_source = auto | submit | waitgetposes
+};
+const char* SteamVrPoseSourceKey(SteamVrPoseSource s);
+const char* SteamVrModeKey(SteamVrMode m);   // "per_game" / "quick" / "off"
+
 struct Config {
     Hotkey       hotkey;                 // default Ctrl+Shift+F10
     std::wstring outputDir;              // default <dll folder>\captures
@@ -72,6 +91,7 @@ struct Config {
     IndicatorSettings indicator;         // vr_indicator, indicator_x/_y/_z, indicator_size, indicator_opacity, indicator_live
     HeadSmoothingSettings head;          // head_smoothing, head_follow_deg, roll_lock, output_fov_scale, edge_guard, symmetric_fov
     DomeSettings dome;                   // [dome] projection, dome_width, dome_forward, fill, fill_fade_s, window_feather_deg
+    SteamVrSettings steamvr;             // [steamvr] steamvr_enabled, steamvr_indicator, steamvr_pose_source (SteamVR proxy only)
     LogLevel     logLevel = LogLevel::Info;
     std::wstring loadedFrom;             // path of the ini that was read ("" = defaults only)
 };
@@ -81,8 +101,15 @@ void LoadConfig(const std::wstring& dllDir, Config& out);
 // "key=value;key=value" applied on top (same keys and checks as config.ini; each one logged). Used for the test-only
 // environment variable XR_EYE_CAPTURE_CONFIG.
 void ApplyConfigOverrides(const std::wstring& list, Config& c);
-// Path LoadConfig would read (may not exist): %APPDATA% copy if present, else <dllDir>\config.ini.
+// %APPDATA% folder names of the config: the current one and the one before the rename.
+constexpr const wchar_t kAppDataFolder[] = L"VR EyeCapture";
+constexpr const wchar_t kOldAppDataFolder[] = L"OpenXR-EyeCapture";
+// Path LoadConfig would read (may not exist): the %APPDATA% copy (new folder, then old) if present, else <dllDir>\config.ini.
 std::wstring ConfigPath(const std::wstring& dllDir);
+// The tray, once at start: %APPDATA%\OpenXR-EyeCapture\config.ini exists and %APPDATA%\VR EyeCapture\config.ini does not ->
+// copied there (the folder is created; the old file is never deleted). Returns 1 = copied, 0 = nothing to do, < 0 =
+// -Win32 error. *from / *to (optional) get the two paths.
+int MigrateAppDataConfig(std::wstring* from = nullptr, std::wstring* to = nullptr);
 // Parses one ini file like LoadConfig (same rules, same logging) but starts from plain defaults and ALSO collects every
 // "bad value" as a message ("line 12: bad value 'x' for key"). Returns true when the file was read with no problems.
 // Used by the tray's Settings window to validate a candidate file before saving it.

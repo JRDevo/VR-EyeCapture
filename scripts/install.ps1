@@ -1,5 +1,5 @@
 ﻿<#
-    install.ps1 -- register the OpenXR-EyeCapture implicit API layer. DEVELOPER SCRIPT (building from source); it is not
+    install.ps1 -- register the VR EyeCapture OpenXR implicit API layer. DEVELOPER SCRIPT (building from source); it is not
     in the release zip. Users just run EyeCaptureTray.exe: it registers the layer itself (one UAC prompt, the same
     rules as this script; tray/install.cpp) and unregisters it from its tray menu. Command-line equivalent from an
     admin prompt: EyeCaptureTray.exe --register / --unregister.
@@ -10,7 +10,8 @@
     both hives, but HKCU is ignored for games that run elevated).
 
     Run from the repo: copies build\Release\{eye_capture.dll, XR_APILAYER_JRDEVO_eye_capture.json, EyeCaptureTray.exe}
-    next to config.ini in the repo root first. Run from an unzipped package: registers the files where they are.
+    next to config.ini in the repo root first, and build\Release\openvr_api.dll to steamvr\openvr_api.dll (the SteamVR
+    proxy that the tray's "SteamVR games..." copies into a game folder; the same place as in the release zip). Run from an unzipped package: registers the files where they are.
     Any older registration of a json with the same file name in another folder is removed.
 
     Windows PowerShell 5.1 compatible.
@@ -52,11 +53,19 @@ if (-not $CurrentUser) {
 # --- stage files next to config.ini (repo layout) ---
 $build = Join-Path $root 'build\Release'
 if (-not $NoCopy -and (Test-Path (Join-Path $build 'eye_capture.dll'))) {
-    foreach ($f in @('eye_capture.dll', $jsonName, 'EyeCaptureTray.exe')) {
+    foreach ($f in @('eye_capture.dll', $jsonName, 'EyeCaptureTray.exe', 'EyeCaptureMirror.exe', 'valve\openvr_api.dll')) {
+        if ($f -like 'valve\*') { New-Item -ItemType Directory -Force (Join-Path $root 'valve') | Out-Null }
         $src = Join-Path $build $f
         if (-not (Test-Path $src)) { continue }
         try { Copy-Item -LiteralPath $src -Destination (Join-Path $root $f) -Force }
         catch { Fail "could not copy $f (is a game or the tray app using it? close it and retry): $($_.Exception.Message)" }
+    }
+    # the SteamVR proxy goes into steamvr\ (as in the zip; the tray's "SteamVR games" copies it into a game folder from there)
+    $proxy = Join-Path $build 'openvr_api.dll'
+    if (Test-Path $proxy) {
+        New-Item -ItemType Directory -Force (Join-Path $root 'steamvr') | Out-Null
+        try { Copy-Item -LiteralPath $proxy -Destination (Join-Path $root 'steamvr\openvr_api.dll') -Force }
+        catch { Fail "could not copy steamvr\openvr_api.dll: $($_.Exception.Message)" }
     }
     Write-Host "copied the Release build into $root"
 }

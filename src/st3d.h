@@ -8,7 +8,7 @@
 // shifted by 13.
 //
 // Dome recordings (VR180 / VR360) also get the 'sv3d' box right after 'st3d' (Spherical Video V2 RFC):
-//   sv3d { svhd (FullBox, metadata_source "OpenXR-EyeCapture\0"),
+//   sv3d { svhd (FullBox, metadata_source "VR EyeCapture\0"),
 //          proj { prhd (FullBox, int32 16.16 yaw / pitch / roll = 0),
 //                 equi (FullBox, uint32 0.32 projection_bounds_top / bottom / left / right) } }
 // The bounds are the fraction of the full sphere NOT covered, measured from each edge: VR180 = 0 / 0 / 0.25 / 0.25

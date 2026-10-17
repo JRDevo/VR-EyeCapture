@@ -1,0 +1,22 @@
+"AppState"
+{
+	"appid"		"1612750"
+	"Universe"		"1"
+	"LauncherPath"		"C:\\Program Files (x86)\\Steam\\steam.exe"
+	"name"		"Crisis VRigade 2"
+	"StateFlags"		"4"
+	"installdir"		"Crisis VRigade 2"
+	"LastUpdated"		"1712345678"
+	"InstalledDepots"
+	{
+		"1612751"
+		{
+			"manifest"		"1234567890123456789"
+			"size"		"7312937520"
+		}
+	}
+	"UserConfig"
+	{
+		"language"		"english"
+	}
+}

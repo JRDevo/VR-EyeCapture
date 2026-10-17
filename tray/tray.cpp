@@ -1,19 +1,22 @@
-// EyeCaptureTray -- tray control for the OpenXR-EyeCapture layer (Win32, no frameworks). The layer is dormant (pure
-// pass-through) unless this app is running: it holds the named mutex Local\OpenXR-EyeCapture-TrayAlive while it runs.
+// EyeCaptureTray -- tray control for VR EyeCapture: the OpenXR layer and the SteamVR proxy (Win32, no frameworks). The
+// layer is dormant (pure pass-through) unless this app is running: it holds the named mutex
+// Local\OpenXR-EyeCapture-TrayAlive while it runs.
 //
 // Tray icon: grey = no game, green = game running (ready), red = recording, amber = starting / finalizing / failed,
 // blue = converting a finished recording (post-processing, see tray/postprocess.h).
 // Left-click: the app window (all settings + the conversion queue / progress). Right-click menu: Start / Stop
 // recording, Open captures folder, Convert last recording now, Convert a recording... (standard Open dialog, one or more MP4s, queued forced like "Convert now",
 // each with config.ini's conversion settings as its format snapshot), Open log,
-// Open OpenXR-EyeCapture (bold: = left-click), Edit config, Register / Unregister for VR games..., Exit.
+// Open VR EyeCapture (bold: = left-click), Edit config, Register / Unregister for VR games..., SteamVR games... (the
+// per-game SteamVR proxy, tray/steamvr_ui.h), Exit.
 // While a conversion runs, the menu starts with a greyed info line ("Converting <file> (8K) 42% - about 6 min left"),
 // "Pause conversion" / "Resume conversion" (suspends / resumes the ffmpeg; the ETA ignores paused time) and
 // "Cancel conversion" (ends the ffmpeg, deletes that step's partial output, keeps the MP4, skips the rest of the job;
 // queued jobs continue). See pp::Processor::TogglePause / Cancel. Exit while converting does the same cleanup (Stop).
 // Test hooks (the menu uses TrackPopupMenu(TPM_RETURNCMD), so WM_COMMAND cannot drive it): post to the message-only
 // window of class "OpenXREyeCaptureTray": WM_APP+3 = open the window, WM_APP+5 = pause / resume toggle, WM_APP+6 = cancel,
-// WM_APP+7 = "Convert last recording now" (the menu items call the same code).
+// WM_APP+7 = "Convert last recording now", WM_APP+9 = the "SteamVR games" window (the menu items call the same code).
+// The class name and the Local\OpenXR-EyeCapture-* object names keep the old spelling on purpose (docs/RENAME_PLAN.md).
 // Test mode (EYECAP_TRAY_TEST_SHM): balloons are logged ("tray: balloon [title] text"), never shown on the desktop.
 // Registration (tray/install.h): at start the tray removes its own HKCU duplicates and checks HKLM; when the layer is
 // not registered for this folder it offers to register it and runs itself elevated (one UAC prompt) with --register.
@@ -35,6 +38,7 @@
 #include <commdlg.h>
 #include <commctrl.h>   // LoadIconMetric
 #include <shlobj.h>
+#include <tlhelp32.h>
 #include <atomic>
 #include <mutex>
 #include <thread>
@@ -50,6 +54,8 @@
 #include "postprocess.h"
 #include "settings.h"
 #include "shared_status.h"
+#include "steamvr_ui.h"
+#include "openvr/openvr_hooks.h"   // EYECAP_HOME_REG_KEY / _VALUE, EYECAP_TEST_HOME_KEY_ENV
 
 namespace {
 const UINT WM_TRAY = WM_APP + 1;
@@ -60,11 +66,13 @@ const UINT WM_PAUSE_JOB = WM_APP + 5;       // pause / resume the running conver
 const UINT WM_CANCEL_JOB = WM_APP + 6;      // cancel the running conversion (= the menu item; tests post it)
 const UINT WM_CONVERT_LAST = WM_APP + 7;    // "Convert last recording now" (= the menu item; tests post it)
 const UINT WM_TAG3D = WM_APP + 8;           // a "Tag a video as 3D" thread has a result to show (balloon)
+const UINT WM_OPEN_STEAMVR = WM_APP + 9;    // open the "SteamVR games" window (= the menu item; tests post it)
+const UINT WM_STEAMVR_REPAIR = WM_APP + 10; // posted once at start: repair the SteamVR games the user enabled (balloon)
 const UINT kTimer = 1;
 const UINT kTipTimer = 2;     // one-shot: end of the "settings saved" tooltip
 enum : UINT { ID_TOGGLE = 100, ID_FOLDER, ID_CONVERT, ID_LOG, ID_SETTINGS, ID_CONFIG, ID_EXIT, ID_REGISTER, ID_UNREGISTER,
-               ID_CONVERT_PICK, ID_JOB_INFO, ID_JOB_PAUSE, ID_JOB_CANCEL, ID_TAG3D_SBS, ID_TAG3D_TB };
-const wchar_t kAppTitle[] = L"OpenXR-EyeCapture";
+               ID_CONVERT_PICK, ID_JOB_INFO, ID_JOB_PAUSE, ID_JOB_CANCEL, ID_TAG3D_SBS, ID_TAG3D_TB, ID_STEAMVR };
+const wchar_t kAppTitle[] = L"VR EyeCapture";
 // tray icon frames (resource 101 + value); recording and converting alternate A / B (lens colours swapped) every 0.5 s
 enum : int { kIcoNoGame, kIcoReady, kIcoRecA, kIcoRecB, kIcoBusy, kIcoConvA, kIcoConvB, kIcoCount };
 
@@ -91,6 +99,18 @@ struct Pending { ULONGLONG size = 0; ULONGLONG stableSince = 0; std::wstring pat
 std::map<std::wstring, Pending> g_pending;         // scan candidates waiting for their size to settle
 bool           g_wasLive = false;
 bool           g_testMode = false;
+// SteamVR quick mode (steamvr_mode = quick): EyeCaptureMirror.exe runs while vrserver.exe runs (MirrorTick).
+SteamVrMode    g_steamvrMode = SteamVrMode::PerGame;   // cached; reloaded with the input bindings when config.ini changes
+bool           g_steamvrDome = false;                  // projection is vr180 / vr360 (quick mode records flat only)
+HANDLE         g_mirrorProc = nullptr;
+HANDLE         g_mirrorQuit = nullptr;                 // Local\OpenXR-EyeCapture-MirrorQuit (manual reset): set = mirror exits
+ULONGLONG      g_mirrorCheck = 0;
+// relaunch back-off: 3 failed exits (non-zero code) within a minute stop the relaunching until steamvr_mode or the SteamVR
+// state changes (g_mirrorBlockedMode / Vr = the state it was blocked in); one balloon
+std::deque<ULONGLONG> g_mirrorFails;
+bool           g_mirrorBlocked = false;
+SteamVrMode    g_mirrorBlockedMode = SteamVrMode::PerGame;
+bool           g_mirrorBlockedVr = false;
 DWORD          g_fpsBalloonPid = 0;                // the game process whose uneven-frame-rate balloon was shown (once per session)
 std::wstring   g_savedTip;                         // temporary tooltip after Save in the window
 ULONGLONG      g_savedTipUntil = 0;
@@ -472,9 +492,9 @@ void Refresh() {
     const bool notReg = g_regEnabled && !RegOk();
     wchar_t tip[256];
     if (!g_live && notReg) {
-        swprintf_s(tip, L"OpenXR-EyeCapture: no OpenXR game running");   // "(games started after ...)" would be untrue
+        swprintf_s(tip, L"VR EyeCapture: no VR game running");   // "(games started after ...)" would be untrue
     } else if (!g_live) {
-        swprintf_s(tip, L"OpenXR-EyeCapture: no OpenXR game running\n(games started after this app are recorded)");
+        swprintf_s(tip, L"VR EyeCapture: no VR game running\n(games started after this app are recorded)");
     } else if (state == ECS_RECORDING) {
         const ULONGLONG el = g_st.recStartTick ? (GetTickCount64() - g_st.recStartTick) / 1000 : 0;
         swprintf_s(tip, L"REC %llu:%02llu  %s (%s)\n%ux%u @%u fps, dropped %llu", el / 60, el % 60, g_st.game, g_st.api,
@@ -613,6 +633,9 @@ void ApplyInputBindings(const char* why) {
     LoadConfig(g_exeDir, cfg);
     input::SetBindings(cfg.hotkey.bindings);
     g_savedFmt = pp::FormatFromConfig(cfg);
+    if (cfg.steamvr.mode != g_steamvrMode) LOGI("tray: steamvr_mode = %s", SteamVrModeKey(cfg.steamvr.mode));
+    g_steamvrMode = cfg.steamvr.enabled ? cfg.steamvr.mode : SteamVrMode::Off;
+    g_steamvrDome = cfg.dome.projection != DomeProjection::Flat;
     static bool s_postWhenLogged = false;
     if (!s_postWhenLogged || cfg.postWhen != g_postWhen) {
         s_postWhenLogged = true;
@@ -662,9 +685,139 @@ void SettingsReporter(const std::wstring& title, const std::wstring& text) {
     LOGI("tray: settings message box [%s]: %s", elog::Narrow(title).c_str(), elog::Narrow(text).c_str());
 }
 
+// ---- SteamVR quick mode: EyeCaptureMirror.exe (src/openvr/mirror_main.cpp) while steamvr_mode = quick and SteamVR runs.
+// The process watched is vrserver.exe; a test-mode tray watches only the process named by EYECAP_TRAY_TEST_VRSERVER (no
+// mirror at all without it). The mirror's own environment (XR_EYE_CAPTURE_*) is inherited.
+bool ProcessRunning(const wchar_t* exeName) {
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return false;
+    PROCESSENTRY32W pe{sizeof(pe)};
+    bool found = false;
+    for (BOOL ok = Process32FirstW(snap, &pe); ok && !found; ok = Process32NextW(snap, &pe))
+        found = _wcsicmp(pe.szExeFile, exeName) == 0;
+    CloseHandle(snap);
+    return found;
+}
+
+std::wstring MirrorExe() {
+    for (const wchar_t* rel : {L"\\EyeCaptureMirror.exe", L"\\build\\Release\\EyeCaptureMirror.exe"}) {
+        const std::wstring p = g_exeDir + rel;
+        if (GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES) return p;
+    }
+    return std::wstring();
+}
+
+void StopMirror(const char* why) {
+    if (!g_mirrorProc) return;
+    if (WaitForSingleObject(g_mirrorProc, 0) != WAIT_OBJECT_0) {
+        LOGI("tray: SteamVR quick mode: stopping EyeCaptureMirror (%s)", why);
+        if (g_mirrorQuit) SetEvent(g_mirrorQuit);   // it finalizes a running recording and exits on its own
+    }
+    CloseHandle(g_mirrorProc);
+    g_mirrorProc = nullptr;
+}
+
+// Every 2 s from the timer (and once at start).
+void MirrorTick() {
+    if (g_mirrorProc && WaitForSingleObject(g_mirrorProc, 0) == WAIT_OBJECT_0) {
+        DWORD code = 0;
+        GetExitCodeProcess(g_mirrorProc, &code);
+        LOGI("tray: SteamVR quick mode: EyeCaptureMirror exited (code %lu)", code);
+        CloseHandle(g_mirrorProc);
+        g_mirrorProc = nullptr;
+        if (code != 0) {
+            const ULONGLONG now = GetTickCount64();
+            g_mirrorFails.push_back(now);
+            while (!g_mirrorFails.empty() && now - g_mirrorFails.front() > 60000) g_mirrorFails.pop_front();
+            if (g_mirrorFails.size() >= 3 && !g_mirrorBlocked) {
+                g_mirrorBlocked = true;
+                g_mirrorBlockedMode = g_steamvrMode;
+                g_mirrorBlockedVr = true;
+                LOGW("tray: SteamVR quick mode: EyeCaptureMirror failed 3 times within a minute -- not started again until "
+                     "steamvr_mode or SteamVR changes (see logs\\eye_capture.log)");
+                Balloon(L"SteamVR quick mode", L"The SteamVR mirror recorder keeps failing, so it is not started again for now. "
+                                               L"See logs\\eye_capture.log.", true);
+            }
+        }
+    }
+    wchar_t watch[64] = L"vrserver.exe";
+    if (g_testMode && GetEnvironmentVariableW(L"EYECAP_TRAY_TEST_VRSERVER", watch, 64) == 0) return;   // tests: never the real one
+    const bool vr = ProcessRunning(watch);
+    if (g_mirrorBlocked && (g_steamvrMode != g_mirrorBlockedMode || vr != g_mirrorBlockedVr)) {
+        g_mirrorBlocked = false;
+        g_mirrorFails.clear();
+        LOGI("tray: SteamVR quick mode: %s changed -- EyeCaptureMirror may start again",
+             g_steamvrMode != g_mirrorBlockedMode ? "steamvr_mode" : "the SteamVR state");
+    }
+    const bool want = g_steamvrMode == SteamVrMode::Quick && vr && !g_mirrorBlocked;
+    if (!want) {
+        StopMirror(g_steamvrMode != SteamVrMode::Quick ? "steamvr_mode is not quick" : !vr ? "SteamVR is not running" : "back-off after failures");
+        return;
+    }
+    if (g_mirrorProc) return;
+    const std::wstring exe = MirrorExe();
+    if (exe.empty()) {
+        static bool logged = false;
+        if (!logged) { logged = true; LOGW("tray: SteamVR quick mode: EyeCaptureMirror.exe not found next to the tray app"); }
+        return;
+    }
+    if (!g_mirrorQuit) g_mirrorQuit = CreateEventW(nullptr, TRUE, FALSE, L"Local\\OpenXR-EyeCapture-MirrorQuit");
+    if (g_mirrorQuit) ResetEvent(g_mirrorQuit);
+    std::wstring cmd = L"\"" + exe + L"\" --home \"" + g_exeDir + L"\"";
+    STARTUPINFOW si{sizeof(si)};
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessW(exe.c_str(), &cmd[0], nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, g_exeDir.c_str(), &si, &pi)) {
+        LOGE("tray: SteamVR quick mode: cannot start %s (error %lu)", elog::Narrow(exe).c_str(), GetLastError());
+        return;
+    }
+    CloseHandle(pi.hThread);
+    g_mirrorProc = pi.hProcess;
+    LOGI("tray: SteamVR quick mode: %s runs -- started %s (pid %lu)", elog::Narrow(watch).c_str(), elog::Narrow(exe).c_str(), pi.dwProcessId);
+    if (g_steamvrDome)
+        Balloon(L"SteamVR quick mode", L"Quick mode records flat side-by-side only: VR180 / VR360 needs per-game recording (tray menu -> SteamVR games...).", false);
+}
+
 void OpenSettings() {
     if (settings::DialogWindow()) { settings::ShowDialog(L"", nullptr); return; }
     settings::ShowDialog(SettingsPath(), OnSettingsSaved);
+}
+
+// "SteamVR games..." (tray menu, WM_APP+9): the per-game SteamVR proxy list (tray/steamvr_ui.h).
+void OpenSteamVrGames() {
+    steamvr_ui::Options o;
+    o.installDir = g_exeDir;
+    o.testMode = g_testMode;
+    o.configPath = SettingsPath();
+    Config cfg;
+    LoadConfig(g_exeDir, cfg);
+    if (!cfg.hotkey.bindings.empty()) o.hotkey = cfg.hotkey.text;
+    steamvr_ui::ShowDialog(o);
+}
+
+// HKCU\Software\OpenXR-EyeCapture\Home = this install folder (REG_SZ, no admin): the SteamVR proxy's fallback when a game
+// folder has no sidecar (src/openvr/openvr_hooks.h). Written at every start, only when it differs. Tests: the key comes
+// from XR_EYE_CAPTURE_TEST_HOME_KEY (an HKCU subkey); a test-mode tray without it writes nothing.
+void WriteHomeKey(bool testMode) {
+    wchar_t keyBuf[512];
+    const DWORD n = GetEnvironmentVariableW(EYECAP_TEST_HOME_KEY_ENV, keyBuf, 512);
+    std::wstring key = (n > 0 && n < 512) ? std::wstring(keyBuf) : std::wstring();
+    if (key.empty()) {
+        if (testMode) return;
+        key = EYECAP_HOME_REG_KEY;
+    }
+    wchar_t cur[1024] = L"";
+    DWORD bytes = sizeof(cur) - sizeof(wchar_t);
+    if (RegGetValueW(HKEY_CURRENT_USER, key.c_str(), EYECAP_HOME_REG_VALUE, RRF_RT_REG_SZ, nullptr, cur, &bytes) == ERROR_SUCCESS &&
+        _wcsicmp(cur, g_exeDir.c_str()) == 0)
+        return;
+    HKEY k = nullptr;
+    LSTATUS e = RegCreateKeyExW(HKEY_CURRENT_USER, key.c_str(), 0, nullptr, 0, KEY_SET_VALUE, nullptr, &k, nullptr);
+    if (e == ERROR_SUCCESS) {
+        e = RegSetValueExW(k, EYECAP_HOME_REG_VALUE, 0, REG_SZ, (const BYTE*)g_exeDir.c_str(), (DWORD)((g_exeDir.size() + 1) * sizeof(wchar_t)));
+        RegCloseKey(k);
+    }
+    if (e == ERROR_SUCCESS) LOGI("tray: SteamVR home: HKCU\\%s\\Home = %s", elog::Narrow(key).c_str(), elog::Narrow(g_exeDir).c_str());
+    else LOGW("tray: SteamVR home: cannot write HKCU\\%s\\Home (error %ld)", elog::Narrow(key).c_str(), (long)e);
 }
 
 // ---- registration UI ----
@@ -759,11 +912,11 @@ void RegisterFlow(bool fromStart) {
     }
     std::wstring q;
     if (g_reg.state == install::State::StalePath) {
-        q = L"OpenXR-EyeCapture is registered from another folder:\n" + g_reg.registeredPath +
+        q = L"VR EyeCapture is registered for OpenXR games from another folder:\n" + g_reg.registeredPath +
             L"\n\nRe-register it from this folder? Windows will ask for administrator rights once.";
     } else {
-        q = L"OpenXR-EyeCapture is not registered for VR games yet.\n\nRegister it now? Windows will ask for administrator "
-            L"rights once.";
+        q = L"VR EyeCapture is not registered for OpenXR games yet.\n\nRegister VR EyeCapture for OpenXR games now? Windows "
+            L"will ask for administrator rights once.";
         if (fromStart) q += L"\n\n(Later: right-click the tray icon -> Register for VR games.)";
     }
     if (!Ask(q)) { g_regBusy = false; Refresh(); return; }
@@ -796,7 +949,7 @@ void RegisterFlow(bool fromStart) {
 void UnregisterFlow() {
     if (g_regBusy) return;
     g_regBusy = true;
-    const std::wstring q = L"Unregister OpenXR-EyeCapture from VR games?\n\nGames will no longer load the recorder. Your "
+    const std::wstring q = L"Unregister VR EyeCapture from OpenXR games?\n\nOpenXR games will no longer load the recorder. Your "
                            L"files and recordings stay. Windows will ask for administrator rights once.";
     if (!Ask(q)) { g_regBusy = false; return; }
     DWORD launchErr = 0;
@@ -811,7 +964,7 @@ void UnregisterFlow() {
     } else if (code != 0) {
         ShowError(ElevatedFailText(L"Unregistering", code));
     } else {
-        Balloon(L"Unregistered", L"Unregistered. VR games no longer load OpenXR-EyeCapture. Exit the tray app or "
+        Balloon(L"Unregistered", L"Unregistered. OpenXR games no longer load VR EyeCapture. Exit the tray app or "
                                  L"register again from its menu.", false);
     }
     g_regBusy = false;
@@ -1065,14 +1218,17 @@ void ShowMenu() {
         AppendMenuW(m, MF_POPUP, (UINT_PTR)tag, L"Tag a video as 3D");
     }
     AppendMenuW(m, MF_STRING, ID_LOG, L"Open log");
-    AppendMenuW(m, MF_STRING, ID_SETTINGS, L"Open OpenXR-EyeCapture");
+    AppendMenuW(m, MF_STRING, ID_SETTINGS, L"Open VR EyeCapture");
     SetMenuDefaultItem(m, ID_SETTINGS, FALSE);   // bold: left-click on the icon does the same
     AppendMenuW(m, MF_STRING, ID_CONFIG, L"Edit config");
     if (g_regEnabled) {
         AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
         if (RegOk()) AppendMenuW(m, MF_STRING, ID_UNREGISTER, L"Unregister from VR games...");
         else AppendMenuW(m, MF_STRING, ID_REGISTER, L"Register for VR games...");
+    } else {
+        AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     }
+    AppendMenuW(m, MF_STRING, ID_STEAMVR, L"SteamVR games...");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING, ID_EXIT, L"Exit");
     POINT pt;
@@ -1128,6 +1284,9 @@ void ShowMenu() {
     case ID_UNREGISTER:
         UnregisterFlow();
         break;
+    case ID_STEAMVR:
+        OpenSteamVrGames();
+        break;
     case ID_EXIT:
         DestroyWindow(g_wnd);
         break;
@@ -1144,6 +1303,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         if (wp == kTipTimer) { KillTimer(h, kTipTimer); g_savedTip.clear(); Refresh(); LOGI("tray: tooltip restored: %s", elog::Narrow(g_nid.szTip).c_str()); return 0; }
         if (g_regEnabled && !g_regBusy && GetTickCount64() - g_regQueried >= 10000) QueryReg(false);   // cheap registry read
         CheckConfigChanged();   // one GetFileAttributesEx: controller / wheel hotkeys follow config.ini edits
+        if (GetTickCount64() - g_mirrorCheck >= 2000) { g_mirrorCheck = GetTickCount64(); MirrorTick(); }   // SteamVR quick mode
         g_blinkOdd = !g_blinkOdd;
         Refresh();
         return 0;
@@ -1170,6 +1330,14 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_OPEN_SETTINGS:
         OpenSettings();
         return 0;
+    case WM_OPEN_STEAMVR:   // = menu "SteamVR games..." (tests post it)
+        OpenSteamVrGames();
+        return 0;
+    case WM_STEAMVR_REPAIR: {   // once at start: games updated / verified since the last run get the proxy back
+        const std::wstring text = steamvr_ui::AutoRepair(g_exeDir, "tray start");
+        if (!text.empty()) Balloon(L"SteamVR games", text, false);
+        return 0;
+    }
     case WM_PAUSE_JOB:   // = menu "Pause / Resume conversion" (tests post it)
         PauseJob("WM_APP+5");
         Refresh();
@@ -1187,6 +1355,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         else if (LOWORD(lp) == WM_RBUTTONUP || LOWORD(lp) == WM_CONTEXTMENU) ShowMenu();
         return 0;
     case WM_DESTROY:
+        StopMirror("tray exit");
         g_tagQuit = true;
         KillTimer(h, kTimer);
         g_pp.Stop();   // cancels a running ffmpeg (resumed first if held) and deletes its partial output
@@ -1327,7 +1496,7 @@ int RunCli(const std::wstring& arg) {
     int rc = 0;
     if (arg != L"--status") {
         const uint32_t cmd = arg == L"--start" ? ECC_START : arg == L"--stop" ? ECC_STOP : ECC_TOGGLE;
-        if (!EyeCapSendCommand(shm, cmd)) { print(L"no OpenXR game with a capture-capable session is running"); rc = 1; }
+        if (!EyeCapSendCommand(shm, cmd)) { print(L"no VR game with a capture-capable session is running"); rc = 1; }
         else Sleep(600);   // let the layer react before printing the status
     }
     EyeCapShared st{};
@@ -1421,6 +1590,17 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     elog::Init(g_exeDir + L"\\logs\\tray.log", false);
     LOGI("tray: started%s (exe folder %s)", testMode ? " [TEST MODE, private status block]" : "", elog::Narrow(g_exeDir).c_str());
     ApplyTestRunKey(testMode);   // before the settings window can open
+    // the rename (docs/RENAME_PLAN.md): the old "OpenXR-EyeCapture" Run value becomes "VR EyeCapture" (same data, the
+    // StartupApproved record follows), and %APPDATA%\OpenXR-EyeCapture\config.ini is copied once to %APPDATA%\VR EyeCapture
+    {
+        std::wstring what;
+        if (install::MigrateAutostartName(&what)) LOGI("tray: start-with-Windows entry renamed: %s", elog::Narrow(what).c_str());
+        std::wstring from, to;
+        const int m = MigrateAppDataConfig(&from, &to);
+        if (m > 0) LOGI("tray: config.ini copied from the old folder %s to %s (the old file is kept)", elog::Narrow(from).c_str(), elog::Narrow(to).c_str());
+        else if (m < 0) LOGW("tray: could not copy %s to %s (error %d); the old file is still used", elog::Narrow(from).c_str(), elog::Narrow(to).c_str(), -m);
+    }
+    WriteHomeKey(testMode);
     g_shm = testMode ? EyeCapOpenShared(&g_map, testShm) : EyeCapOpenShared(&g_map);
     for (int i = 0; i < kIcoCount; ++i) g_icons[i] = LoadTrayIcon(i);
 
@@ -1429,7 +1609,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     wc.hInstance = inst;
     wc.lpszClassName = L"OpenXREyeCaptureTray";
     RegisterClassW(&wc);
-    g_wnd = CreateWindowW(wc.lpszClassName, L"OpenXR-EyeCapture", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, inst, nullptr);
+    g_wnd = CreateWindowW(wc.lpszClassName, kAppTitle, 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, inst, nullptr);   // found by class
 
     g_nid.cbSize = sizeof(g_nid);
     g_nid.hWnd = g_wnd;
@@ -1437,10 +1617,11 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     g_nid.uFlags = NIF_ICON | NIF_TIP | NIF_MESSAGE;
     g_nid.uCallbackMessage = WM_TRAY;
     g_nid.hIcon = g_icons[0];
-    wcsncpy_s(g_nid.szTip, L"OpenXR-EyeCapture", _TRUNCATE);
+    wcsncpy_s(g_nid.szTip, kAppTitle, _TRUNCATE);
     Shell_NotifyIconW(NIM_ADD, &g_nid);
     SetTimer(g_wnd, kTimer, 500, nullptr);
     g_pp.Start(g_exeDir, g_wnd, WM_PP);
+    PostMessageW(g_wnd, WM_STEAMVR_REPAIR, 0, 0);   // SteamVR games the user enabled: repaired after game updates
     {
         // resolve ffmpeg once at start so the log says what a job would use (jobs resolve again when they run)
         Config cfg;

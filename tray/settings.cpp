@@ -20,7 +20,7 @@
 
 namespace settings {
 
-const wchar_t* const kWindowTitle = L"OpenXR-EyeCapture";
+const wchar_t* const kWindowTitle = L"VR EyeCapture";
 
 namespace {
 
@@ -517,7 +517,8 @@ void Relayout();
 // ---- help texts: hover tooltip + the "Description" panel. Product-documentation style: short, neutral, complete sentences.
 const wchar_t* const kOverview =
     L"Point at a setting to see its description here.\r\n"
-    L"How it works: eye_capture.dll is an OpenXR API layer. While this tray app is running and the hotkey is pressed, the layer copies the "
+    L"How it works: for OpenXR games eye_capture.dll is an OpenXR API layer; for SteamVR games a copy of openvr_api.dll in the game's "
+    L"folder does the same (tray menu: SteamVR games...). While this tray app is running and the hotkey is pressed, the recorder copies the "
     L"two eye images that the game submits to the headset, encodes them on the GPU and writes an MP4 file, which the tray then converts "
     L"to a 3D MKV for YouTube (or, with 'Record directly in the YouTube layout' in the Export group, only copies it into the MKV). "
     L"Nothing is injected into the game. Saved changes apply to the next recording.";
@@ -1152,9 +1153,9 @@ void DrawLogo(const DRAWITEMSTRUCT* di) {
         SelectObject(dc, of);
         DeleteObject(f);
     };
-    line(g_logoFont, L"OpenXR-EyeCapture", RGB(14, 16, 23));
+    line(g_logoFont, L"VR EyeCapture", RGB(14, 16, 23));
     x += 16 * SS;
-    line(g_font, L"Stereo 3D recorder for any OpenXR game", GetSysColor(COLOR_GRAYTEXT));
+    line(g_font, L"Stereo 3D recorder for VR games", GetSysColor(COLOR_GRAYTEXT));
 
     SetStretchBltMode(di->hDC, HALFTONE);
     SetBrushOrgEx(di->hDC, 0, 0, nullptr);
@@ -1454,7 +1455,7 @@ void LoadFromFile() {
     if (!problems.empty()) {
         std::wstring m = L"The configuration file contains invalid values on the following lines. The window shows the default value for each of them, and Save replaces them:\n\n";
         for (const auto& p : problems) m += p + L"\n";
-        Report(L"OpenXR-EyeCapture", m);
+        Report(kWindowTitle, m);
     }
 }
 
@@ -1649,7 +1650,7 @@ void QueueCommand(int id, int code) {
         if (g_hooks.pickFiles) {
             const pp::JobFormat f = WindowFormat();
             if (f.Empty()) {
-                Report(L"OpenXR-EyeCapture", L"The Export settings create no files (YouTube output None and no 2D video). Choose a YouTube output first.");
+                Report(kWindowTitle, L"The Export settings create no files (YouTube output None and no 2D video). Choose a YouTube output first.");
                 break;
             }
             g_hooks.pickFiles(g_dlg, f, id == ID_CONVERTPICK);
@@ -1727,7 +1728,7 @@ void DoSave() {
         if (install::SetAutostart(wantAuto, ExeFolder(), err))
             r.changed.push_back(wantAuto ? L"start_with_windows 0->1" : L"start_with_windows 1->0");
         else
-            Report(L"OpenXR-EyeCapture", L"The Start with Windows setting could not be changed:\n" + err);
+            Report(kWindowTitle, L"The Start with Windows setting could not be changed:\n" + err);
     }
     if (g_onSaved) g_onSaved(r.changed);
     DestroyWindow(g_dlg);
@@ -1738,7 +1739,7 @@ void DoSave() {
 void DoBrowse() {
     IFileOpenDialog* dlg = nullptr;
     if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dlg))) || !dlg) {
-        Report(L"OpenXR-EyeCapture", L"The folder picker could not be opened. Type the folder into the field instead.");
+        Report(kWindowTitle, L"The folder picker could not be opened. Type the folder into the field instead.");
         return;
     }
     DWORD opts = 0;
@@ -2207,7 +2208,7 @@ int BuildControls(HWND dlg, Builder::Pass pass, int clientW, int clientH, int sc
 
     // ---- header: the logo (mark + wordmark + tagline, owner-drawn by DrawLogo) and, to its right, the config file path
     {
-        const int logoW = 32 + 6 + b.TextW(L"OpenXR-EyeCapture", g_logoFont) + 16 + b.TextW(L"Stereo 3D recorder for any OpenXR game") + 2;
+        const int logoW = 32 + 6 + b.TextW(L"VR EyeCapture", g_logoFont) + 16 + b.TextW(L"Stereo 3D recorder for VR games") + 2;
         b.Make(L"STATIC", L"", SS_OWNERDRAW, gx, y, logoW, 32, ID_LOGO);
         const wchar_t* t = L"Configuration file:";
         const int tw = b.TextW(t) + 6;
@@ -2560,7 +2561,7 @@ int BuildControls(HWND dlg, Builder::Pass pass, int clientW, int clientH, int sc
     keep(g_footer, note);
     // the project link and the copyright / licence line, right-aligned on the note's row (above the background strip)
     HWND about = b.Make(WC_LINK,
-        L"<a href=\"https://github.com/JRDevo/OpenXR-EyeCapture\">github.com/JRDevo/OpenXR-EyeCapture</a> · Copyright (c) 2026 JRDevo · "
+        L"<a href=\"https://github.com/JRDevo/VR-EyeCapture\">github.com/JRDevo/VR-EyeCapture</a> · Copyright (c) 2026 JRDevo · "
         L"<a href=\"https://polyformproject.org/licenses/noncommercial/1.0.0\">PolyForm Noncommercial License 1.0.0</a>",
         WS_TABSTOP | LWS_RIGHT, gx + noteW + 12, fy + 9, gw - noteW - 12, 16, ID_ABOUTLINK);
     b.Tip(about, HelpText(ID_ABOUTLINK));

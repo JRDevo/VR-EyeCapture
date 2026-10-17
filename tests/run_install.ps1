@@ -11,7 +11,10 @@
                           value = tt3\json, stale gone) -> CU duplicate -> registered=yes hkcu_duplicate=yes -> --register
                           removes it -> --unregister (exit 0) -> registered=no; dll missing -> --register exit 1 and
                           files=missing; read-only LM key -> --register exit 5. tray.log has the --register lines.
-    3. GUI on test keys  : the scratch tray in test mode (EYECAP_TRAY_TEST_SHM + EYECAP_TRAY_TEST_REG=1): logs the
+    3. GUI on test keys  : the rename migration at the first start: an old "OpenXR-EyeCapture" value in the test Run key
+                          becomes "VR EyeCapture" (then SyncAutostart points it at tt3), %APPDATA%\OpenXR-EyeCapture\config.ini
+                          (scratch APPDATA) is copied to %APPDATA%\VR EyeCapture (old kept). Then
+                          the scratch tray in test mode (EYECAP_TRAY_TEST_SHM + EYECAP_TRAY_TEST_REG=1): logs the
                           registration state, the start question (answered No in test mode: no dialog, no UAC), the
                           "Not registered for VR games" tooltip; a stale value gives the "registered from another folder"
                           question; a --register from outside is picked up by the 10 s re-query (tooltip back to normal).
@@ -89,7 +92,7 @@ try {
     Step 'CLI --status on empty test keys: autostart=no' ($r.out -match 'autostart=no')
     $runKey = 'HKCU:\Software\OpenXR-EyeCapture-Test\Run'
     New-Item -Path $runKey -Force | Out-Null
-    New-ItemProperty -Path $runKey -Name 'OpenXR-EyeCapture' -Value 'x' -PropertyType String -Force | Out-Null
+    New-ItemProperty -Path $runKey -Name 'VR EyeCapture' -Value 'x' -PropertyType String -Force | Out-Null
     Step 'CLI --status with a test Run value: autostart=yes' ((TrayCli $exe '--status').out -match 'autostart=yes')
     Remove-Item -Path $runKey -Recurse -Force
     SetVal $lmKey $stale
@@ -121,14 +124,29 @@ try {
     Step 'tray.log has the --register / --unregister lines' ($log -match 'tray: --register \(exe folder' -and $log -match 'tray: registered: ' -and $log -match 'tray: unregistered: ' -and $log -match 'tray: --register failed: .*needs administrator rights')
 
     # ---- 3. GUI flow on test keys
+    # the rename (docs/RENAME_PLAN.md): an old "OpenXR-EyeCapture" Run value (test Run key) and an old
+    # %APPDATA%\OpenXR-EyeCapture\config.ini (scratch APPDATA) must be migrated at the first start
+    $oldCmd = '"X:\Old Place\EyeCaptureTray.exe"'
+    New-Item -Path $runKey -Force | Out-Null
+    New-ItemProperty -Path $runKey -Name 'OpenXR-EyeCapture' -Value $oldCmd -PropertyType String -Force | Out-Null
+    $oldCfgDir = Join-Path $t 'appdata\OpenXR-EyeCapture'; $newCfg = Join-Path $t 'appdata\VR EyeCapture\config.ini'
+    New-Item -ItemType Directory -Force $oldCfgDir | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $oldCfgDir 'config.ini'), "; old folder`r`n[capture]`r`nhotkey = ScrollLock`r`n", (New-Object System.Text.UTF8Encoding $false))
     $env:EYECAP_TRAY_TEST_SHM = 'eyecap-install-test'; $env:EYECAP_TRAY_TEST_REG = '1'
     Remove-Item (Join-Path $t 'logs\tray.log')
     $gui = Start-Process $exe -PassThru
     Start-Sleep -Seconds 3
     $log = Get-Content (Join-Path $t 'logs\tray.log') -Raw -Encoding UTF8
     Step 'GUI: registration state logged (not registered)' ($log -match 'tray: registration: not registered')
-    Step 'GUI: start question logged, answered No in test mode' ($log -match 'question box: OpenXR-EyeCapture is not registered for VR games yet\.[\s\S]*Register it now\? Windows will ask for administrator rights once\.[\s\S]*\(Later: right-click the tray icon -> Register for VR games\.\) -> No \(test mode\)')
-    Step 'GUI: tooltip first line "Not registered for VR games"' ($log -match 'tooltip now: Not registered for VR games \(right-click: Register\)\s+OpenXR-EyeCapture: no OpenXR game running')
+    Step 'GUI: start question logged, answered No in test mode' ($log -match 'question box: VR EyeCapture is not registered for OpenXR games yet\.[\s\S]*Register VR EyeCapture for OpenXR games now\? Windows will ask for administrator rights once\.[\s\S]*\(Later: right-click the tray icon -> Register for VR games\.\) -> No \(test mode\)')
+    Step 'GUI: tooltip first line "Not registered for VR games"' ($log -match 'tooltip now: Not registered for VR games \(right-click: Register\)\s+VR EyeCapture: no VR game running')
+    $rk = Get-Item $runKey
+    Step 'GUI rename: Run value "OpenXR-EyeCapture" -> "VR EyeCapture" (old one gone), logged' (($rk.GetValueNames() -contains 'VR EyeCapture') -and -not ($rk.GetValueNames() -contains 'OpenXR-EyeCapture') -and $log -match [regex]::Escape("start-with-Windows entry renamed: HKCU\Software\OpenXR-EyeCapture-Test\Run: `"OpenXR-EyeCapture`" -> `"VR EyeCapture`" = $oldCmd"))
+    Step 'GUI rename: then pointed at this folder (SyncAutostart), autostart=yes' ($rk.GetValue('VR EyeCapture') -eq "`"$exe`"" -and (TrayCli $exe '--status').out -match 'autostart=yes')
+    Step 'GUI rename: %APPDATA%\OpenXR-EyeCapture\config.ini copied to %APPDATA%\VR EyeCapture (old kept), logged' ((Test-Path $newCfg) -and (Test-Path (Join-Path $oldCfgDir 'config.ini')) -and ((Get-Content $newCfg -Raw) -eq (Get-Content (Join-Path $oldCfgDir 'config.ini') -Raw)) -and $log -match 'tray: config\.ini copied from the old folder .*OpenXR-EyeCapture\\config\.ini to .*VR EyeCapture\\config\.ini')
+    Remove-Item -Path $runKey -Recurse -Force
+    Remove-Item -Path "$($runKey)Approved" -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -Recurse -Force (Join-Path $t 'appdata\*')
     Stop-Process -Id $gui.Id; $gui = $null
     Start-Sleep -Milliseconds 500
     SetVal $lmKey $stale
@@ -136,14 +154,14 @@ try {
     $gui = Start-Process $exe -PassThru
     Start-Sleep -Seconds 3
     $log = Get-Content (Join-Path $t 'logs\tray.log') -Raw -Encoding UTF8
-    Step 'GUI: stale value -> "registered from another folder" question' ($log -match 'registration: registered from another folder \(D:\\Old Folder\\' -and $log -match 'question box: OpenXR-EyeCapture is registered from another folder:\s+D:\\Old Folder\\XR_APILAYER_JRDEVO_eye_capture\.json\s+Re-register it from this folder\? Windows will ask for administrator rights once\. -> No')
+    Step 'GUI: stale value -> "registered from another folder" question' ($log -match 'registration: registered from another folder \(D:\\Old Folder\\' -and $log -match 'question box: VR EyeCapture is registered for OpenXR games from another folder:\s+D:\\Old Folder\\XR_APILAYER_JRDEVO_eye_capture\.json\s+Re-register it from this folder\? Windows will ask for administrator rights once\. -> No')
     Remove-Item Env:\EYECAP_TRAY_TEST_SHM; Remove-Item Env:\EYECAP_TRAY_TEST_REG
     $r = TrayCli $exe '--register'
     $ok = $false
     for ($i = 0; $i -lt 30 -and -not $ok; $i++) {
         Start-Sleep -Milliseconds 500
         $log = Get-Content (Join-Path $t 'logs\tray.log') -Raw -Encoding UTF8
-        $ok = $log -match 'tray: registration: registered \(' -and $log -match 'tooltip now: OpenXR-EyeCapture: no OpenXR game running'
+        $ok = $log -match 'tray: registration: registered \(' -and $log -match 'tooltip now: VR EyeCapture: no VR game running'
     }
     Step 'GUI: picks up an outside --register within 15 s (re-query), tooltip back to normal' $ok
 } finally {

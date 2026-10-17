@@ -9,11 +9,12 @@
 # Files written (docs\images):
 #   logo_mark_512.png / logo_mark_128.png   the mark alone, transparent background
 #   logo_icon_800.png                       the mark on a dark rounded square (YouTube channel avatar, GitHub org avatar)
-#   logo_wordmark.png                       mark + "OpenXR-EyeCapture", white text, transparent (for dark backgrounds)
+#   logo_wordmark.png                       mark + "VR EyeCapture", white text, transparent (for dark backgrounds)
 #   logo_banner.png                         1280 x 320 README header, dark background
 #   thumbnail_overlay.png                   1280 x 720 RGBA layer that scripts\make_thumbnail.ps1 puts over a frame of
 #                                           the recording: "3D" badge top-left, logo top-right, dark band at the bottom
 #                                           for the title
+#   social_preview.png                      1280 x 640 GitHub social preview
 #   thumbnail_template.png                  the overlay over a placeholder picture with an example title, for the README
 # logo_mark.svg and logo.svg next to them are the same drawing as vectors (hand-written, same coordinates).
 
@@ -86,9 +87,9 @@ def mark_image(size, bg=None, radius_frac=0.0, pad_frac=0.0, **mark):
 
 
 def wordmark_image(mark_px, text_px, text_color=WHITE, bg=None, pad=0):
-    """mark + 'OpenXR-EyeCapture' side by side; returns an RGBA image."""
+    """mark + 'VR EyeCapture' side by side; returns an RGBA image."""
     f = font(FONT_BOLD, text_px)
-    text = 'OpenXR-EyeCapture'
+    text = 'VR EyeCapture'
     bbox = f.getbbox(text)                       # (l, t, r, b) at baseline-relative coords
     tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
     gap = round(mark_px * 0.18)
@@ -184,7 +185,7 @@ def thumbnail_template(overlay):
     img = placeholder_frame()
     img.alpha_composite(overlay)
     text_with_shadow(img, (48, 548), 'Your game title', font(FONT_BOLD, 92), WHITE)
-    text_with_shadow(img, (50, 660 - 4), 'Side-by-side 3D  |  recorded with OpenXR-EyeCapture', font(FONT_REG, 36), GREY)
+    text_with_shadow(img, (50, 660 - 4), 'Side-by-side 3D  |  recorded with VR EyeCapture', font(FONT_REG, 36), GREY)
     return img
 
 
@@ -195,9 +196,36 @@ def banner():
     img.alpha_composite(wm, ((W - wm.width) // 2, 40))
     d = ImageDraw.Draw(img)
     f = font(FONT_REG, 36)
-    sub = 'Stereo 3D recorder for any OpenXR game'
+    sub = 'Stereo 3D recorder for VR games'
     bb = f.getbbox(sub)
     d.text(((W - (bb[2] - bb[0])) / 2 - bb[0], 256), sub, font=f, fill=GREY)
+    return img
+
+
+def social_preview():
+    W, H = 1280, 640
+    img = Image.new('RGBA', (W, H), BG)
+    d = ImageDraw.Draw(img)
+    LIGHT = (214, 219, 228, 255)
+    FOOT = (110, 118, 134, 255)
+
+    def put(x, y_mid, text, f, fill):
+        bb = f.getbbox(text)
+        d.text((x - bb[0], y_mid - (bb[1] + bb[3]) / 2), text, font=f, fill=fill)
+        return bb[2] - bb[0]
+
+    put(70, 181, 'VR EyeCapture', font(FONT_BOLD, 70), WHITE)
+    sw = put(70, 254, 'Stereo 3D recorder for VR games', font(FONT_REG, 38), GREY)
+    assert 70 + sw < 790 - 20, 'subtitle collides with the L panel (%d)' % (70 + sw)
+    lines = ['Records both eyes at headset quality', 'Side-by-side 3D with game audio',
+             'One hotkey. Tray app. Any headset.', 'YouTube 3D / VR180 ready']
+    for i, t in enumerate(lines):
+        put(70, 333 + i * 48, t, font(FONT_REG, 30), LIGHT)
+    put(70, 578, 'free, noncommercial license', font(FONT_REG, 24), FOOT)
+    for x, col, ch in ((790, BLUE, 'L'), (1030, CORAL, 'R')):
+        d.rounded_rectangle((x, 190, x + 200, 450), radius=26, outline=col, width=4)
+        f = font(FONT_BOLD, 100)
+        put(x + 100 - (f.getbbox(ch)[2] - f.getbbox(ch)[0]) / 2, 328, ch, f, col)
     return img
 
 
@@ -246,6 +274,7 @@ def main():
     ov = thumbnail_overlay()
     ov.save(os.path.join(OUT, 'thumbnail_overlay.png'))
     thumbnail_template(ov).convert('RGB').save(os.path.join(OUT, 'thumbnail_template.png'), optimize=True)
+    social_preview().convert('RGB').save(os.path.join(OUT, 'social_preview.png'), optimize=True)
     print('written to', OUT)
 
 

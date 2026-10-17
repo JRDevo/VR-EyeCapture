@@ -1,5 +1,5 @@
 <#
-    uninstall.ps1 -- unregister the OpenXR-EyeCapture implicit API layer (HKLM and HKCU). Files and recordings are left
+    uninstall.ps1 -- unregister the VR EyeCapture OpenXR implicit API layer (HKLM and HKCU). Files and recordings are left
     in place. Elevates itself (UAC) when an HKLM entry exists. DEVELOPER SCRIPT, not in the release zip: users pick
     "Unregister from VR games..." in the tray menu (or run EyeCaptureTray.exe --unregister from an admin prompt).
       powershell -ExecutionPolicy Bypass -File scripts\uninstall.ps1
@@ -29,6 +29,6 @@ if ($lmNames.Count -gt 0) {
 }
 Write-Host ''
 & reg query 'HKLM\SOFTWARE\Khronos\OpenXR\1\ApiLayers\Implicit'
-if ((Ours $lm).Count -eq 0 -and (Ours $cu).Count -eq 0) { Write-Host 'OpenXR-EyeCapture layer unregistered.' -ForegroundColor Green; exit 0 }
+if ((Ours $lm).Count -eq 0 -and (Ours $cu).Count -eq 0) { Write-Host 'VR EyeCapture OpenXR layer unregistered.' -ForegroundColor Green; exit 0 }
 Write-Host 'some registrations remain' -ForegroundColor Red
 exit 1

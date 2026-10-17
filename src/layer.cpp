@@ -36,6 +36,7 @@
 #include <openxr/openxr_platform.h>
 #include <openxr/openxr_loader_negotiation.h>
 
+#include "capture_common.h"
 #include "config.h"
 #include "control.h"
 #include "frame_source.h"
@@ -101,14 +102,9 @@ struct SessionData {
     bool faulted = false;
     uint64_t frames = 0;
     // submitted-frame period estimate (displayTime deltas)
-    XrTime lastDisplayTime = 0;
-    double periodNs = 0;
-    int periodSamples = 0;
+    PeriodEstimator period;
     // clock anchor of the current recording
-    bool anchored = false;
-    int64_t anchorQpc = 0;
-    XrTime anchorDisp = 0;
-    int reanchors = 0;
+    VideoClockAnchor clock;
     // layout logging
     std::string layoutSig;
     int layoutLogs = 0;
@@ -160,33 +156,7 @@ std::wstring g_liveShm;  // live share block name (EYECAP_LIVE_SHM_NAME; test-on
 
 // ------------------------------------------------------------------------------------------------ helpers
 
-std::wstring ModuleDir() {
-    HMODULE hm = nullptr;
-    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                       (LPCWSTR)&ModuleDir, &hm);
-    wchar_t p[MAX_PATH] = L"";
-    GetModuleFileNameW(hm, p, MAX_PATH);
-    std::wstring s = p;
-    const size_t k = s.find_last_of(L"\\/");
-    return k == std::wstring::npos ? L"." : s.substr(0, k);
-}
-
-std::wstring ExeBaseName() {
-    wchar_t p[MAX_PATH] = L"";
-    GetModuleFileNameW(nullptr, p, MAX_PATH);
-    std::wstring s = p;
-    const size_t k = s.find_last_of(L"\\/");
-    if (k != std::wstring::npos) s = s.substr(k + 1);
-    const size_t dot = s.find_last_of(L'.');
-    if (dot != std::wstring::npos) s = s.substr(0, dot);
-    return s.empty() ? L"game" : s;
-}
-
-std::wstring EnvW(const wchar_t* name) {
-    wchar_t b[1024];
-    const DWORD n = GetEnvironmentVariableW(name, b, 1024);
-    return (n > 0 && n < 1024) ? std::wstring(b) : std::wstring();
-}
+std::wstring ModuleDir() { return ModuleDirOf((const void*)&ModuleDir); }
 
 void InitProcess() {
     g_dllDir = ModuleDir();
@@ -194,64 +164,30 @@ void InitProcess() {
     g_logPath = g_dllDir + L"\\logs\\eye_capture.log";
     elog::Init(g_logPath, false);
     LoadConfig(g_dllDir, g_cfg);
-    const std::wstring outOverride = EnvW(L"XR_EYE_CAPTURE_OUTPUT_DIR");
-    if (!outOverride.empty()) g_cfg.outputDir = outOverride;
-    const std::wstring autoRec = EnvW(L"XR_EYE_CAPTURE_AUTORECORD");
-    if (!autoRec.empty()) g_autoRecordSec = _wtof(autoRec.c_str());
-    const std::wstring autoRec2 = EnvW(L"XR_EYE_CAPTURE_AUTORECORD2");
-    if (!autoRec2.empty()) g_autoRecord2Sec = _wtof(autoRec2.c_str());
-    const std::wstring cfgOverride = EnvW(L"XR_EYE_CAPTURE_CONFIG");   // test-only: "key=value;key=value"
-    if (!cfgOverride.empty()) ApplyConfigOverrides(cfgOverride, g_cfg);
+    const CaptureEnv env = ReadCaptureEnv();
+    if (!env.outputDir.empty()) g_cfg.outputDir = env.outputDir;
+    g_autoRecordSec = env.autoRecordSec;
+    g_autoRecord2Sec = env.autoRecord2Sec;
+    if (!env.configOverrides.empty()) ApplyConfigOverrides(env.configOverrides, g_cfg);   // test-only: "key=value;key=value"
     elog::SetLevel(g_cfg.logLevel);
     elog::SetMirror(g_cfg.outputDir + L"\\eye_capture.log");
     wchar_t exe[MAX_PATH] = L"";
     GetModuleFileNameW(nullptr, exe, MAX_PATH);
     LOGI("==== " LAYER_NAME " v%s loaded into %s (pid %lu)", EYE_CAPTURE_VERSION, elog::Narrow(exe).c_str(),
          (unsigned long)GetCurrentProcessId());
-    char qvsText[16];
-    if (g_cfg.qualityVsSpeed >= 0) snprintf(qvsText, sizeof(qvsText), "%d", g_cfg.qualityVsSpeed);
-    else snprintf(qvsText, sizeof(qvsText), "auto");
-    LOGI("layer dll folder %s | config %s | output %s | hotkey %s | codec %s %u Mb/s | rate_control %s | qp %u | "
-         "quality_vs_speed %s | max_width %u | max_fps %u | constant_frame_rate %d | audio %s%s%s | gamma %s | beeps %d",
-         elog::Narrow(g_dllDir).c_str(), g_cfg.loadedFrom.empty() ? "(defaults)" : elog::Narrow(g_cfg.loadedFrom).c_str(),
-         elog::Narrow(g_cfg.outputDir).c_str(), elog::Narrow(g_cfg.hotkey.text).c_str(), VideoCodecName(g_cfg.codec),
-         g_cfg.bitrateMbps ? g_cfg.bitrateMbps : VideoCodecDefaultMbps(g_cfg.codec), RateControlKey(g_cfg.rateControl), g_cfg.qp,
-         qvsText, g_cfg.maxWidth, g_cfg.maxFps, g_cfg.constantFrameRate ? 1 : 0,
-         g_cfg.audioEnabled ? "on" : "off", g_cfg.audioDevice.empty() ? "" : " device~",
-         elog::Narrow(g_cfg.audioDevice).c_str(),
-         g_cfg.gamma == GammaMode::Auto ? "auto" : g_cfg.gamma == GammaMode::Srgb ? "srgb" : "linear", g_cfg.beeps ? 1 : 0);
-    if (g_cfg.head.Enabled())
-        LOGI("head smoothing: head_smoothing %.2f (time constant %.3f s) | head_follow_deg %.1f | roll_lock %d | "
-             "output_fov_scale %.2f | edge_guard %d",
-             g_cfg.head.smoothing, HeadSmoothingTimeConstant(g_cfg.head.smoothing), g_cfg.head.followDeg,
-             g_cfg.head.rollLock ? 1 : 0, g_cfg.head.fovScale, g_cfg.head.edgeGuard ? 1 : 0);
-    else
-        LOGI("head smoothing: off (head_smoothing = 0)");
-    LOGI("symmetric_fov %d: %s", g_cfg.head.symmetricFov ? 1 : 0,
-         g_cfg.head.symmetricFov ? "both eyes re-projected to one common symmetric view (standard 3D SBS)"
-                                 : "raw eye images (asymmetric per-eye fov)");
-    if (g_cfg.dome.Enabled())
-        LOGI("dome: projection %s (%s, files *_%s.mp4) | dome_width %u%s | fill %s | fill_fade_s %.1f | window_feather_deg %.1f | "
-             "dome_forward start -- symmetric_fov / head smoothing are ignored",
-             DomeProjectionName(g_cfg.dome.projection),
-             g_cfg.dome.projection == DomeProjection::Vr180 ? "VR180, left | right" : "VR360, left on top / right below",
-             DomeFileTag(g_cfg.dome.projection), g_cfg.dome.width, g_cfg.dome.width ? "" : " (from the source density)",
-             g_cfg.dome.fill == DomeFill::LastSeen ? "last_seen" : "black", g_cfg.dome.fadeS, g_cfg.dome.featherDeg);
-    else
-        LOGI("dome: projection flat (standard SBS; [dome] projection = vr180 | vr360 for a world-locked dome)");
+    LogCaptureConfig("layer dll folder", g_dllDir, g_cfg);
     if (g_autoRecordSec > 0) LOGI("XR_EYE_CAPTURE_AUTORECORD=%.1f s: recording starts at the first frame", g_autoRecordSec);
-    if (EnvW(L"XR_EYE_CAPTURE_TRAY_IPC") == L"0") {
+    if (!env.trayIpc) {
         g_trayIpc = false;
         LOGI("XR_EYE_CAPTURE_TRAY_IPC=0: no control thread -- no hotkey, nothing published to the tray (test runs)");
     }
-    const std::wstring reqTray = EnvW(L"XR_EYE_CAPTURE_REQUIRE_TRAY");
-    if (!reqTray.empty()) {
-        g_cfg.requireTray = _wtoi(reqTray.c_str()) != 0;
+    if (!env.requireTray.empty()) {
+        g_cfg.requireTray = _wtoi(env.requireTray.c_str()) != 0;
         LOGI("XR_EYE_CAPTURE_REQUIRE_TRAY=%s overrides config.ini", g_cfg.requireTray ? "1" : "0");
     }
     LOGI("require_tray %s: %s", g_cfg.requireTray ? "1" : "0",
          g_cfg.requireTray ? "sessions are armed only while EyeCaptureTray.exe is running" : "sessions are always armed");
-    g_liveShm = EnvW(L"XR_EYE_CAPTURE_TEST_LIVE_SHM");
+    g_liveShm = env.liveShmOverride;
     if (g_liveShm.empty()) g_liveShm = EYECAP_LIVE_SHM_NAME;
     else LOGI("XR_EYE_CAPTURE_TEST_LIVE_SHM=%s: live share block name (test override)", elog::Narrow(g_liveShm).c_str());
 }
@@ -281,12 +217,6 @@ const char* LayoutName(const EyeView& L, const EyeView& R) {
 std::string FormatName(GfxApi api, int64_t f) {
     if (api == GfxApi::D3D11 || api == GfxApi::D3D12) return DxgiFormatName((DXGI_FORMAT)f) + std::string("(") + std::to_string(f) + ")";
     return "format " + std::to_string(f);
-}
-
-unsigned SnapRate(double hz) {
-    const unsigned common[] = {45, 60, 72, 80, 90, 120, 144};
-    for (unsigned c : common) if (std::fabs(hz - c) <= c * 0.03) return c;
-    return (unsigned)std::lround(hz);
 }
 
 // ------------------------------------------------------------------------------------------------ capture
@@ -328,146 +258,33 @@ void StartRecording(SessionData* sd, const EyeView& L, const EyeView& R) {
     else if (g_cfg.gamma == GammaMode::Linear) srgb = false;
 
     // frame rate: measured submit rate (what the encoder really gets), else the runtime's display refresh, else config
-    unsigned fps = 0;
     const char* fpsFrom = "config";
     float refresh = 0;
     if (sd->inst->GetDisplayRefreshRateFB) sd->inst->GetDisplayRefreshRateFB(sd->handle, &refresh);
-    if (sd->periodSamples >= 30 && sd->periodNs > 0) { fps = SnapRate(1e9 / sd->periodNs); fpsFrom = "measured frame submit rate"; }
-    else if (refresh > 1) { fps = SnapRate(refresh); fpsFrom = "XR_FB_display_refresh_rate"; }
-    if (!fps) fps = g_cfg.fps;
+    const unsigned fps = PickFps(g_cfg, sd->period.periodNs, sd->period.samples, refresh, "XR_FB_display_refresh_rate", &fpsFrom);
 
-    SYSTEMTIME st;
-    GetLocalTime(&st);
-    wchar_t name[128];
-    // <exe>_<stamp>_SBS.mp4 (flat), _VR180.mp4 / _VR360.mp4 (dome)
-    swprintf_s(name, L"%s_%04u%02u%02u_%02u%02u%02u_%hs.mp4", g_exeName.c_str(), st.wYear, st.wMonth, st.wDay, st.wHour,
-               st.wMinute, st.wSecond, DomeFileTag(g_cfg.dome.projection));
+    const std::wstring name = RecordingFileName(g_exeName, g_cfg.dome.projection);
     SHCreateDirectoryExW(nullptr, g_cfg.outputDir.c_str(), nullptr);
 
     RecorderSettings rs;
     rs.path = g_cfg.outputDir + L"\\" + name;
-    rs.codec = g_cfg.codec;
-    rs.bitrate = g_cfg.bitrateMbps * 1000000u;
-    rs.rateControl = g_cfg.rateControl;
-    rs.qp = g_cfg.qp;
-    rs.qualityVsSpeed = g_cfg.qualityVsSpeed;
-    rs.constantFrameRate = g_cfg.constantFrameRate;
-    rs.fps = fps;
-    rs.maxFps = g_cfg.maxFps;
-    rs.maxWidth = g_cfg.maxWidth;
-    rs.audio = g_cfg.audioEnabled;
-    rs.audioDevice = g_cfg.audioDevice;
-    rs.head = g_cfg.head;
-    rs.dome = g_cfg.dome;
-    rs.youtube = g_cfg.recordForYoutube;   // record_for_youtube: render the YouTube layout (layout_3d, eye_crop) directly
-    rs.layout3d = g_cfg.layout3d;
-    rs.eyeCrop = g_cfg.eyeCrop;
-    rs.startFovValid = L.hasPose && R.hasPose;
-    for (int i = 0; i < 4; ++i) { rs.startFov[0][i] = L.fov[i]; rs.startFov[1][i] = R.fov[i]; }
-    rs.startEyeW[0] = L.w; rs.startEyeH[0] = L.h; rs.startEyeW[1] = R.w; rs.startEyeH[1] = R.h;
+    FillRecorderSettings(g_cfg, L, R, fps, rs);
     const UINT W = L.w + R.w, H = L.h > R.h ? L.h : R.h;
     LOGI("record: start %s | %s | %ux%u SBS (eyes %ux%u + %ux%u) | %u fps from %s (display refresh %.1f, measured %.2f) | %s",
          elog::Narrow(rs.path).c_str(), GfxApiName(sd->api), W, H, L.w, L.h, R.w, R.h, fps, fpsFrom, refresh,
-         sd->periodNs > 0 ? 1e9 / sd->periodNs : 0.0, srgb ? "sRGB-encoded" : "linear");
-    sd->anchored = false;
-    sd->reanchors = 0;
+         sd->period.periodNs > 0 ? 1e9 / sd->period.periodNs : 0.0, srgb ? "sRGB-encoded" : "linear");
+    sd->clock.Reset();
     if (!sd->rec->Start(sd->src.get(), rs, W, H, L.w, stage, srgb))
         LOGW("record: previous recording still finalizing -- start ignored");
 }
 
-int64_t VideoClock(SessionData* sd, XrTime displayTime) {
-    const int64_t now = QpcNow100ns();
-    if (!sd->anchored) {
-        sd->anchored = true;
-        sd->anchorQpc = now;
-        sd->anchorDisp = displayTime;
-    }
-    int64_t ts = sd->anchorQpc + (displayTime - sd->anchorDisp) / 100;
-    if (ts - now > 5000000 || now - ts > 5000000) {   // runtime clock jumped (pause / resync): re-anchor on QPC
-        if (++sd->reanchors <= 5) LOGW("record: displayTime drifted %.1f ms from QPC -- re-anchoring", (ts - now) / 1e4);
-        sd->anchorQpc = now;
-        sd->anchorDisp = displayTime;
-        ts = now;
-    }
-    return ts;
-}
+int64_t VideoClock(SessionData* sd, XrTime displayTime) { return sd->clock.Map((int64_t)displayTime); }
 
-// Re-read config.ini at the start of each recording (the tray's Settings window edits it): only keys that can change
-// per recording are copied over; hotkey, require_tray, vr_indicator / indicator_* keep their game-start values
+// Re-read config.ini at the start of each recording (the tray's Settings window edits it): only keys that can change per
+// recording are copied over; hotkey, require_tray, vr_indicator / indicator_* keep their game-start values
 // (post_* belong to the tray). beeps goes to the control thread (ControlSetBeeps), before the start cue plays.
-// Called with g_lock held, on the game thread, before the swap_eyes decision.
-void ReloadConfigForRecording() {
-    Config n;
-    LoadConfig(g_dllDir, n);
-    if (n.loadedFrom.empty()) {
-        LOGW("config reload: %s could not be read -- keeping the current settings", elog::Narrow(ConfigPath(g_dllDir)).c_str());
-        return;
-    }
-    const std::wstring outOverride = EnvW(L"XR_EYE_CAPTURE_OUTPUT_DIR");
-    if (!outOverride.empty()) n.outputDir = outOverride;
-    const std::wstring cfgOverride = EnvW(L"XR_EYE_CAPTURE_CONFIG");
-    if (!cfgOverride.empty()) ApplyConfigOverrides(cfgOverride, n);
-
-    std::string changes;
-    auto note = [&](const char* key, const std::string& o, const std::string& v) {
-        if (o == v) return;
-        if (!changes.empty()) changes += ", ";
-        changes += std::string(key) + "=" + o + "->" + v;
-    };
-    auto B = [](bool b) { return std::string(b ? "1" : "0"); };
-    auto U = [](unsigned u) { return std::to_string(u); };
-    auto F = [](float f) { char b[32]; snprintf(b, sizeof(b), "%g", f); return std::string(b); };
-    Config& c = g_cfg;
-    note("output_dir", elog::Narrow(c.outputDir), elog::Narrow(n.outputDir));
-    note("codec", VideoCodecKey(c.codec), VideoCodecKey(n.codec));
-    auto Q = [](int q) { return q < 0 ? std::string("auto") : std::to_string(q); };
-    note("bitrate_mbps", U(c.bitrateMbps), U(n.bitrateMbps));
-    note("rate_control", RateControlKey(c.rateControl), RateControlKey(n.rateControl));
-    note("qp", U(c.qp), U(n.qp));
-    note("quality_vs_speed", Q(c.qualityVsSpeed), Q(n.qualityVsSpeed));
-    note("fps", U(c.fps), U(n.fps));
-    note("max_fps", U(c.maxFps), U(n.maxFps));
-    note("constant_frame_rate", B(c.constantFrameRate), B(n.constantFrameRate));
-    note("max_width", U(c.maxWidth), U(n.maxWidth));
-    note("record_for_youtube", B(c.recordForYoutube), B(n.recordForYoutube));
-    note("layout_3d", YtPackingKey(c.layout3d), YtPackingKey(n.layout3d));
-    note("eye_crop", YtCropKey(c.eyeCrop), YtCropKey(n.eyeCrop));
-    note("gamma", c.gamma == GammaMode::Auto ? "auto" : c.gamma == GammaMode::Srgb ? "srgb" : "linear",
-         n.gamma == GammaMode::Auto ? "auto" : n.gamma == GammaMode::Srgb ? "srgb" : "linear");
-    note("swap_eyes", B(c.swapEyes), B(n.swapEyes));
-    note("record_overlays", B(c.recordOverlays), B(n.recordOverlays));
-    note("audio_enabled", B(c.audioEnabled), B(n.audioEnabled));
-    note("audio_device", elog::Narrow(c.audioDevice), elog::Narrow(n.audioDevice));
-    note("beeps", B(c.beeps), B(n.beeps));
-    note("symmetric_fov", B(c.head.symmetricFov), B(n.head.symmetricFov));
-    note("head_smoothing", F(c.head.smoothing), F(n.head.smoothing));
-    note("head_follow_deg", F(c.head.followDeg), F(n.head.followDeg));
-    note("roll_lock", B(c.head.rollLock), B(n.head.rollLock));
-    note("output_fov_scale", F(c.head.fovScale), F(n.head.fovScale));
-    note("edge_guard", B(c.head.edgeGuard), B(n.head.edgeGuard));
-    note("projection", DomeProjectionName(c.dome.projection), DomeProjectionName(n.dome.projection));
-    note("dome_width", U(c.dome.width), U(n.dome.width));
-    note("fill", c.dome.fill == DomeFill::LastSeen ? "last_seen" : "black", n.dome.fill == DomeFill::LastSeen ? "last_seen" : "black");
-    note("fill_fade_s", F(c.dome.fadeS), F(n.dome.fadeS));
-    note("window_feather_deg", F(c.dome.featherDeg), F(n.dome.featherDeg));
-    static const char* kLevel[] = {"none", "error", "warn", "info", "debug"};   // index = (int)LogLevel + 1
-    auto lv = [&](LogLevel l) { return std::string(kLevel[(int)l >= -1 && (int)l < 4 ? (int)l + 1 : 3]); };
-    note("log_level", lv(c.logLevel), lv(n.logLevel));
-
-    const bool outChanged = c.outputDir != n.outputDir;
-    c.outputDir = n.outputDir; c.codec = n.codec; c.bitrateMbps = n.bitrateMbps; c.fps = n.fps; c.maxFps = n.maxFps;
-    c.rateControl = n.rateControl; c.qp = n.qp; c.qualityVsSpeed = n.qualityVsSpeed; c.constantFrameRate = n.constantFrameRate;
-    c.beeps = n.beeps;
-    ControlSetBeeps(c.beeps);   // the control thread copied the Config at its start; the start / stop cues follow this
-    c.maxWidth = n.maxWidth; c.gamma = n.gamma; c.swapEyes = n.swapEyes; c.recordOverlays = n.recordOverlays;
-    c.recordForYoutube = n.recordForYoutube; c.layout3d = n.layout3d; c.eyeCrop = n.eyeCrop;   // record_for_youtube layout
-    c.audioEnabled = n.audioEnabled;
-    c.audioDevice = n.audioDevice; c.head = n.head; c.dome = n.dome; c.logLevel = n.logLevel;
-    elog::SetLevel(c.logLevel);
-    if (outChanged) elog::SetMirror(c.outputDir + L"\\eye_capture.log");
-    LOGI("config reloaded for this recording from %s: %s%s", elog::Narrow(n.loadedFrom).c_str(),
-         changes.empty() ? "no changes" : "changed ", changes.c_str());
-}
+// Called with g_lock held, on the game thread, before the swap_eyes decision. (capture_common.cpp)
+void ReloadConfigForRecording() { ::ReloadConfigForRecording(g_dllDir, g_cfg); }
 
 // ------------------------------------------------------------------------------------------------ overlays
 
@@ -800,14 +617,7 @@ void CollectOverlays(SessionData* sd, const XrFrameEndInfo* info, uint32_t projI
 
 void CaptureImpl(SessionData* sd, const XrFrameEndInfo* info) {
     ++sd->frames;
-    if (sd->lastDisplayTime && info->displayTime > sd->lastDisplayTime) {
-        const double d = (double)(info->displayTime - sd->lastDisplayTime);
-        if (d > 2e6 && d < 1e8) {
-            sd->periodNs = sd->periodSamples ? sd->periodNs * 0.95 + d * 0.05 : d;
-            ++sd->periodSamples;
-        }
-    }
-    sd->lastDisplayTime = info->displayTime;
+    sd->period.Add((int64_t)info->displayTime);
 
     bool wantStart = false;
     if (sd == g_active) wantStart = g_startRequested.exchange(false);

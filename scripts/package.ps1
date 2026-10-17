@@ -1,13 +1,16 @@
 <#
     package.ps1 -- build Release and make the distributable zip.
 
-    Produces dist\OpenXR-EyeCapture-v<version>.zip containing:
+    Produces dist\VR-EyeCapture-v<version>.zip containing:
         eye_capture.dll, XR_APILAYER_JRDEVO_eye_capture.json, EyeCaptureTray.exe, config.ini,
+        steamvr\openvr_api.dll (the SteamVR proxy -- never loose in the root: the tray's "SteamVR games" copies it into a
+        game folder), EyeCaptureMirror.exe + valve\openvr_api.dll (Valve's own, v2.15.6, BSD-3: valve\LICENSE.txt) for
+        the SteamVR quick mode,
         scripts\make_mkv.ps1, scripts\make_thumbnail.ps1 (+ scripts\thumbnail_overlay.png), README.md, THIRD_PARTY.md
     Users only unzip and run EyeCaptureTray.exe: it registers the layer itself (one UAC prompt; tray/install.cpp) and
     unregisters it from its tray menu. scripts\install.ps1 / uninstall.ps1 are developer scripts and stay out of the zip.
 
-    Also produces dist\OpenXR-EyeCapture-OBS-v<version>.zip (a separate release asset, only for OBS users):
+    Also produces dist\VR-EyeCapture-OBS-v<version>.zip (a separate release asset, only for OBS users):
         obs-eyecapture.dll, README.md (obs\README.md), LICENSE.md
     The OBS plugin is never in the main zip.
 
@@ -25,7 +28,7 @@ $cml = Get-Content -Raw (Join-Path $root 'CMakeLists.txt')
 $verMatch = [regex]::Match($cml, 'project\s*\([^)]*VERSION\s+([0-9]+\.[0-9]+\.[0-9]+)')
 if (-not $verMatch.Success) { Fail 'could not read project(... VERSION x.y.z) from CMakeLists.txt' }
 $version = $verMatch.Groups[1].Value
-Write-Host "Packaging OpenXR-EyeCapture v$version" -ForegroundColor Cyan
+Write-Host "Packaging VR EyeCapture v$version" -ForegroundColor Cyan
 
 $cmake = $null
 $onPath = Get-Command cmake -ErrorAction SilentlyContinue
@@ -42,21 +45,25 @@ if (-not $cmake) { Fail 'cmake not found on PATH or under Visual Studio 2022' }
 
 & $cmake -B $buildDir -S $root -G 'Visual Studio 17 2022' -A x64 -DEYE_BUILD_OBS_PLUGIN=ON
 if ($LASTEXITCODE -ne 0) { Fail "cmake configure failed ($LASTEXITCODE)" }
-& $cmake --build $buildDir --config Release --target eye_capture EyeCaptureTray obs-eyecapture
+& $cmake --build $buildDir --config Release --target eye_capture EyeCaptureTray openvr_proxy EyeCaptureMirror obs-eyecapture
 if ($LASTEXITCODE -ne 0) { Fail "cmake build failed ($LASTEXITCODE)" }
 
 $rel = Join-Path $buildDir 'Release'
-$stageName = "OpenXR-EyeCapture-v$version"
+$stageName = "VR-EyeCapture-v$version"
 $stage = Join-Path $distDir $stageName
 $zip = Join-Path $distDir "$stageName.zip"
 if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
 if (Test-Path $zip) { Remove-Item -Force $zip }
-New-Item -ItemType Directory -Force -Path (Join-Path $stage 'scripts') | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $stage 'scripts'), (Join-Path $stage 'steamvr'), (Join-Path $stage 'valve') | Out-Null
 
 $files = @(
     @{ src = (Join-Path $rel 'eye_capture.dll'); name = 'eye_capture.dll' },
     @{ src = (Join-Path $rel 'XR_APILAYER_JRDEVO_eye_capture.json'); name = 'XR_APILAYER_JRDEVO_eye_capture.json' },
     @{ src = (Join-Path $rel 'EyeCaptureTray.exe'); name = 'EyeCaptureTray.exe' },
+    @{ src = (Join-Path $rel 'openvr_api.dll'); name = 'steamvr\openvr_api.dll' },
+    @{ src = (Join-Path $rel 'EyeCaptureMirror.exe'); name = 'EyeCaptureMirror.exe' },
+    @{ src = (Join-Path $root 'third_party\openvr\bin\win64\openvr_api.dll'); name = 'valve\openvr_api.dll' },
+    @{ src = (Join-Path $root 'third_party\openvr\LICENSE'); name = 'valve\LICENSE.txt' },
     @{ src = (Join-Path $root 'config.ini'); name = 'config.ini' },
     @{ src = (Join-Path $root 'README.md'); name = 'README.md' },
     @{ src = (Join-Path $root 'THIRD_PARTY.md'); name = 'THIRD_PARTY.md' },
@@ -84,7 +91,7 @@ $archive = [System.IO.Compression.ZipFile]::OpenRead($zip)
 try { foreach ($e in $archive.Entries) { "  {0,10}  {1}" -f $e.Length, $e.FullName } } finally { $archive.Dispose() }
 
 # --- separate OBS plugin zip (own release asset; not in the main zip) ---
-$obsName = "OpenXR-EyeCapture-OBS-v$version"
+$obsName = "VR-EyeCapture-OBS-v$version"
 $obsStage = Join-Path $distDir $obsName
 $obsZip = Join-Path $distDir "$obsName.zip"
 if (Test-Path $obsStage) { Remove-Item -Recurse -Force $obsStage }

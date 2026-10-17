@@ -1,7 +1,8 @@
-# obs-eyecapture -- OBS Studio source for OpenXR-EyeCapture
+# obs-eyecapture -- OBS Studio source for VR EyeCapture
 
-An OBS Studio source, **OpenXR EyeCapture** (id `eyecapture_source`), that shows the live eye images of a running
-OpenXR game that has the OpenXR-EyeCapture layer loaded. No window capture, no mirror window: the layer hands the eye
+An OBS Studio source, **VR EyeCapture** (id `eyecapture_source`; shown as **OpenXR EyeCapture** before the rename, and saved
+scenes keep working because the id did not change), that shows the live eye images of a running VR game recorded by
+VR EyeCapture (the OpenXR layer or the SteamVR proxy). No window capture, no mirror window: the layer hands the eye
 images to OBS through shared GPU textures (protocol and threading: `docs/DEVELOPMENT.md`, "Live share (OBS)").
 
 - **View**: Left eye (default) / Right eye / Side by side.
@@ -62,7 +63,7 @@ Copy the DLL to
 C:\ProgramData\obs-studio\plugins\obs-eyecapture\bin\64bit\obs-eyecapture.dll
 ```
 
-(create the folders) and restart OBS. Add a source: **+** > **OpenXR EyeCapture**. It is empty (0 x 0) until a game
+(create the folders) and restart OBS. Add a source: **+** > **VR EyeCapture**. It is empty (0 x 0) until a game
 with the layer runs; the game's log (`logs\eye_capture.log`) then says `live share: consumer found ...` and
 `live share: ring ready ...`, and OBS's log has `[obs-eyecapture] producer '<game>' ... imported`.
 

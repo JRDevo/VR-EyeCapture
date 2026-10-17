@@ -13,8 +13,9 @@
 // Writing HKLM needs administrator rights: the tray runs itself elevated with --register / --unregister.
 //
 // "Start with Windows" (optional, off by default) is a separate, per-user registry state, NOT a config.ini key:
-//   HKCU\Software\Microsoft\Windows\CurrentVersion\Run, value "OpenXR-EyeCapture" (REG_SZ) = "<exeDir>\EyeCaptureTray.exe"
-//   (quoted, no arguments). No admin rights needed. Rules:
+//   HKCU\Software\Microsoft\Windows\CurrentVersion\Run, value "VR EyeCapture" (REG_SZ) = "<exeDir>\EyeCaptureTray.exe"
+//   (quoted, no arguments). No admin rights needed. Before the rename (docs/RENAME_PLAN.md) the value was called
+//   "OpenXR-EyeCapture"; MigrateAutostartName moves it (and its StartupApproved record) at tray start. Rules:
 //   - newer Windows 11 builds start a Run entry at sign-in only when it also has an enabled approval record:
 //     HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run, same value name, REG_BINARY of 12 bytes,
 //     first byte even (2) = enabled, odd (3) = disabled by the user in Task Manager / Settings. SetAutostart(true) writes
@@ -63,7 +64,11 @@ int RemoveHkcuDuplicates();
 void SetTestRoots(const std::wstring& lmPath, const std::wstring& cuPath);
 
 // ---- Start with Windows (HKCU Run key, see the header comment) ----
-const wchar_t* AutostartValueName();   // "OpenXR-EyeCapture"
+const wchar_t* AutostartValueName();   // "VR EyeCapture"
+// The rename: a Run value "OpenXR-EyeCapture" becomes "VR EyeCapture" with the same type and data (an existing new value is
+// kept as it is), then the old one is deleted; the same for its StartupApproved record. Returns true when something moved
+// (*what, optional: a line for the log). No-op (false) when there is no old value.
+bool MigrateAutostartName(std::wstring* what = nullptr);
 // The command the Run value should hold for exeDir: "<exeDir>\EyeCaptureTray.exe" (quoted, no arguments).
 std::wstring AutostartCommand(const std::wstring& exeDir);
 // True when the Run value exists (any data) AND its StartupApproved record is missing or enabled: a record the user disabled

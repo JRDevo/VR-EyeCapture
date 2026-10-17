@@ -12,6 +12,13 @@ CMakeSettings.json
 /eye_capture.pdb
 /XR_APILAYER_JRDEVO_eye_capture.json
 /EyeCaptureTray.exe
+/steamvr/
+/EyeCaptureMirror.exe
+/valve/
+
+# The tray's list of SteamVR games where the proxy is enabled (tray/steamvr_games.h), next to EyeCaptureTray.exe
+/steamvr_games.ini
+/steamvr_games.ini.tmp
 
 # The tray's saved conversion queue (tray/postprocess.cpp SaveQueue), next to EyeCaptureTray.exe
 /queue.json

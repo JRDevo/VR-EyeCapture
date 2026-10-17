@@ -1,6 +1,7 @@
-# OpenXR-EyeCapture — working rules for Claude sessions
+# VR EyeCapture — working rules for Claude sessions
 
-Stereo recorder for any OpenXR game: an implicit OpenXR API layer (`eye_capture.dll`) + a tray app
+Stereo 3D recorder for VR games (renamed from OpenXR-EyeCapture, see `docs/RENAME_PLAN.md`): an implicit OpenXR API layer
+(`eye_capture.dll`), a per-game SteamVR proxy (`openvr_api.dll`, `src/openvr/`, `docs/STEAMVR_DESIGN.md`) + a tray app
 (`EyeCaptureTray.exe`). Read `README.md`, `docs/DEVELOPMENT.md` and `docs/VR180_REPORT.md` first.
 Project memory lives in the Claude workspace for this folder (`~/.claude/projects/E--OpenXR-EyeCapture/memory`).
 
@@ -10,6 +11,9 @@ Project memory lives in the Claude workspace for this folder (`~/.claude/project
 - 0 warnings in our sources is the bar. Tests: `tests\run_selftests.ps1`, `tests\run_e2e.ps1`, `tests\run_jitter.ps1`,
   `tests\run_dome.ps1`, `tests\run_settings.ps1`, `tests\run_reload.ps1`, `tests\run_yt8k.ps1` (tray 8K step, CPU only),
   `tests\run_tag3d.ps1` (tray "Tag a video as 3D" via `--tag3d`, CPU only), `tests\run_live.ps1` (OBS live share, GPU),
+  `tests\run_steamvr.ps1` (SteamVR proxy `openvr_api.dll` + `mock_openvr.dll` + fake game `openvr_e2e.exe`, and the quick-mode `EyeCaptureMirror.exe` cases, GPU; also not
+  while `Crisis VRigade 2`, `vrserver` or `vrcompositor` runs), the CPU exes `openvr_hook_test.exe` / `steamvr_install_test.exe`,
+  `tests\run_steamvr_ui.ps1` (the tray's "SteamVR games" window on a fake game tree, CPU only),
   `tests\run_install.ps1` (registration:
   `install_test.exe` + the tray's `--register/--unregister/--status` and GUI flow on test keys under
   `HKCU\Software\OpenXR-EyeCapture-Test`; no admin, run it NON-elevated), plus the unit-test exes in `build\Release`.
@@ -19,7 +23,8 @@ Project memory lives in the Claude workspace for this folder (`~/.claude/project
 - ffmpeg/ffprobe: `%LOCALAPPDATA%\Microsoft\WinGet\Packages\Gyan.FFmpeg.Essentials_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.1.1-essentials_build\bin\`.
 
 ## Install rules
-- The game loads the ROOT copies: `E:\OpenXR-EyeCapture\eye_capture.dll` + json + `EyeCaptureTray.exe`.
+- The game loads the ROOT copies: `E:\OpenXR-EyeCapture\eye_capture.dll` + json + `EyeCaptureTray.exe` (the tray's
+  "SteamVR games" copies `steamvr\openvr_api.dll`, else `build\Release\openvr_api.dll`, into a game folder on Enable).
   Refresh them from `build\Release` after a build — the DLL only when no game has it loaded, the tray only when
   no `EyeCaptureTray` process runs (close it, copy, start it again).
 - Registry: the layer is registered in **HKLM only**, written by `EyeCaptureTray.exe --register` running elevated (the
@@ -29,7 +34,7 @@ Project memory lives in the Claude workspace for this folder (`~/.claude/project
   are dev-only (not in the zip); never run `--register` / `install.ps1` from a session without asking (UAC + HKLM).
 
 ## Git
-- Branch `master`, remote `origin` = GitHub `JRDevo/OpenXR-EyeCapture` (public). Commit with `-c user.name=JRDevo -c user.email=42043842+JRDevo@users.noreply.github.com`. Push only when the user asks.
+- Branch `master`, remote `origin` = GitHub `JRDevo/VR-EyeCapture` (public; renamed from `JRDevo/OpenXR-EyeCapture`, which redirects). Commit with `-c user.name=JRDevo -c user.email=42043842+JRDevo@users.noreply.github.com`. Push only when the user asks.
 
 ## User setup facts
 - Quest 3 via Virtual Desktop, runtime VDXR; ATS/ETS2 OpenXR beta (D3D11). Hotkey `ScrollLock` (Alt combos open the

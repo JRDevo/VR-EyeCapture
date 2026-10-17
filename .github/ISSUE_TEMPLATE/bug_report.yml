@@ -13,14 +13,14 @@ body:
     id: version
     attributes:
       label: Tool version
-      description: The name of the zip you downloaded, e.g. `OpenXR-EyeCapture-v0.2.0.zip`.
+      description: The name of the zip you downloaded, e.g. `VR-EyeCapture-v0.5.0.zip` (`OpenXR-EyeCapture-v...zip` before the rename).
     validations:
       required: true
   - type: input
     id: game
     attributes:
       label: Game
-      description: Which game, and was it started with `-openxr`?
+      description: Which game, OpenXR or SteamVR (OpenVR), and was it started with `-openxr`?
       placeholder: "Game name, started with -openxr (if the game needs that switch)"
     validations:
       required: true

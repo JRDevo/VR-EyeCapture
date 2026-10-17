@@ -123,7 +123,7 @@ std::vector<uint8_t> BuildBlob(unsigned char stereoMode, bool sv3d, const uint32
     const size_t hd = b.size();
     PutBox(b, hd, "svhd");
     Put32(b, 0);
-    const char src[] = "OpenXR-EyeCapture";       // metadata_source, null-terminated UTF-8
+    const char src[] = "VR EyeCapture";           // metadata_source, null-terminated UTF-8
     b.insert(b.end(), src, src + sizeof(src));
     EndBox(b, hd);
     const size_t pj = b.size();

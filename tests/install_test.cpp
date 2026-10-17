@@ -10,8 +10,11 @@
 #include <windows.h>
 #include <sddl.h>
 #include <cstdio>
+#include <fstream>
+#include <sstream>
 #include <string>
 #include <vector>
+#include "config.h"
 #include "install.h"
 #include "log.h"
 
@@ -22,6 +25,12 @@ void Check(bool ok, const char* what) {
     if (!ok) ++g_fail;
 }
 std::string N(const std::wstring& w) { return elog::Narrow(w); }
+std::string ReadText(const std::wstring& p) {
+    std::ifstream f(p, std::ios::binary);
+    std::stringstream ss;
+    ss << f.rdbuf();
+    return ss.str();
+}
 
 const wchar_t kBase[] = L"Software\\OpenXR-EyeCapture-Test";
 const wchar_t kLm[] = L"Software\\OpenXR-EyeCapture-Test\\LM";
@@ -97,7 +106,7 @@ void MakeFile(const std::wstring& p) {
 std::wstring ScratchDir(const wchar_t* name, bool json, bool dll) {
     wchar_t tmp[MAX_PATH];
     GetTempPathW(MAX_PATH, tmp);
-    std::wstring base = std::wstring(tmp) + L"OpenXR-EyeCapture-install-test";
+    std::wstring base = std::wstring(tmp) + L"EyeCapture-install-test";
     CreateDirectoryW(base.c_str(), nullptr);
     const std::wstring d = base + L"\\" + name;
     CreateDirectoryW(d.c_str(), nullptr);
@@ -130,7 +139,7 @@ DWORD ApprovedRead(BYTE& b0, DWORD& size) {
     if (RegOpenKeyExW(HKEY_CURRENT_USER, kApprovedTest, 0, KEY_QUERY_VALUE, &k) != ERROR_SUCCESS) return REG_NONE;
     BYTE buf[64] = {};
     DWORD type = REG_NONE, sz = sizeof(buf);
-    const LSTATUS e = RegQueryValueExW(k, L"OpenXR-EyeCapture", nullptr, &type, buf, &sz);
+    const LSTATUS e = RegQueryValueExW(k, install::AutostartValueName(), nullptr, &type, buf, &sz);
     RegCloseKey(k);
     if (e != ERROR_SUCCESS) return REG_NONE;
     b0 = buf[0]; size = sz;
@@ -140,13 +149,13 @@ void ApprovedWriteByte0(BYTE v) {
     HKEY k = nullptr;
     if (RegCreateKeyExW(HKEY_CURRENT_USER, kApprovedTest, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &k, nullptr) != ERROR_SUCCESS) return;
     BYTE rec[12] = {v};
-    RegSetValueExW(k, L"OpenXR-EyeCapture", 0, REG_BINARY, rec, sizeof(rec));
+    RegSetValueExW(k, install::AutostartValueName(), 0, REG_BINARY, rec, sizeof(rec));
     RegCloseKey(k);
 }
 void ApprovedDelete() {
     HKEY k = nullptr;
     if (RegOpenKeyExW(HKEY_CURRENT_USER, kApprovedTest, 0, KEY_SET_VALUE, &k) != ERROR_SUCCESS) return;
-    RegDeleteValueW(k, L"OpenXR-EyeCapture");
+    RegDeleteValueW(k, install::AutostartValueName());
     RegCloseKey(k);
 }
 
@@ -351,6 +360,77 @@ int RunAll() {
         } else {
             Check(false, "could not make the test approval key read-only");
         }
+    }
+
+    printf("11. the rename: Run value \"OpenXR-EyeCapture\" -> \"VR EyeCapture\", %%APPDATA%% config folder (test keys / folders)\n");
+    {
+        const wchar_t* const runTest = L"Software\\OpenXR-EyeCapture-Test\\Run";
+        auto setStr = [](const wchar_t* sub, const wchar_t* name, const std::wstring& v) {
+            HKEY k = nullptr;
+            if (RegCreateKeyExW(HKEY_CURRENT_USER, sub, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &k, nullptr) != ERROR_SUCCESS) return;
+            RegSetValueExW(k, name, 0, REG_SZ, (const BYTE*)v.c_str(), (DWORD)((v.size() + 1) * sizeof(wchar_t)));
+            RegCloseKey(k);
+        };
+        auto getStr = [](const wchar_t* sub, const wchar_t* name, std::wstring* v) {
+            wchar_t b[1024] = L"";
+            DWORD n = sizeof(b) - sizeof(wchar_t);
+            const bool ok = RegGetValueW(HKEY_CURRENT_USER, sub, name, RRF_RT_ANY, nullptr, b, &n) == ERROR_SUCCESS;
+            if (v) *v = ok ? b : L"";
+            return ok;
+        };
+        Check(std::wstring(install::AutostartValueName()) == L"VR EyeCapture", "the Run value is now called \"VR EyeCapture\"");
+        std::wstring what, v;
+        Check(!install::MigrateAutostartName(&what) && what.empty(), "no old value: MigrateAutostartName is a no-op");
+        const std::wstring oldCmd = L"\"D:\\Old Place\\EyeCaptureTray.exe\"";
+        setStr(runTest, L"OpenXR-EyeCapture", oldCmd);
+        {   // the user had disabled it in Task Manager: odd first byte
+            HKEY k = nullptr;
+            RegCreateKeyExW(HKEY_CURRENT_USER, kApprovedTest, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &k, nullptr);
+            const BYTE rec[12] = {3};
+            if (k) { RegSetValueExW(k, L"OpenXR-EyeCapture", 0, REG_BINARY, rec, sizeof(rec)); RegCloseKey(k); }
+        }
+        Check(install::MigrateAutostartName(&what), "old value: MigrateAutostartName moves it");
+        printf("    %s\n", N(what).c_str());
+        Check(getStr(runTest, L"VR EyeCapture", &v) && v == oldCmd, "new Run value has the old data");
+        Check(!getStr(runTest, L"OpenXR-EyeCapture", nullptr), "old Run value deleted");
+        BYTE b0 = 0; DWORD n = 0;
+        Check(ApprovedRead(b0, n) == REG_BINARY && n == 12 && b0 == 3, "the StartupApproved record moved too (still disabled by the user)");
+        Check(!install::AutostartEnabled(&v) && v == oldCmd, "... so AutostartEnabled stays false, stored command kept");
+        Check(!install::MigrateAutostartName(&what), "second call: nothing left to move");
+        // both exist: the new one wins, the old one is removed
+        setStr(runTest, L"OpenXR-EyeCapture", L"\"X:\\stale\\EyeCaptureTray.exe\"");
+        Check(install::MigrateAutostartName(&what) && getStr(runTest, L"VR EyeCapture", &v) && v == oldCmd &&
+                  !getStr(runTest, L"OpenXR-EyeCapture", nullptr) && what.find(L"removed (new one \"VR EyeCapture\" already present)") != std::wstring::npos,
+              "old and new both present: the new value is kept, the old one deleted, and the log text says so");
+        printf("    %s\n", N(what).c_str());
+        std::wstring err;
+        install::SetAutostart(false, L"", err);
+
+        // %APPDATA%: new folder first, then the old one, then next to the DLL; the tray copies old -> new once
+        const std::wstring app = ScratchDir(L"AppData", false, false);
+        wchar_t oldApp[MAX_PATH] = L"";
+        const DWORD had = GetEnvironmentVariableW(L"APPDATA", oldApp, MAX_PATH);
+        SetEnvironmentVariableW(L"APPDATA", app.c_str());
+        const std::wstring dllDir = app + L"\\dll", oldDir = app + L"\\OpenXR-EyeCapture", newDir = app + L"\\VR EyeCapture";
+        CreateDirectoryW(dllDir.c_str(), nullptr);
+        Check(ConfigPath(dllDir) == dllDir + L"\\config.ini", "no %APPDATA% copy: config.ini next to the DLL");
+        std::wstring from, to;
+        Check(MigrateAppDataConfig(&from, &to) == 0, "nothing to copy without an old file");
+        CreateDirectoryW(oldDir.c_str(), nullptr);
+        { std::ofstream f(oldDir + L"\\config.ini", std::ios::binary); f << "[capture]\r\nbitrate_mbps = 77\r\n"; }
+        Check(ConfigPath(dllDir) == oldDir + L"\\config.ini", "only the old folder: its config.ini is used");
+        Check(MigrateAppDataConfig(&from, &to) == 1 && from == oldDir + L"\\config.ini" && to == newDir + L"\\config.ini",
+              "old file, no new one: copied (folder created)");
+        Check(ReadText(newDir + L"\\config.ini") == "[capture]\r\nbitrate_mbps = 77\r\n", "the copy is byte-identical");
+        Check(GetFileAttributesW((oldDir + L"\\config.ini").c_str()) != INVALID_FILE_ATTRIBUTES, "the old file is kept");
+        Check(ConfigPath(dllDir) == newDir + L"\\config.ini", "both folders: the new one wins");
+        { std::ofstream f(newDir + L"\\config.ini", std::ios::binary); f << "[capture]\r\nbitrate_mbps = 88\r\n"; }
+        Check(MigrateAppDataConfig() == 0 && ReadText(newDir + L"\\config.ini").find("88") != std::string::npos,
+              "second start: nothing copied, the new file is not overwritten");
+        DeleteFileW((oldDir + L"\\config.ini").c_str());
+        DeleteFileW((newDir + L"\\config.ini").c_str());
+        for (const std::wstring& d : {oldDir, newDir, dllDir, app}) RemoveDirectoryW(d.c_str());
+        SetEnvironmentVariableW(L"APPDATA", had ? oldApp : nullptr);
     }
     install::SetAutostartTestKey(L"");
     RegDeleteKeyW(HKEY_CURRENT_USER, L"Software\\OpenXR-EyeCapture-Test\\RunApproved");

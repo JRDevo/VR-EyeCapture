@@ -1,6 +1,6 @@
 # Security
 
-The tool is only published at https://github.com/JRDevo/OpenXR-EyeCapture (Releases page). Copies from any other site
+The tool is only published at https://github.com/JRDevo/VR-EyeCapture (Releases page). Copies from any other site
 are not mine; do not run them.
 
 If you find a security problem (for example in the layer DLL, the tray's registration step, or a bundled third-party

@@ -3,7 +3,8 @@
     the INSTALLED layer (run scripts\install.ps1 first) and tests/mock_runtime (no headset). Verifies every MP4.
       powershell -ExecutionPolicy Bypass -File tests\run_e2e.ps1
     The recording cases run with XR_EYE_CAPTURE_REQUIRE_TRAY=0 (no tray app needed). The last case runs WITHOUT that
-    override and without the tray and expects the layer to stay dormant (pass-through, nothing recorded).
+    override and without the tray and expects the layer to stay dormant (pass-through, nothing recorded); while an
+    EyeCaptureTray runs that case is reported "SKIPPED" (neither passed nor failed; the other cases decide the exit code).
     In-headset indicator (vr_indicator = 1, default): the mock runtime validates and counts the quad layer the layer
     appends. D3D11 cases: valid quad on at least as many frames as were recorded, never on every frame (hidden before /
     after), no invalid quad, log line "appended AFTER the capture". D3D12: no quad + "not available on D3D12" line.
@@ -406,6 +407,7 @@ foreach ($api in @('d3d11', 'd3d12')) {
 }
 
 # ---- dormant case: no override, no tray -> the layer must do nothing but forward ----
+$skipped = @()
 Remove-Item Env:\XR_EYE_CAPTURE_REQUIRE_TRAY -ErrorAction SilentlyContinue
 if ($null -ne $prevTrayIpc) { $env:XR_EYE_CAPTURE_TRAY_IPC = $prevTrayIpc } else { Remove-Item Env:\XR_EYE_CAPTURE_TRAY_IPC -ErrorAction SilentlyContinue }
 $trayUp = $true
@@ -414,8 +416,9 @@ Write-Host "`n=== dormant (no tray, no override)" -ForegroundColor Cyan
 if ($OnlyOverlays) {
     Write-Host '  skipped (-OnlyOverlays)'
 } elseif ($trayUp) {
-    Write-Host '  EyeCaptureTray is running -- close it for the dormant case' -ForegroundColor Red
-    $results += [pscustomobject]@{ api = 'd3d11'; layout = 'dormant'; run = $false; verify = $false }
+    # not a failure of the layer: the case cannot run while a tray holds the TrayAlive marker (it is not counted)
+    Write-Host '  SKIP: an EyeCaptureTray is running (it holds Local\OpenXR-EyeCapture-TrayAlive) -- close it to run the dormant case' -ForegroundColor Yellow
+    $skipped += 'dormant (EyeCaptureTray running)'
 } else {
     $logFile = $layerLog
     $before = if (Test-Path $logFile) { (Get-Item $logFile).Length } else { 0 }
@@ -444,5 +447,6 @@ Write-Host ''
 $results | Format-Table -AutoSize
 Write-Host 'Layer log lines for these runs:'
 Get-Content $layerLog -Tail 400 | Select-String 'frame layout \(|recording summary' | Select-Object -Last 16 | ForEach-Object { '  ' + $_.Line.Substring([math]::Min(37, $_.Line.Length)) }
+foreach ($s in $skipped) { Write-Host "SKIPPED: $s" -ForegroundColor Yellow }
 if ($results | Where-Object { -not ($_.run -and $_.verify) }) { exit 1 }
 exit 0

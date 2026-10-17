@@ -392,7 +392,7 @@ DWORD WINAPI ThreadProc(LPVOID) {
     wc.lpszClassName = L"EyeCaptureInputWindow";
     RegisterClassW(&wc);
     // a real (hidden) top-level window: DirectInput's SetCooperativeLevel wants one, and it gets WM_DEVICECHANGE broadcasts
-    s_wnd = CreateWindowExW(0, wc.lpszClassName, L"OpenXR-EyeCapture input", WS_OVERLAPPEDWINDOW, 0, 0, 100, 100, nullptr,
+    s_wnd = CreateWindowExW(0, wc.lpszClassName, L"VR EyeCapture input", WS_OVERLAPPEDWINDOW, 0, 0, 100, 100, nullptr,
                             nullptr, inst, nullptr);
     HDEVNOTIFY notify = nullptr;
     if (s_wnd) {

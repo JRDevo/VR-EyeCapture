@@ -1143,7 +1143,7 @@ bool Processor::RunJob(const Job& job) {
         }
         LOGI("job: cancelled by user %s during the %s step (%s; MP4 kept, remaining steps skipped)", N(name).c_str(), N(step).c_str(),
              del.c_str());
-        Notice n{L"OpenXR-EyeCapture", L"Conversion cancelled: " + name + L"\nThe MP4 is kept.", false};
+        Notice n{L"VR EyeCapture", L"Conversion cancelled: " + name + L"\nThe MP4 is kept.", false};
         Finish(true, L"last: " + name + L" conversion cancelled", &n);
     };
     auto fail = [&](const std::wstring& why, bool balloon = true) {
@@ -1721,7 +1721,7 @@ bool Processor::RunJob(const Job& job) {
         Finish(true, L"last: " + name + L" (8K copy skipped: " + rec.Name() + L")", &skip);
         return false;
     }
-    Notice n{L"OpenXR-EyeCapture", text, false};
+    Notice n{L"VR EyeCapture", text, false};
     LOGI("job: done %s in %.1f s%s", N(mainOut).c_str(), (GetTickCount64() - t0) / 1000.0, N(deleted).c_str());
     Finish(true, L"last: " + mainOut + L" ready", &n);
     return false;

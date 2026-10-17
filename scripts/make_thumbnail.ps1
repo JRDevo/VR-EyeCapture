@@ -1,6 +1,6 @@
 ﻿<#
     make_thumbnail.ps1 -- a YouTube thumbnail (1280 x 720 JPEG) from a recording: one frame of the LEFT eye, cropped to 16:9,
-    with the project's overlay (docs\images\thumbnail_overlay.png: "3D" badge, OpenXR-EyeCapture logo, dark band) and
+    with the project's overlay (docs\images\thumbnail_overlay.png: "3D" badge, VR EyeCapture logo, dark band) and
     the game's name as the title.
 
       powershell -ExecutionPolicy Bypass -File scripts\make_thumbnail.ps1 <recording.mp4|.mkv> [-Title "..."] [-Subtitle "..."]

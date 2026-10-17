@@ -47,7 +47,9 @@ add_library(eye_capture_core STATIC
     src/indicator.cpp
     src/overlay.cpp
     src/audio_capture.cpp
-    src/st3d.cpp)
+    src/st3d.cpp
+    src/control.cpp
+    src/capture_common.cpp)
 target_include_directories(eye_capture_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_definitions(eye_capture_core PUBLIC
     UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
@@ -58,8 +60,7 @@ target_link_libraries(eye_capture_core PUBLIC
 
 # --- the API layer DLL ---
 add_library(eye_capture SHARED
-    src/layer.cpp
-    src/control.cpp)
+    src/layer.cpp)
 target_compile_options(eye_capture PRIVATE ${EYE_WARN_FLAGS})
 target_link_libraries(eye_capture PRIVATE eye_capture_core OpenXR::headers)
 target_compile_definitions(eye_capture PRIVATE XR_USE_PLATFORM_WIN32 XR_USE_GRAPHICS_API_D3D11 XR_USE_GRAPHICS_API_D3D12)
@@ -73,10 +74,39 @@ add_custom_command(TARGET eye_capture POST_BUILD
             ${CMAKE_CURRENT_BINARY_DIR}/${EYE_LAYER_NAME}.json
             $<TARGET_FILE_DIR:eye_capture>/${EYE_LAYER_NAME}.json)
 
+# --- SteamVR (OpenVR) proxy: openvr_api.dll (src/openvr/, docs/STEAMVR_DESIGN.md) ---
+# Placed by the tray's "SteamVR games" Enable where a game's Valve openvr_api.dll was (that one is renamed
+# openvr_api_real.dll); never linked against Valve's import library (third_party/openvr/openvr.h: types only).
+# accessor_stubs.asm: register-preserving jump stubs for the exports of unknown signature (VRHeadsetView, ...).
+enable_language(ASM_MASM)
+add_library(openvr_proxy SHARED
+    src/openvr/proxy_exports.cpp
+    src/openvr/openvr_capture.cpp
+    src/openvr/openvr_hooks.cpp
+    src/openvr/accessor_stubs.asm
+    src/openvr/openvr_api.def)
+set_target_properties(openvr_proxy PROPERTIES OUTPUT_NAME openvr_api)
+target_compile_options(openvr_proxy PRIVATE $<$<COMPILE_LANGUAGE:CXX>:${EYE_WARN_FLAGS}>)
+target_link_libraries(openvr_proxy PRIVATE eye_capture_core advapi32)
+
+# --- SteamVR quick mode: EyeCaptureMirror.exe (src/openvr/mirror_main.cpp) records SteamVR's mirror texture through Valve's own
+# openvr_api.dll v2.15.6 (third_party/openvr/bin/win64, BSD-3), copied to <bin>/valve/ (the bin folder's openvr_api.dll is
+# our proxy). The tray starts it while steamvr_mode = quick and vrserver.exe runs.
+add_executable(EyeCaptureMirror WIN32 src/openvr/mirror_main.cpp src/openvr/openvr_hooks.cpp)
+target_compile_options(EyeCaptureMirror PRIVATE ${EYE_WARN_FLAGS})
+target_link_libraries(EyeCaptureMirror PRIVATE eye_capture_core advapi32 psapi)
+add_custom_command(TARGET EyeCaptureMirror POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:EyeCaptureMirror>/valve
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_CURRENT_SOURCE_DIR}/third_party/openvr/bin/win64/openvr_api.dll
+            $<TARGET_FILE_DIR:EyeCaptureMirror>/valve/openvr_api.dll)
+
 # --- tray control app (required: the layer is dormant without it; it also registers the layer, tray/install.cpp) ---
-add_executable(EyeCaptureTray WIN32 tray/tray.cpp tray/postprocess.cpp tray/settings.cpp tray/install.cpp tray/input.cpp tray/tray.rc)
+# tray/steamvr_ui.cpp + tray/steamvr_games.cpp: the "SteamVR games" window (enable / disable the per-game proxy);
+# src/openvr/openvr_hooks.cpp for the sidecar text and the home-key names.
+add_executable(EyeCaptureTray WIN32 tray/tray.cpp tray/postprocess.cpp tray/settings.cpp tray/install.cpp tray/input.cpp
+    tray/steamvr_ui.cpp tray/steamvr_games.cpp src/openvr/openvr_hooks.cpp tray/tray.rc)
 target_compile_options(EyeCaptureTray PRIVATE ${EYE_WARN_FLAGS})
-target_link_libraries(EyeCaptureTray PRIVATE eye_capture_core comctl32 comdlg32 dinput8 dxguid)
+target_link_libraries(EyeCaptureTray PRIVATE eye_capture_core comctl32 comdlg32 dinput8 dxguid advapi32 version)
 target_include_directories(EyeCaptureTray PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tray)
 
 # --- live share consumer (obs/live_consumer.cpp): no libobs; used by the OBS plugin and tests/live_share_test ---
@@ -135,7 +165,7 @@ if (EYE_BUILD_TESTS)
     target_compile_definitions(fake_ffmpeg PRIVATE UNICODE _UNICODE NOMINMAX)
 
     # Control thread + ControlPublishFinal on a private status block (no GPU / game): the "saved <file>" shutdown race.
-    add_executable(control_final_test tests/control_final_test.cpp src/control.cpp)
+    add_executable(control_final_test tests/control_final_test.cpp)
     target_compile_options(control_final_test PRIVATE ${EYE_WARN_FLAGS})
     target_link_libraries(control_final_test PRIVATE eye_capture_core)
 
@@ -150,6 +180,40 @@ if (EYE_BUILD_TESTS)
     target_compile_options(install_test PRIVATE ${EYE_WARN_FLAGS})
     target_link_libraries(install_test PRIVATE eye_capture_core advapi32)
     target_include_directories(install_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tray)
+
+    # SteamVR games (tray/steamvr_games.cpp): scan / PE checks / enable / disable / status on a fake game tree (CPU only).
+    add_executable(steamvr_install_test tests/steamvr_install_test.cpp tray/steamvr_games.cpp src/openvr/openvr_hooks.cpp)
+    target_compile_options(steamvr_install_test PRIVATE ${EYE_WARN_FLAGS})
+    target_compile_definitions(steamvr_install_test PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
+        EYE_CAPTURE_VERSION="${PROJECT_VERSION}" EYE_TEST_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures"
+        EYE_VALVE_DLL="${CMAKE_CURRENT_SOURCE_DIR}/third_party/openvr/bin/win64/openvr_api.dll")
+    target_include_directories(steamvr_install_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tray ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(steamvr_install_test PRIVATE advapi32 version)
+    add_dependencies(steamvr_install_test openvr_proxy mock_openvr oc_shim_test)
+    # A DLL with nothing but forwarders to openvr_api_oc.dll (like OpenComposite's switcher shim), for the detection test.
+    add_library(oc_shim_test SHARED tests/oc_shim_test.cpp)
+
+    # SteamVR proxy helpers (src/openvr/openvr_hooks.cpp): versions, slot table, vtable patch, FnTable copy, matrices,
+    # fov, bounds, colour space, home discovery (CPU only).
+    add_executable(openvr_hook_test tests/openvr_hook_test.cpp src/openvr/openvr_hooks.cpp)
+    target_compile_options(openvr_hook_test PRIVATE ${EYE_WARN_FLAGS})
+    target_compile_definitions(openvr_hook_test PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_include_directories(openvr_hook_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(openvr_hook_test PRIVATE advapi32)
+
+    # Mock Valve openvr_api.dll (installed as openvr_api_real.dll next to the proxy by tests/run_steamvr.ps1) + a fake
+    # OpenVR game that drives the proxy (D3D11, every texture layout, C++ and FnTable interfaces).
+    add_library(mock_openvr SHARED tests/mock_openvr.cpp)
+    target_compile_options(mock_openvr PRIVATE ${EYE_WARN_FLAGS})
+    target_compile_definitions(mock_openvr PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_include_directories(mock_openvr PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+    target_link_libraries(mock_openvr PRIVATE d3d11)
+    add_executable(openvr_e2e tests/openvr_e2e.cpp src/head_smoothing.cpp)   # ComputeSymmetricFov: the expected size
+    target_compile_options(openvr_e2e PRIVATE ${EYE_WARN_FLAGS})
+    target_compile_definitions(openvr_e2e PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_include_directories(openvr_e2e PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(openvr_e2e PRIVATE d3d11 dxgi winmm)
+    add_dependencies(openvr_e2e openvr_proxy mock_openvr)
 
     # Head-smoothing filter unit test (CPU only).
     add_executable(head_smoothing_test tests/head_smoothing_test.cpp)

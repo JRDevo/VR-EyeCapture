@@ -1,0 +1,32 @@
+; Exports of the VR EyeCapture SteamVR proxy openvr_api.dll: every export of Valve's openvr_api.dll 1.13.10
+; (dumpbin /exports, 23 names) as explicit trampolines (proxy_exports.cpp, accessor_stubs.asm), plus our own
+; EyeCaptureProxyVersion. No .def forwarders: the real DLL is loaded by full path at the first call.
+; Deliberately the 1.13.x set: newer Valve DLLs (2.x, e.g. 2.15.6) export a SUBSET of these 23 names, older games still
+; import the extra ones (VRCompositorSystemInternal, VRDriverDirectInternal, VRRenderModelsInternal, VRSceneGraph,
+; VRTrackedCameraInternal); the tray refuses to enable a game whose DLL exports a name missing here (MissingExports).
+LIBRARY openvr_api
+EXPORTS
+    LiquidVR
+    VRCompositorSystemInternal
+    VRControlPanel
+    VRDriverDirectInternal
+    VRHeadsetView
+    VRPaths
+    VRRenderModelsInternal
+    VRSceneGraph
+    VRTrackedCameraInternal
+    VRVirtualDisplay
+    VR_GetGenericInterface
+    VR_GetInitToken
+    VR_GetRuntimePath
+    VR_GetStringForHmdError
+    VR_GetVRInitErrorAsEnglishDescription
+    VR_GetVRInitErrorAsSymbol
+    VR_InitInternal
+    VR_InitInternal2
+    VR_IsHmdPresent
+    VR_IsInterfaceVersionValid
+    VR_IsRuntimeInstalled
+    VR_RuntimePath
+    VR_ShutdownInternal
+    EyeCaptureProxyVersion

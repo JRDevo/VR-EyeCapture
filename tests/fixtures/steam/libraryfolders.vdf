@@ -1,0 +1,37 @@
+"libraryfolders"
+{
+	"0"
+	{
+		"path"		"C:\\Program Files (x86)\\Steam"
+		"label"		""
+		"contentid"		"6421376543617261911"
+		"totalsize"		"0"
+		"update_clean_bytes_tally"		"79810538"
+		"time_last_update_verified"		"1712345678"
+		"apps"
+		{
+			"228980"		"394716289"
+			"1612750"		"7312937520"
+		}
+	}
+	"1"
+	{
+		"path"		"D:\\SteamLibrary"
+		"label"		"Games \"SSD\""
+		"contentid"		"3021870954121396245"
+		"totalsize"		"2000381014016"
+		"apps"
+		{
+			"227300"		"12345"
+		}
+	}
+	// a comment line, as Steam never writes it but KeyValues allows
+	"2"
+	{
+		"path"		"E:/Spiele/Steam Library/"
+	}
+	"3"
+	{
+		"path"		"d:\\steamlibrary"
+	}
+}

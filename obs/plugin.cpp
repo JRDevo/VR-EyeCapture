@@ -1,5 +1,5 @@
-// plugin -- obs-eyecapture.dll: the OBS Studio source "OpenXR EyeCapture" (id eyecapture_source). Shows the live eye
-// images of a running OpenXR game that has the OpenXR-EyeCapture layer loaded (src/live_share.h), through the
+// plugin -- obs-eyecapture.dll: the OBS Studio source "VR EyeCapture" (id eyecapture_source; the id never changes: saved
+// scenes reference it). Shows the live eye images of a running VR game recorded by VR EyeCapture (src/live_share.h), through the
 // consumer side in obs/live_consumer.cpp (protocol: src/live_share_proto.h). Build / install: obs/README.md.
 //
 // Threads (OBS): video_tick runs on the graphics thread OUTSIDE the graphics context -> it enters it (obs_enter_graphics)
@@ -26,9 +26,9 @@
 
 OBS_DECLARE_MODULE()
 
-MODULE_EXPORT const char* obs_module_name(void) { return "OpenXR EyeCapture"; }
+MODULE_EXPORT const char* obs_module_name(void) { return "VR EyeCapture"; }
 MODULE_EXPORT const char* obs_module_description(void) {
-    return "Live eye images of an OpenXR game recorded with OpenXR-EyeCapture (github.com/JRDevo/OpenXR-EyeCapture)";
+    return "Live eye images of a VR game recorded with VR EyeCapture (github.com/JRDevo/VR-EyeCapture)";
 }
 
 namespace {
@@ -95,7 +95,7 @@ bool EnsureOpen(Shared& s) {
     if (s.opened) return true;
     if (s.giveUp) return false;
     if (gs_get_device_type() != GS_DEVICE_DIRECT3D_11) {
-        blog(LOG_WARNING, "[obs-eyecapture] OBS is not using the Direct3D 11 renderer -- the OpenXR EyeCapture source shows "
+        blog(LOG_WARNING, "[obs-eyecapture] OBS is not using the Direct3D 11 renderer -- the VR EyeCapture source shows "
                           "nothing (Settings > Advanced > Video > Renderer)");
         s.giveUp = true;
         return false;
@@ -205,7 +205,7 @@ struct Source {
     uint32_t x = 0, y = 0, w = 0, h = 0;
 };
 
-const char* GetName(void*) { return "OpenXR EyeCapture"; }
+const char* GetName(void*) { return "VR EyeCapture"; }
 
 void Update(void* data, obs_data_t* settings) {
     auto* s = static_cast<Source*>(data);

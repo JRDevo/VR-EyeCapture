@@ -11,6 +11,13 @@
 //       drives the REAL window of a scratch tray (EYECAP_TRAY_TEST_SHM set): posts the "open settings" message, sets
 //       controls with SendMessage, clicks Save. First with a bad value (the window must stay open, the tray logs the
 //       message it would show), then good values (the window closes).
+//   settings_test svr <tray-pid> <list|enable|enableall|toggle|click|disable|reenable|rescan> [row=<game name>] [answers=Yes,No,OK]
+//       drives the REAL "SteamVR games" window of a scratch tray (tray/steamvr_ui.h; tests/run_steamvr_ui.ps1): posts
+//       WM_APP+9, waits until the Steam scan is done, selects the row of that game, does the action (enable = "Add a game by
+//       exe...", toggle = the check box through ID_SVR_TOGGLE, click = a real mouse click into the row's check box), then
+//       answers every message box the window shows with the next answer (printed "BOX: <text>" / "ANSWER: <button>"; no
+//       answers left: OK, else No), and prints the rows ("ROW: game | state | folder"), the status line, the details text
+//       and the button states before closing it.
 // Exit code 0 = all checks passed.
 #include <windows.h>
 #include <commctrl.h>
@@ -23,6 +30,7 @@
 #include "install.h"
 #include "postprocess.h"
 #include "settings.h"
+#include "steamvr_ui.h"
 namespace {
 int g_fail = 0;
 void Check(bool ok, const char* what) {
@@ -624,6 +632,24 @@ int TestSave(const std::wstring& path) {
               "qp 52, quality_vs_speed 101 / fast, rate_control abr, beeps maybe, constant_frame_rate 2: 6 bad values, defaults kept");
         DeleteFileW(pn.c_str());
     }
+    // the Settings window never writes [steamvr] (the SteamVR games window owns steamvr_mode) and Save re-reads the file, so a
+    // steamvr_mode written while the window was open survives its Save
+    {
+        const std::wstring pn = path + L".steamvr.ini";
+        { std::ofstream f(pn, std::ios::binary); f << "[capture]\r\nbitrate_mbps = 0\r\n\r\n[steamvr]\r\nsteamvr_mode = per_game\r\n"; }
+        Config c;
+        std::vector<std::wstring> pr;
+        ParseConfigFile(pn, c, pr);   // what an open window holds
+        { std::ofstream f(pn, std::ios::binary); f << "[capture]\r\nbitrate_mbps = 0\r\n\r\n[steamvr]\r\nsteamvr_mode = quick\r\n"; }   // written meanwhile
+        c.bitrateMbps = 150;
+        settings::SaveResult r;
+        const bool ok = settings::SaveSettingsToFile(pn, c, r);
+        const std::string t = ReadAll(pn);
+        Check(ok && t.find("steamvr_mode = quick\r\n") != std::string::npos && t.find("bitrate_mbps = 150\r\n") != std::string::npos &&
+                  t.find("per_game") == std::string::npos,
+              "Save keeps a steamvr_mode written while the window was open (only its own keys change)");
+        DeleteFileW(pn.c_str());
+    }
     return g_fail;
 }
 struct FindCtx { DWORD pid; HWND found; };
@@ -685,7 +711,7 @@ int TestDrive(DWORD pid, bool leaveSlider) {
     HWND d = WaitDialog(pid, true);
     Check(d != nullptr, "app window opened");
     if (!d) return 1;
-    printf("  window title '%s', hotkey field '%s', bitrate '%s'\n", "OpenXR-EyeCapture", N(GetEdit(d, settings::ID_HOTKEY)).c_str(),
+    printf("  window title '%s', hotkey field '%s', bitrate '%s'\n", N(settings::kWindowTitle).c_str(), N(GetEdit(d, settings::ID_HOTKEY)).c_str(),
            N(GetEdit(d, settings::ID_BITRATE)).c_str());
     // "Capture...": F7 without modifiers
     SendMessageW(GetDlgItem(d, settings::ID_HOTKEY_PICK), BM_CLICK, 0, 0);
@@ -1176,6 +1202,179 @@ int TestQueue(DWORD pid, int argc, wchar_t** argv) {
     Check(WaitDialog(pid, false) == nullptr, "the window closed");
     return g_fail;
 }
+// ---- settings_test svr: the "SteamVR games" window
+struct SvrFind { DWORD pid; const wchar_t* cls; const wchar_t* title; HWND found; };
+HWND FindTop(DWORD pid, const wchar_t* cls, const wchar_t* title) {
+    SvrFind f{pid, cls, title, nullptr};
+    EnumWindows([](HWND h, LPARAM lp) -> BOOL {
+        auto* x = (SvrFind*)lp;
+        DWORD p = 0;
+        GetWindowThreadProcessId(h, &p);
+        if (p != x->pid || !IsWindowVisible(h)) return TRUE;
+        wchar_t c[64] = L"", t[128] = L"";
+        GetClassNameW(h, c, 64);
+        GetWindowTextW(h, t, 128);
+        if (wcscmp(c, x->cls) == 0 && wcscmp(t, x->title) == 0) { x->found = h; return FALSE; }
+        return TRUE;
+    }, (LPARAM)&f);
+    return f.found;
+}
+std::string OneLine(std::wstring s) {
+    for (size_t p = 0; (p = s.find(L"\r\n", p)) != std::wstring::npos;) s.replace(p, 2, L" / ");
+    for (auto& c : s) if (c == L'\n') c = L'|'; else if (c == L'\t') c = L'~';
+    return N(s);
+}
+// The message box's buttons by their text without '&' ("Yes", "No", "OK").
+HWND BoxButton(HWND box, const std::wstring& want) {
+    struct Ctx { std::wstring want; HWND found; } ctx{want, nullptr};
+    EnumChildWindows(box, [](HWND c, LPARAM lp) -> BOOL {
+        auto* x = (Ctx*)lp;
+        wchar_t cls[32] = L"", t[64] = L"";
+        GetClassNameW(c, cls, 32);
+        if (_wcsicmp(cls, L"Button") != 0) return TRUE;
+        GetWindowTextW(c, t, 64);
+        std::wstring s;
+        for (const wchar_t* p = t; *p; ++p) if (*p != L'&') s += *p;
+        if (_wcsicmp(s.c_str(), x->want.c_str()) == 0) { x->found = c; return FALSE; }
+        return TRUE;
+    }, (LPARAM)&ctx);
+    return ctx.found;
+}
+void DumpSvr(HWND d) {
+    const HWND lb = GetDlgItem(d, steamvr_ui::ID_SVR_LIST);
+    const int n = lb ? (int)SendMessageW(lb, LB_GETCOUNT, 0, 0) : 0;
+    for (int i = 0; i < n; ++i) {
+        wchar_t t[1024] = L"";
+        if (SendMessageW(lb, LB_GETTEXTLEN, (WPARAM)i, 0) < 1023) SendMessageW(lb, LB_GETTEXT, (WPARAM)i, (LPARAM)t);
+        std::wstring s = t;
+        for (size_t p = 0; (p = s.find(L'\t', p)) != std::wstring::npos;) s.replace(p, 1, L" | ");
+        printf("ROW: %s\n", N(s).c_str());
+    }
+    wchar_t st[1024] = L"";
+    SendMessageW(GetDlgItem(d, steamvr_ui::ID_SVR_STATUS), WM_GETTEXT, 1024, (LPARAM)st);
+    printf("STATUS: %s\n", N(st).c_str());
+    printf("MODE: %d\n", (int)SendMessageW(GetDlgItem(d, steamvr_ui::ID_SVR_MODE), CB_GETCURSEL, 0, 0));
+    wchar_t det[8192] = L"";
+    SendMessageW(GetDlgItem(d, steamvr_ui::ID_SVR_DETAILS), WM_GETTEXT, 8192, (LPARAM)det);   // (GetDlgItemText reads nothing cross-process here)
+    printf("DETAILS: %s\n", OneLine(det).c_str());
+    printf("BUTTONS: enableall=%d ", IsWindowEnabled(GetDlgItem(d, steamvr_ui::ID_SVR_ENABLEALL)) ? 1 : 0);
+    printf("enable=%d disable=%d reenable=%d\n", IsWindowEnabled(GetDlgItem(d, steamvr_ui::ID_SVR_ENABLE)) ? 1 : 0,
+           IsWindowEnabled(GetDlgItem(d, steamvr_ui::ID_SVR_DISABLE)) ? 1 : 0, IsWindowEnabled(GetDlgItem(d, steamvr_ui::ID_SVR_REENABLE)) ? 1 : 0);
+}
+int TestSvr(DWORD pid, int argc, wchar_t** argv) {
+    g_fail = 0;
+    const HWND tw = TrayWindow(pid);
+    Check(tw != nullptr, "found the tray's message window");
+    if (!tw || argc < 4) return 1;
+    const std::wstring action = argv[3];
+    std::wstring rowName;
+    int modeSel = -1;
+    std::vector<std::wstring> answers;
+    for (int i = 4; i < argc; ++i) {
+        const std::wstring a = argv[i];
+        if (a.compare(0, 4, L"row=") == 0) rowName = a.substr(4);
+        else if (a.compare(0, 5, L"mode=") == 0) modeSel = _wtoi(a.c_str() + 5);
+        else if (a.compare(0, 8, L"answers=") == 0) {
+            std::wstring rest = a.substr(8);
+            for (size_t p = 0; p <= rest.size();) {
+                size_t c = rest.find(L',', p);
+                if (c == std::wstring::npos) c = rest.size();
+                if (c > p) answers.push_back(rest.substr(p, c - p));
+                p = c + 1;
+            }
+        }
+    }
+    PostMessageW(tw, WM_APP + 9, 0, 0);
+    HWND d = nullptr;
+    for (int i = 0; i < 100 && !d; ++i) { d = FindTop(pid, steamvr_ui::kWindowClass, steamvr_ui::kWindowTitle); if (!d) Sleep(50); }
+    Check(d != nullptr, "SteamVR games window opened");
+    if (!d) return 1;
+    auto waitScan = [&] {
+        for (int i = 0; i < 300; ++i) {
+            wchar_t st[1024] = L"";
+            SendMessageW(GetDlgItem(d, steamvr_ui::ID_SVR_STATUS), WM_GETTEXT, 1024, (LPARAM)st);
+            if (!wcsstr(st, L"Scanning")) return;
+            Sleep(50);
+        }
+        Check(false, "the Steam scan finished within 15 s");
+    };
+    Sleep(200);
+    waitScan();
+    Sleep(200);
+    if (!rowName.empty()) {
+        const HWND lb = GetDlgItem(d, steamvr_ui::ID_SVR_LIST);
+        const int n = (int)SendMessageW(lb, LB_GETCOUNT, 0, 0);
+        int row = -1;
+        for (int i = 0; i < n && row < 0; ++i) {
+            wchar_t t[1024] = L"";
+            if (SendMessageW(lb, LB_GETTEXTLEN, (WPARAM)i, 0) < 1023) SendMessageW(lb, LB_GETTEXT, (WPARAM)i, (LPARAM)t);
+            if (_wcsnicmp(t, rowName.c_str(), rowName.size()) == 0 && t[rowName.size()] == L'\t') row = i;
+        }
+        Check(row >= 0, "the game's row is in the list");
+        SendMessageW(lb, LB_SETCURSEL, (WPARAM)row, 0);
+        SendMessageW(d, WM_COMMAND, MAKEWPARAM(steamvr_ui::ID_SVR_LIST, LBN_SELCHANGE), (LPARAM)lb);
+    }
+    int button = 0;
+    bool acted = false;
+    if (action == L"enable") button = steamvr_ui::ID_SVR_ENABLE;
+    else if (action == L"enableall") button = steamvr_ui::ID_SVR_ENABLEALL;
+    else if (action == L"disable") button = steamvr_ui::ID_SVR_DISABLE;
+    else if (action == L"reenable") button = steamvr_ui::ID_SVR_REENABLE;
+    else if (action == L"rescan") button = steamvr_ui::ID_SVR_RESCAN;
+    else if (action == L"toggle") {
+        PostMessageW(d, WM_COMMAND, MAKEWPARAM(steamvr_ui::ID_SVR_TOGGLE, 0), 0);
+        acted = true;
+    } else if (action == L"click") {   // a real click into the selected row's check box column
+        const HWND lb = GetDlgItem(d, steamvr_ui::ID_SVR_LIST);
+        const int sel = (int)SendMessageW(lb, LB_GETCURSEL, 0, 0), top = (int)SendMessageW(lb, LB_GETTOPINDEX, 0, 0);
+        const int ih = (int)SendMessageW(lb, LB_GETITEMHEIGHT, 0, 0);
+        const LPARAM pt = MAKELPARAM(8, (sel - top) * ih + ih / 2);
+        PostMessageW(lb, WM_LBUTTONDOWN, MK_LBUTTON, pt);
+        PostMessageW(lb, WM_LBUTTONUP, 0, pt);
+        acted = true;
+    } else if (action == L"mode") {   // the "Recording mode" drop-down (steamvr_mode), item mode=<n>
+        const HWND cb = GetDlgItem(d, steamvr_ui::ID_SVR_MODE);
+        SendMessageW(cb, CB_SETCURSEL, (WPARAM)modeSel, 0);
+        SendMessageW(d, WM_COMMAND, MAKEWPARAM(steamvr_ui::ID_SVR_MODE, CBN_SELCHANGE), (LPARAM)cb);
+        Sleep(200);
+    } else if (action != L"list") { printf("unknown svr action\n"); ++g_fail; }
+    if (button) {
+        Check(IsWindowEnabled(GetDlgItem(d, button)) != FALSE, "the button is enabled");
+        // posted, not sent: the click opens modal message boxes that this test has to answer
+        PostMessageW(d, WM_COMMAND, MAKEWPARAM(button, BN_CLICKED), (LPARAM)GetDlgItem(d, button));
+        acted = true;
+    }
+    if (acted) {
+        size_t next = 0;
+        ULONGLONG idleSince = GetTickCount64();
+        while (GetTickCount64() - idleSince < 2000) {
+            const HWND box = FindTop(pid, L"#32770", steamvr_ui::kWindowTitle);
+            if (!box) { Sleep(100); continue; }
+            Sleep(150);   // fully created
+            wchar_t text[8192] = L"";
+            GetDlgItemTextW(box, 0xFFFF, text, 8192);
+            printf("BOX: %s\n", OneLine(text).c_str());
+            std::wstring ans = next < answers.size() ? answers[next++] : std::wstring();
+            if (ans.empty()) ans = BoxButton(box, L"OK") ? L"OK" : L"No";
+            const HWND b = BoxButton(box, ans);
+            printf("ANSWER: %s\n", N(ans).c_str());
+            Check(b != nullptr, "the message box has the answer's button");
+            if (!b) { PostMessageW(box, WM_CLOSE, 0, 0); ++g_fail; break; }
+            PostMessageW(box, WM_COMMAND, MAKEWPARAM(GetDlgCtrlID(b), BN_CLICKED), (LPARAM)b);
+            for (int i = 0; i < 50 && IsWindow(box); ++i) Sleep(50);
+            idleSince = GetTickCount64();
+        }
+        Check(next == answers.size(), "every given answer was used (one message box each)");
+        Sleep(200);
+        waitScan();
+    }
+    DumpSvr(d);
+    PostMessageW(d, WM_COMMAND, MAKEWPARAM(steamvr_ui::ID_SVR_CLOSE, BN_CLICKED), (LPARAM)GetDlgItem(d, steamvr_ui::ID_SVR_CLOSE));
+    bool closed = false;
+    for (int i = 0; i < 100 && !closed; ++i) { closed = FindTop(pid, steamvr_ui::kWindowClass, steamvr_ui::kWindowTitle) == nullptr; if (!closed) Sleep(50); }
+    Check(closed, "the window closed");
+    return g_fail;
+}
 } // namespace
 // pp::PredictLayout (the arithmetic behind the conversion's log line AND the window's layout preview) against the numbers the tray logged
 // for a Quest 3 recording ("input 8192x4630 = eyes 4096x4630; eye_crop 16:9 -> centre-cropped to 4096x2304; tb_half frame 7680x4320")
@@ -1221,6 +1420,7 @@ int wmain(int argc, wchar_t** argv) {
     if (argc >= 3 && wcscmp(argv[1], L"save") == 0) return TestSave(argv[2]) ? 1 : 0;
     if (argc >= 3 && wcscmp(argv[1], L"drive") == 0) return TestDrive((DWORD)_wtoi(argv[2]), argc >= 4 && wcscmp(argv[3], L"noslider") == 0) ? 1 : 0;
     if (argc >= 4 && wcscmp(argv[1], L"queue") == 0) return TestQueue((DWORD)_wtoi(argv[2]), argc, argv) ? 1 : 0;
-    printf("usage: settings_test hotkeys | layout | save <config.ini> | drive <tray pid> [noslider] | queue <tray pid> <action> [args]\n");
+    if (argc >= 4 && wcscmp(argv[1], L"svr") == 0) return TestSvr((DWORD)_wtoi(argv[2]), argc, argv) ? 1 : 0;
+    printf("usage: settings_test hotkeys | layout | save <config.ini> | drive <tray pid> [noslider] | queue <tray pid> <action> [args] | svr <tray pid> <action> [row=..] [answers=..]\n");
     return 2;
 }

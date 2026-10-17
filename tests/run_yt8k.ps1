@@ -88,9 +88,9 @@ $t = Join-Path $root 'build\tt4'
 $c = Join-Path $t 'c'   # short path: status_sim's "saved <path>" message must stay under 160 characters
 Get-Process EyeCaptureTray -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$t*" } | Stop-Process
 if (Test-Path $t) { Remove-Item -Recurse -Force $t }
-New-Item -ItemType Directory (Join-Path $t 'appdata\OpenXR-EyeCapture'), $c | Out-Null
+New-Item -ItemType Directory (Join-Path $t 'appdata\VR EyeCapture'), $c | Out-Null
 Copy-Item (Join-Path $bin 'EyeCaptureTray.exe') $t
-$ini = Join-Path $t 'appdata\OpenXR-EyeCapture\config.ini'
+$ini = Join-Path $t 'appdata\VR EyeCapture\config.ini'
 $baseIni = Get-Content (Join-Path $root 'config.ini') -Raw
 function WriteConfig($mkv, $yt8k, $keep, $layout = 'tb_half', $crop = 'none', $br8k = '150', $codec8k = 'hevc', $ffPath = $ffmpeg, $flat = '0') {
     # the tray re-reads config.ini for every job, so the layout can change between cases
@@ -235,7 +235,7 @@ try {
     Step 'A: log has the 8K libx265 command with the vstack expression graph' ($l -match 'job: 8K cmd \(libx265\): .*split=2\[l\]\[r\];\[l\]crop=iw/2:ih:0:0\,scale=w=2\*round\(iw\*min\(432/min\(iw\\,ih\)\\,8192/max\(iw\\,ih\)\)/2\):h=2\*round\(ih\*min\(.*\)/4\):flags=lanczos\[L\];\[r\]crop=iw/2:ih:iw/2:0\,.*\[L\]\[R\]vstack=inputs=2\,setsar=1\,format=yuv420p.* -metadata:s:v:0 stereo_mode=top_bottom .*ya_SBS_YT8K_full\.mkv')
     Step 'A: log: layout + test short side + 30 fps kept + NO_NVENC' ($l -match 'layout_3d tb_half: frame = one eye''s aspect, each eye squeezed to half height, left eye on top; frame short side 432' -and $l -match 'EYECAP_TRAY_TEST_YT8K_SHORT=432 \(test\)' -and $l -match 'source r_frame_rate 30/1 .* <= 60 -- frame rate kept' -and $l -match 'EYECAP_TRAY_TEST_NO_NVENC is set')
     Step 'A: log: yt8k_bitrate_mbps 150 (default) -> NVENC -b:v 150M -maxrate 200M -bufsize 300M, x265 crf 18' ($l -match 'job: 8K step: yt8k_bitrate_mbps 150 -> hevc_nvenc -c:v hevc_nvenc -preset p5 -rc vbr -tier high -b:v 150M -maxrate 200M -bufsize 300M \(libx265 fallback: crf 18, no bitrate\)')
-    Step 'A: balloon names the MKV and the 8K file' ($l -match 'balloon \[OpenXR-EyeCapture\] Ready for YouTube: ya_SBS_full\.mkv\s+YouTube 8K: ya_SBS_YT8K_full\.mkv')
+    Step 'A: balloon names the MKV and the 8K file' ($l -match 'balloon \[VR EyeCapture\] Ready for YouTube: ya_SBS_full\.mkv\s+YouTube 8K: ya_SBS_YT8K_full\.mkv')
 
     # ---- B: tall eyes, 72 fps -> 60, 8K only
     Write-Host "`n=== B: 960x720 SBS (tall eyes), 72 fps, post_mkv 0 + post_yt8k 1, keep_mp4 0" -ForegroundColor Cyan
@@ -258,7 +258,7 @@ try {
     $l = LogText
     Step 'B: log: 72 fps source capped to 60' ($l -match 'source r_frame_rate 72/1 \(72\.000 fps, avg 72/1\) > 60 -- capped to 60 fps' -and $l -match 'job: 8K cmd \(libx265\): .*-vf "fps=60,split=2.*yb_SBS_YT8K_full\.mkv')
     Step 'B: log: yt8k_bitrate_mbps 100 -> -b:v 100M -maxrate 133M -bufsize 200M' ($l -match 'job: 8K step: yt8k_bitrate_mbps 100 -> hevc_nvenc .*-b:v 100M -maxrate 133M -bufsize 200M')
-    Step 'B: balloon "Ready for YouTube (8K)"' ($l -match 'balloon \[OpenXR-EyeCapture\] Ready for YouTube \(8K\): yb_SBS_YT8K_full\.mkv')
+    Step 'B: balloon "Ready for YouTube (8K)"' ($l -match 'balloon \[VR EyeCapture\] Ready for YouTube \(8K\): yb_SBS_YT8K_full\.mkv')
 
     # ---- D..G: the other layouts on the case-A source (640x360 eyes, S = 432), 8K only, MP4 kept
     # $key = file key, $cfgVal = value written to config.ini; $w/$h = expected frame size (h = $null: width only, height checked from
@@ -379,7 +379,7 @@ try {
     Step 'Y: log: remux verified (> 90%) before the MP4 was deleted' ($seg -match 'job: MKV verification \(remux\): exists, \d+ bytes = [\d.]+% of the MP4''s \d+ bytes \(> 90%\) -- ok[\s\S]*job: deleted yy_TB\.mp4 \(keep_mp4 = 0\)[\s\S]*job: deleted yy_TB\.json with the MP4')
     Step 'Y: log: "already in the YouTube 8K layout -- 8K step skipped", no 8K command' ($seg -match 'job: recorded in the YouTube layout \(tb_half, 16:9, 768x432\): already in the YouTube 8K layout -- 8K step skipped' -and $seg -notmatch 'job: 8K cmd')
     Step 'Y: log: flat step takes the top eye and un-squeezes it' ($seg -match 'job: flat cmd \(libx264\): .*-vf "crop=iw:ih/2:0:0,scale=iw:ih\*2,setsar=1,crop=iw:min\(ih\\,iw\*9/16\),scale=3840:-2"')
-    Step 'Y: balloon "Ready for YouTube: yy_TB.mkv" (+ the flat file)' ($l -match 'balloon \[OpenXR-EyeCapture\] Ready for YouTube: yy_TB\.mkv\s+Flat 2D: yy_TB_FLAT\.mp4')
+    Step 'Y: balloon "Ready for YouTube: yy_TB.mkv" (+ the flat file)' ($l -match 'balloon \[VR EyeCapture\] Ready for YouTube: yy_TB\.mkv\s+Flat 2D: yy_TB_FLAT\.mp4')
 
     # ---- J..L: eye_crop on TALL eyes (640x900), 8K only (S = 432), tb_half, MP4 kept
     # $vx / $vw: 4:3pad's picture inside each eye (the rest are black bars); 0 = the whole width
@@ -449,7 +449,7 @@ try {
     Step 'N: _YT8K_4x3 (2).mkv made, the other two kept' ((Test-Path $n1) -and (Test-Path $n2) -and (Test-Path $n3) -and (Get-Item $n2).Length -eq $n2size)
     $l = LogText
     Step 'N: log: "exists -- writing ... instead"' ($l -match 'job: 8K output yn_SBS_YT8K_4x3\.mkv exists -- writing yn_SBS_YT8K_4x3 \(2\)\.mkv instead')
-    Step 'N: log + balloon use the chosen name' ($l -match '8K step ok in .* -> yn_SBS_YT8K_4x3 \(2\)\.mkv' -and $l -match 'balloon \[OpenXR-EyeCapture\] Ready for YouTube \(8K\): yn_SBS_YT8K_4x3 \(2\)\.mkv')
+    Step 'N: log + balloon use the chosen name' ($l -match '8K step ok in .* -> yn_SBS_YT8K_4x3 \(2\)\.mkv' -and $l -match 'balloon \[VR EyeCapture\] Ready for YouTube \(8K\): yn_SBS_YT8K_4x3 \(2\)\.mkv')
 
     # ---- P: progress, pause / resume, cancel (WM_APP+5 / WM_APP+6 to the TEST tray's window only)
     function WaitFor($cond, $sec) { $until = (Get-Date).AddSeconds($sec); while (-not (& $cond) -and (Get-Date) -lt $until) { Start-Sleep -Milliseconds 200 }; return [bool](& $cond) }
@@ -505,7 +505,7 @@ try {
     Step 'P2: ffmpeg resumed before it was ended (no suspended ffmpeg left)' ($l -match "job: ffmpeg \(pid $ffpid\) resumed \(cancel\)")
     Step "P2: that ffmpeg (pid $ffpid) is gone" (WaitFor { -not (Get-Process -Id $ffpid -ErrorAction SilentlyContinue) } 5)
     Step 'P2: partial .mkv.part deleted (no .mkv made), MP4 kept although keep_mp4 = 0' (-not (Test-Path $o2) -and -not (Test-Path -LiteralPath "$o2.part") -and (Test-Path $p2) -and -not ($l -match 'job: deleted yp2_SBS\.mp4'))
-    Step 'P2: balloon "Conversion cancelled: yp2_SBS.mp4"' (WaitFor { (LogText) -match 'tray: balloon \[OpenXR-EyeCapture\] Conversion cancelled: yp2_SBS\.mp4' } 5)
+    Step 'P2: balloon "Conversion cancelled: yp2_SBS.mp4"' (WaitFor { (LogText) -match 'tray: balloon \[VR EyeCapture\] Conversion cancelled: yp2_SBS\.mp4' } 5)
     Step 'P2: not a failure (no "job: FAILED yp2")' (-not ($l -match 'job: FAILED yp2'))
     Step 'P2: the queued job still converts' ((WaitFor { (LogText) -match 'job: done yq_SBS_full\.mkv' } 60) -and (Test-Path $oq) -and -not (Test-Path $pq))
     Start-Sleep -Milliseconds 800
