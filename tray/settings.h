@@ -61,6 +61,9 @@ struct QueueHooks {
     std::function<unsigned()>                    gameFps;         // the running game's frame rate (status block), 0 = no game / unknown
 };
 void SetQueueHooks(const QueueHooks& hooks);
+// The footer button "SteamVR games..." calls this (the tray sets its own "SteamVR games" opener, so there is one window in one process;
+// it brings the window to the front when open). Unset (settings_test without a tray) = the button is greyed.
+void SetOpenSteamVrHook(std::function<void()> hook);
 // The worker changed state: refresh the queue view now (it also refreshes every 500 ms on its own). No-op when closed.
 void NotifyQueueChanged();
 
@@ -101,6 +104,7 @@ enum : int {
     ID_PRESET,                  // "Encoder preset" drop-down bound to quality_vs_speed (appended for the same reason)
     ID_CFR,                     // "Constant frame rate ..." check bound to constant_frame_rate (appended for the same reason)
     ID_FPSWARN                  // red warning line on the top edge of the Export group box: the game's frame rate is uneven for 60 fps YouTube video (hidden otherwise)
+    , ID_OPENSTEAMVR            // footer button "SteamVR games...": opens the tray's SteamVR games window via SetOpenSteamVrHook (not a config key; appended: existing ids do not move)
 };
 // ID_QSTART reads "Start" and acts on every selected item of ID_QLIST (a multi-select list box: LB_SETSEL / LB_GETSELITEMS).
 extern const wchar_t* const kWindowTitle;

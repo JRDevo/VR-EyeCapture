@@ -28,6 +28,9 @@
                                greyed for domes, loads 0, greys the 8K bitrate / codec (+ labels) when ticked, and is saved
                                as record_for_youtube 0->1 in place (the scratch config gets a "record_for_youtube = 0" line in
                                [capture] when config.ini has none yet).
+                               The footer button "SteamVR games..." exists, is enabled and not cut; clicking it opens the window
+                               "VR EyeCapture - SteamVR games" in the same tray (an empty fake Steam dir, EYECAP_TRAY_TEST_STEAM_DIR),
+                               a second click leaves one window; it is closed again.
                                Only the scratch tray is stopped.
 #>
 $ErrorActionPreference = 'Stop'
@@ -71,9 +74,12 @@ $trayIni -replace '(?m)^head_smoothing = [\d.]+', 'head_smoothing = 0.57' -repla
 Copy-Item $ini (Join-Path $t 'before.ini')
 $oldAppdata = $env:APPDATA
 try {
+    # the SteamVR games window opened by the "SteamVR games..." button scans this EMPTY fake Steam dir, never the real one
+    New-Item -ItemType Directory -Force (Join-Path $t 'steam') | Out-Null
+    $env:EYECAP_TRAY_TEST_STEAM_DIR = Join-Path $t 'steam'
     $env:EYECAP_TRAY_TEST_SHM = 'eyecap-settings-test'; $env:APPDATA = Join-Path $t 'appdata'
     $p = Start-Process (Join-Path $t 'EyeCaptureTray.exe') -PassThru
-    Remove-Item Env:\EYECAP_TRAY_TEST_SHM
+    Remove-Item Env:\EYECAP_TRAY_TEST_SHM; Remove-Item Env:\EYECAP_TRAY_TEST_STEAM_DIR
     Start-Sleep -Seconds 2
     & $test drive $p.Id noslider; Step 'drive' ($LASTEXITCODE -eq 0)
     Start-Sleep -Seconds 6

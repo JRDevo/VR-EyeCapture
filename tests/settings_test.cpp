@@ -694,6 +694,7 @@ HWND ChildByText(HWND d, const wchar_t* text) {
     }, (LPARAM)&ctx);
     return ctx.found;
 }
+HWND FindTop(DWORD pid, const wchar_t* cls, const wchar_t* title);   // defined with the svr test below
 int TestDrive(DWORD pid, bool leaveSlider) {
     printf("drive the app window of tray pid %lu\n", pid);
     FindCtx c{pid, nullptr};
@@ -989,6 +990,41 @@ int TestDrive(DWORD pid, bool leaveSlider) {
         Check(mw != nullptr && IsWindowVisible(mw) && SendMessageW(mw, CB_GETCOUNT, 0, 0) == 5 && sel == 4 &&
                   wcscmp(item, L"Custom (3000 px)") == 0,
               "Resolution drop-down shows max_width = 3000 from the file as 'Custom (3000 px)'");
+    }
+    // "SteamVR games..." footer button: exists, text not cut (the tray's text fit check covers it too), enabled (the tray set the hook),
+    // opens the SteamVR games window of the SAME process; a second click brings the same window to the front (still one window).
+    {
+        const HWND sb = GetDlgItem(d, settings::ID_OPENSTEAMVR);
+        wchar_t t[64] = L"";
+        if (sb) GetWindowTextW(sb, t, 64);
+        Check(sb != nullptr && IsWindowVisible(sb) && IsWindowEnabled(sb) && wcscmp(t, L"SteamVR games...") == 0,
+              "'SteamVR games...' button exists, visible and enabled");
+        if (sb) {
+            RECT br{}, wr2{};
+            GetWindowRect(sb, &br);
+            GetWindowRect(d, &wr2);
+            Check(br.right <= wr2.right && br.bottom <= wr2.bottom && br.right - br.left >= 88, "'SteamVR games...' button lies inside the window");
+        }
+        Check(FindTop(pid, steamvr_ui::kWindowClass, steamvr_ui::kWindowTitle) == nullptr, "no SteamVR games window before the click");
+        SendMessageW(d, WM_COMMAND, MAKEWPARAM(settings::ID_OPENSTEAMVR, BN_CLICKED), (LPARAM)sb);
+        HWND sv = nullptr;
+        for (int i = 0; i < 30 && !sv; ++i) { sv = FindTop(pid, steamvr_ui::kWindowClass, steamvr_ui::kWindowTitle); if (!sv) Sleep(100); }
+        Check(sv != nullptr, "clicking 'SteamVR games...' opens the window 'VR EyeCapture - SteamVR games' in the tray");
+        SendMessageW(d, WM_COMMAND, MAKEWPARAM(settings::ID_OPENSTEAMVR, BN_CLICKED), (LPARAM)sb);
+        Sleep(300);
+        int count = 0;
+        EnumWindows([](HWND h, LPARAM lp) -> BOOL {
+            wchar_t c[64] = L"";
+            GetClassNameW(h, c, 64);
+            if (wcscmp(c, steamvr_ui::kWindowClass) == 0) ++*(int*)lp;
+            return TRUE;
+        }, (LPARAM)&count);
+        Check(count == 1 && FindTop(pid, steamvr_ui::kWindowClass, steamvr_ui::kWindowTitle) == sv, "a second click keeps one SteamVR games window (the same one)");
+        if (sv) {
+            SendMessageW(sv, WM_CLOSE, 0, 0);
+            for (int i = 0; i < 30 && IsWindow(sv); ++i) Sleep(100);
+            Check(!IsWindow(sv), "the SteamVR games window closes");
+        }
     }
     // "Convert a recording..." button (Export group) and the "Conversions" group (queue / progress view). The scratch tray has
     // nothing queued: idle status, empty list, Pause / Cancel / Start / Start all / Remove greyed. (Clicking the button would open a

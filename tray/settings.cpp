@@ -494,6 +494,7 @@ int                 g_smoothPos = -1;       // trackbar position / text as loade
 std::wstring        g_smoothText;
 std::vector<std::pair<int, std::wstring>> g_customValue;   // combo id -> the file value its "Custom (...)" item stands for
 std::function<void(const std::vector<std::wstring>&)> g_onSaved;
+std::function<void()> g_openSteamVr;      // SetOpenSteamVrHook
 QueueHooks          g_hooks;                // conversion worker callbacks (SetQueueHooks)
 std::vector<unsigned long long> g_qIds;     // job ids of the waiting-list items, same order as the list box
 std::vector<std::wstring> g_qItems;         // their texts (the list is only rebuilt when this changes: no flicker)
@@ -742,6 +743,8 @@ const Help kHelp[] = {
                    L"by this program); turning it off removes the entry. Clear this option before deleting the folder."},
     {ID_OPENINI, L"Opens config.ini in a text editor. The file lists every setting, with comments."},
     {ID_DEFAULTS, L"Resets every field to its built-in default. Nothing is saved until Save is clicked."},
+    {ID_OPENSTEAMVR, L"Opens the SteamVR games window: tick the SteamVR (OpenVR) games to record, choose Per game or Quick mode. "
+                     L"OpenXR games need nothing here."},
     {ID_SAVE, L"Writes the changed values to config.ini. The next recording uses them."},
     {ID_CANCEL, L"Closes the window without saving."},
     {ID_ABOUTLINK, L"The project page on GitHub: downloads, the latest version, the manual and bug reports. The tool is free for noncommercial use "
@@ -1831,10 +1834,11 @@ void CommandHandler(int id, int code) {
         ShowHelp(HelpText(id));
         return;
     }
-    if ((id == ID_SAVE || id == ID_CANCEL || id == ID_OPENINI || id == ID_DEFAULTS || id == ID_BROWSE) && code != BN_CLICKED) return;
+    if ((id == ID_SAVE || id == ID_CANCEL || id == ID_OPENINI || id == ID_DEFAULTS || id == ID_BROWSE || id == ID_OPENSTEAMVR) && code != BN_CLICKED) return;
     switch (id) {
     case ID_SAVE: DoSave(); break;
     case ID_CANCEL: DestroyWindow(g_dlg); break;
+    case ID_OPENSTEAMVR: if (g_openSteamVr) g_openSteamVr(); break;
     case ID_OPENINI: ShellExecuteW(nullptr, L"open", g_path.c_str(), nullptr, nullptr, SW_SHOWNORMAL); break;
     case ID_DEFAULTS: {
         Config d;
@@ -2557,13 +2561,15 @@ int BuildControls(HWND dlg, Builder::Pass pass, int clientW, int clientH, int sc
     b.dy = 0;
     const int fy = clientH - g_footerH;
     const int by = fy + 32;
-    const int wOpen = b.ButtonW(L"Open config.ini"), wDef = b.ButtonW(L"Restore Defaults"), wOk = 96;
+    const int wOpen = b.ButtonW(L"Open config.ini"), wDef = b.ButtonW(L"Restore Defaults"), wSvr = b.ButtonW(L"SteamVR games..."), wOk = 96;
     if (create) g_contentEnd = g_made.size();   // g_made[0 .. g_contentEnd) = the content, the rest = the footer
     b.Button(ID_OPENINI, gx, by, wOpen, L"Open config.ini");
     b.Button(ID_DEFAULTS, gx + wOpen + 8, by, wDef, L"Restore Defaults");
+    b.Button(ID_OPENSTEAMVR, gx + wOpen + wDef + 16, by, wSvr, L"SteamVR games...");
+    EnableWindow(GetDlgItem(dlg, ID_OPENSTEAMVR), g_openSteamVr ? TRUE : FALSE);
     b.Button(ID_SAVE, gx + gw - 2 * wOk - 8, by, wOk, L"Save", true);
     b.Button(ID_CANCEL, gx + gw - wOk, by, wOk, L"Cancel");
-    if (create) for (int id : {ID_OPENINI, ID_DEFAULTS, ID_SAVE, ID_CANCEL}) g_footer.push_back(GetDlgItem(dlg, id));
+    if (create) for (int id : {ID_OPENINI, ID_DEFAULTS, ID_OPENSTEAMVR, ID_SAVE, ID_CANCEL}) g_footer.push_back(GetDlgItem(dlg, id));
     const wchar_t* const noteText = L"Changes apply to the next recording. Keyboard hotkeys and the indicator require a game restart.";
     const int noteW = b.TextW(noteText) + 4;
     HWND note = b.Make(L"STATIC", noteText, SS_LEFT | SS_NOPREFIX, gx, fy + 9, noteW, 16, -1);
@@ -2775,6 +2781,7 @@ void CheckTextFit() {
 HWND DialogWindow() { return g_dlg; }
 
 void SetQueueHooks(const QueueHooks& hooks) { g_hooks = hooks; }
+void SetOpenSteamVrHook(std::function<void()> hook) { g_openSteamVr = std::move(hook); }
 
 void NotifyQueueChanged() {
     if (g_dlg) PostMessageW(g_dlg, WM_QUEUE_POKE, 0, 0);

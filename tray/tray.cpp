@@ -1150,6 +1150,7 @@ void InstallQueueHooks() {
     };
     h.gameFps = [] { return g_live ? g_st.fps : 0u; };
     settings::SetQueueHooks(h);
+    settings::SetOpenSteamVrHook([] { PostMessageW(g_wnd, WM_OPEN_STEAMVR, 0, 0); });   // posted (the window runs its own message loop, which must not nest in the Settings button handler); the Settings window's "SteamVR games..." button = the tray menu item
 }
 
 void ShowMenu() {
