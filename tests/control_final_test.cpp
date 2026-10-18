@@ -7,6 +7,8 @@
 #include <windows.h>
 #include <atomic>
 #include <cstdio>
+#include <cstring>
+#include <vector>
 #include <mutex>
 #include "control.h"
 #include "log.h"
@@ -92,6 +94,20 @@ int wmain() {
     Check(Read(shm, st) && wcscmp(st.message, L"saved C:\\captures\\c_SBS.mp4") == 0 && st.state == ECS_READY,
           "saved published within 90 ms");
     ControlStop();
+
+    // the start / stop / error cues: WAV files PlaySound can play from memory
+    for (int k = 0; k < 3; ++k) {
+        const std::vector<uint8_t> w = BuildCueWav(k);
+        const uint32_t riff = w.size() >= 44 ? *(const uint32_t*)&w[4] : 0, data = w.size() >= 44 ? *(const uint32_t*)&w[40] : 0;
+        const int ms = (int)(data / 2 * 1000 / 48000);
+        const int wantMs = k == 0 ? 160 : k == 1 ? 250 : 450;
+        char what[128];
+        snprintf(what, sizeof what, "cue %d: RIFF/WAVE PCM 16-bit mono 48 kHz, sizes consistent, %d ms (want %d)", k, ms, wantMs);
+        Check(w.size() > 44 && memcmp(&w[0], "RIFF", 4) == 0 && memcmp(&w[8], "WAVEfmt ", 8) == 0 && memcmp(&w[36], "data", 4) == 0 &&
+              *(const uint16_t*)&w[20] == 1 && *(const uint16_t*)&w[22] == 1 && *(const uint32_t*)&w[24] == 48000 &&
+              *(const uint16_t*)&w[34] == 16 && riff == w.size() - 8 && data == w.size() - 44 && ms >= wantMs - 2 && ms <= wantMs + 2, what);
+        Check(*(const int16_t*)&w[44] == 0, "cue starts at silence (fade in)");
+    }
 
     UnmapViewOfFile(shm);
     CloseHandle(map);

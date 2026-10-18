@@ -2,7 +2,11 @@
 #include "control.h"
 #include <windows.h>
 #include <atomic>
+#include <cmath>
+#include <cstring>
 #include <mutex>
+#include <vector>
+#include <mmsystem.h>
 #include "log.h"
 #include "shared_status.h"
 
@@ -23,13 +27,19 @@ EyeCapShared*     s_shm = nullptr;       // valid while the control thread runs 
 bool              s_owner = false;
 ULONGLONG         s_lastPublish = 0;
 
+// The cues play through PlaySound from THIS process (the game's own audio session on the default device): Beep() went
+// through the "System sounds" session, which many PCs mute or keep low -- the user heard nothing in SteamVR games.
+// SND_ASYNC with SND_MEMORY plays from the buffer, so the three WAVs are built once and never freed.
 void Cue(int kind) {
     if (!s_beeps.load()) return;   // beeps = 0: the cues play on the default device, which is often the recorded loopback one
-    switch (kind) {
-    case 0: Beep(880, 160); break;
-    case 1: Beep(660, 90); Sleep(70); Beep(660, 90); break;
-    default: Beep(220, 450); break;
-    }
+    static const std::vector<uint8_t>* wavs[3] = {
+        new std::vector<uint8_t>(BuildCueWav(0)), new std::vector<uint8_t>(BuildCueWav(1)), new std::vector<uint8_t>(BuildCueWav(2))};
+    const int k = kind < 0 || kind > 2 ? 2 : kind;
+    static const char* const names[3] = {"start", "stop", "error"};
+    if (!PlaySoundW((LPCWSTR)wavs[k]->data(), nullptr, SND_MEMORY | SND_ASYNC | SND_NODEFAULT))
+        LOGW("control: cue %s: PlaySound failed", names[k]);
+    else
+        LOGD("control: cue %s (PlaySound)", names[k]);
 }
 
 // True while ANY keyboard / mouse binding of the list is held with exactly its modifiers. Pad: / Joy: bindings are the
@@ -220,6 +230,49 @@ DWORD WINAPI ThreadProc(LPVOID param) {
     return 0;
 }
 } // namespace
+
+std::vector<uint8_t> BuildCueWav(int kind) {
+    // {frequency Hz, length ms}; frequency 0 = silence. Same tones as the old Beep() cues.
+    struct Seg { int hz, ms; };
+    static const Seg kStart[] = {{880, 160}};
+    static const Seg kStop[] = {{660, 90}, {0, 70}, {660, 90}};
+    static const Seg kError[] = {{220, 450}};
+    const Seg* segs = kind == 0 ? kStart : kind == 1 ? kStop : kError;
+    const int n = kind == 0 ? 1 : kind == 1 ? 3 : 1;
+    const int rate = 48000;
+    std::vector<int16_t> pcm;
+    for (int i = 0; i < n; ++i) {
+        const int count = rate * segs[i].ms / 1000, ramp = rate * 5 / 1000;   // 5 ms fade in / out: no clicks
+        for (int t = 0; t < count; ++t) {
+            double v = 0;
+            if (segs[i].hz) {
+                double env = 1.0;
+                if (t < ramp) env = (double)t / ramp;
+                else if (t > count - ramp) env = (double)(count - t) / ramp;
+                v = 0.35 * env * std::sin(2.0 * 3.14159265358979 * segs[i].hz * t / rate);
+            }
+            pcm.push_back((int16_t)(v * 32767.0));
+        }
+    }
+    const uint32_t dataBytes = (uint32_t)(pcm.size() * 2);
+    std::vector<uint8_t> w(44 + dataBytes);
+    auto put32 = [&](size_t at, uint32_t v) { for (int b = 0; b < 4; ++b) w[at + b] = (uint8_t)(v >> (8 * b)); };
+    auto put16 = [&](size_t at, uint16_t v) { w[at] = (uint8_t)v; w[at + 1] = (uint8_t)(v >> 8); };
+    memcpy(&w[0], "RIFF", 4);
+    put32(4, 36 + dataBytes);
+    memcpy(&w[8], "WAVEfmt ", 8);
+    put32(16, 16);
+    put16(20, 1);              // PCM
+    put16(22, 1);              // mono
+    put32(24, rate);
+    put32(28, rate * 2);       // bytes per second
+    put16(32, 2);              // block align
+    put16(34, 16);             // bits per sample
+    memcpy(&w[36], "data", 4);
+    put32(40, dataBytes);
+    memcpy(&w[44], pcm.data(), dataBytes);
+    return w;
+}
 
 void ControlStart(const Config& cfg, const std::wstring& logPath, const std::wstring& configPath, ControlHooks hooks) {
     if (s_thread) return;
