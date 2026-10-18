@@ -646,8 +646,8 @@ int TestSave(const std::wstring& path) {
               "qp 52, quality_vs_speed 101 / fast, rate_control abr, beeps maybe, constant_frame_rate 2: 6 bad values, defaults kept");
         DeleteFileW(pn.c_str());
     }
-    // the Settings window never writes [steamvr] (the SteamVR games window owns steamvr_mode) and Save re-reads the file, so a
-    // steamvr_mode written while the window was open survives its Save
+    // the Settings window writes steamvr_mode only when its "SteamVR games" drop-down was changed (the SteamVR games window sets
+    // it too) and Save re-reads the file, so a steamvr_mode written while the window was open survives its Save
     {
         const std::wstring pn = path + L".steamvr.ini";
         { std::ofstream f(pn, std::ios::binary); f << "[capture]\r\nbitrate_mbps = 0\r\n\r\n[steamvr]\r\nsteamvr_mode = per_game\r\n"; }
@@ -1290,7 +1290,7 @@ HWND BoxButton(HWND box, const std::wstring& want) {
         auto* x = (Ctx*)lp;
         wchar_t cls[32] = L"", t[64] = L"";
         GetClassNameW(c, cls, 32);
-        if (_wcsicmp(cls, L"Button") != 0) return TRUE;
+        if (_wcsicmp(cls, L"GlassButton") != 0) return TRUE;   // tray/glass.h kButton
         GetWindowTextW(c, t, 64);
         std::wstring s;
         for (const wchar_t* p = t; *p; ++p) if (*p != L'&') s += *p;
@@ -1420,7 +1420,7 @@ int TestSvr(DWORD pid, int argc, wchar_t** argv) {
         size_t next = 0;
         ULONGLONG idleSince = GetTickCount64();
         while (GetTickCount64() - idleSince < 2000) {
-            const HWND box = FindTop(pid, L"#32770", steamvr_ui::kWindowTitle);
+            const HWND box = FindTop(pid, L"GlassMessage", steamvr_ui::kWindowTitle);   // glass::MessageBox (tray/glass.h)
             if (!box) { Sleep(100); continue; }
             Sleep(150);   // fully created
             wchar_t text[8192] = L"";

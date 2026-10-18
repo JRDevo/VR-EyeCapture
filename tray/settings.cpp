@@ -4,6 +4,7 @@
 #include <shellapi.h>
 #include <shlobj.h>
 #include <shobjidl.h>
+#include <uxtheme.h>
 #include <cmath>
 #include <cwctype>
 #include <cstdio>
@@ -12,6 +13,7 @@
 #include <sstream>
 #include "input.h"
 #include "disk.h"
+#include "glass.h"
 #include "install.h"
 #include "log.h"
 #include "postprocess.h"
@@ -72,6 +74,8 @@ const Field kFields[] = {
     {L"indicator_size",    L"indicator",       Kind::Edit,  ID_INDSIZE,    nullptr},
     {L"indicator_opacity", L"indicator",       Kind::Edit,  ID_INDOPACITY, nullptr},
     {L"audio_enabled",     L"audio",           Kind::Check, ID_AUDIO,      nullptr},
+    {L"steamvr_mode",      L"steamvr",         Kind::Combo, ID_SVRMODE,    L"per_game|quick|off",
+     L"Per game (best quality)|Quick mode (no setup, lower quality)|Off (not recorded)"},
     {L"audio_device",      L"audio",           Kind::Edit,  ID_AUDIODEV,   nullptr},
     {L"post_mkv",          L"post_processing", Kind::Check, ID_POSTMKV,    nullptr},
     {L"keep_mp4",          L"post_processing", Kind::Check, ID_KEEPMP4,    nullptr},
@@ -279,7 +283,7 @@ bool AutostartChecked() {
 Reporter g_reporter = nullptr;
 void Report(const std::wstring& title, const std::wstring& text) {
     if (g_reporter) { g_reporter(title, text); return; }
-    MessageBoxW(DialogWindow(), text.c_str(), title.c_str(), MB_OK | MB_ICONWARNING);
+    glass::MessageBox(DialogWindow(), text, title, MB_OK | MB_ICONWARNING);
 }
 
 } // namespace
@@ -323,6 +327,7 @@ KeyValues FromConfig(const Config& c) {
     kv.emplace_back(L"indicator_opacity", FloatText(c.indicator.opacity));
     kv.emplace_back(L"audio_enabled", B(c.audioEnabled));
     kv.emplace_back(L"audio_device", c.audioDevice);
+    kv.emplace_back(L"steamvr_mode", elog::Widen(SteamVrModeKey(c.steamvr.mode)));
     kv.emplace_back(L"post_mkv", B(c.postMkv));
     kv.emplace_back(L"keep_mp4", B(c.keepMp4));
     kv.emplace_back(L"post_flat", B(c.postFlat));
@@ -471,7 +476,11 @@ bool SaveKeyValuesToFile(const std::wstring& path, const KeyValues& kv, SaveResu
 }
 
 bool SaveSettingsToFile(const std::wstring& path, const Config& c, SaveResult& r) {
-    return SaveKeyValuesToFile(path, FromConfig(c), r);
+    // like the window with its "SteamVR games" drop-down untouched: steamvr_mode is left as the file has it (see DoSave)
+    KeyValues kv = FromConfig(c);
+    for (auto it = kv.begin(); it != kv.end(); ++it)
+        if (it->first == L"steamvr_mode") { kv.erase(it); break; }
+    return SaveKeyValuesToFile(path, kv, r);
 }
 
 bool HotkeyText(unsigned vk, bool ctrl, bool shift, bool alt, std::wstring& out) {
@@ -484,6 +493,7 @@ namespace {
 HWND                g_dlg = nullptr;
 HWND                g_tip = nullptr;            // the tooltip window (owned by the dialog)
 HFONT               g_font = nullptr;
+HFONT               g_odFont = nullptr;     // g_font with grey (not ClearType) smoothing: the owner-drawn previews (glass two-pass alpha)
 HFONT               g_logoFont = nullptr;      // the bold wordmark font of the logo (ID_LOGO): the message font at 20 px, FW_BOLD
 HWND                g_hover = nullptr;          // the control the help panel last followed (mouse or keyboard focus)
 const wchar_t*      g_shown = nullptr;          // the text now in the help panel (pointer compare: no flicker)
@@ -509,6 +519,7 @@ int                 g_viewH = 0;            // visible content height when the w
 int                 g_scrollY = 0, g_scrollMax = 0;   // scroll offset / its maximum (0 = nothing to scroll)
 std::vector<HWND>   g_made;                 // every control made by Builder::Make, in creation order (the Move pass walks it)
 int                 g_helpMinH = 0;         // height of the help edit that shows the longest help text without cut (MeasureHelp)
+std::wstring        g_loadedSvrMode;           // steamvr_mode as loaded into the window (DoSave writes it only when changed)
 int                 g_helpPad = 0;          // help edit client height minus its default formatting rectangle height
 int                 g_naturalH = 0;         // content height with the help edit at g_helpMinH (independent of the window size)
 size_t              g_contentEnd = 0;       // g_made index of the first footer control (set by the Create pass)
@@ -644,6 +655,11 @@ const Help kHelp[] = {
     {ID_INDSIZE, L"Edge length of the dot in metres at its distance Z. At -0.8 m: 0.02 is about 1.4 degrees, 0.005 is a small dot, "
                  L"0.002 is a few pixels. Below about 0.001 the dot is smaller than one headset pixel and disappears. The smallest allowed value is 0.0005."},
     {ID_INDOPACITY, L"Opacity of the red dot. 1 = fully visible, 0.3 = faint."},
+    {ID_SVRMODE, L"How SteamVR games are recorded. Per game (best quality): only the games ticked in the SteamVR games window "
+                 L"(footer button), from the game's own eye images; head smoothing, symmetric field of view and VR180 / VR360 work. "
+                 L"Quick mode: no setup -- while SteamVR runs, SteamVR's own mirror picture is recorded (lower resolution, SteamVR's "
+                 L"menus and boundary visible, flat side-by-side only, no in-headset dot); a ticked game still records the per-game way. "
+                 L"Off: SteamVR games are not recorded. The same setting as the drop-down at the top of the SteamVR games window."},
     {ID_INDPREVIEW, L"Approximate position of the dot in the headset view. The circle represents the field of view; the centre is straight ahead."},
     {ID_LAYOUTPREVIEW, L"Scale drawing of the files that the tray creates, with their sizes in pixels. Left: the recording (an example "
                        L"from a Quest 3: 8192x4630, both eyes side by side; the hatched part of each eye is removed by Eye crop). "
@@ -875,14 +891,17 @@ void DrawPreview(const DRAWITEMSTRUCT* di) {
     HBITMAP bmp = CreateCompatibleBitmap(di->hDC, w, h);
     HGDIOBJ oldBmp = SelectObject(dc, bmp);
     const bool on = g_prev.on;
-    const COLORREF bg = on ? RGB(24, 26, 32) : RGB(52, 52, 52), edge = on ? RGB(120, 128, 150) : RGB(95, 95, 95);
-    const COLORREF cross = on ? RGB(52, 56, 68) : RGB(66, 66, 66), txt = on ? RGB(150, 156, 172) : RGB(120, 120, 120);
+    // the window's card shows through: bg = the colour glass asks for (black, then white: alpha from the two passes)
+    const bool dark = glass::Current().dark;
+    const COLORREF bg = (COLORREF)di->itemData;
+    const COLORREF edge = on ? (dark ? RGB(140, 146, 162) : RGB(120, 126, 140)) : (dark ? RGB(95, 95, 95) : RGB(170, 170, 170));
+    const COLORREF cross = dark ? RGB(70, 72, 80) : RGB(205, 208, 215), txt = glass::Current().textDim;
     HBRUSH bgBrush = CreateSolidBrush(bg);
     const RECT all{0, 0, w, h};
     FillRect(dc, &all, bgBrush);
     DeleteObject(bgBrush);
     SetBkMode(dc, TRANSPARENT);
-    HGDIOBJ oldFont = g_font ? SelectObject(dc, g_font) : nullptr;
+    HGDIOBJ oldFont = g_odFont ? SelectObject(dc, g_odFont) : nullptr;
 
     const int cx = w / 2, cy = h / 2, R = (w < h ? w : h) / 2 - 4;
     const double pxPerDeg = R / kPreviewHalfFovDeg;
@@ -911,7 +930,7 @@ void DrawPreview(const DRAWITEMSTRUCT* di) {
             a = g_prev.opacity * (0.35 + 0.65 * s);
             if (outside) a *= 0.5;
         }
-        const COLORREF col = on ? Mix(bg, RGB(235, 40, 40), a) : RGB(110, 110, 110);
+        const COLORREF col = on ? Mix(bg, RGB(235, 40, 40), a) : Mix(bg, RGB(128, 128, 128), 1.0);
         HBRUSH dotBrush = CreateSolidBrush(col);
         HPEN none = CreatePen(PS_NULL, 0, 0);
         SelectObject(dc, dotBrush);
@@ -1083,7 +1102,9 @@ void DrawLogo(const DRAWITEMSTRUCT* di) {
     HBITMAP bmp = CreateCompatibleBitmap(di->hDC, W, H);
     HGDIOBJ oldBmp = SelectObject(dc, bmp);
     const RECT all{0, 0, W, H};
-    FillRect(dc, &all, GetSysColorBrush(COLOR_BTNFACE));
+    HBRUSH bgBrush = CreateSolidBrush((COLORREF)di->itemData);   // glass: black, then white (alpha from the two passes)
+    FillRect(dc, &all, bgBrush);
+    DeleteObject(bgBrush);
 
     const double s = (double)H / 256.0;   // the mark is the square (0, 0, H, H)
     auto U = [&](double v) { return (int)(v * s + 0.5); };
@@ -1152,6 +1173,7 @@ void DrawLogo(const DRAWITEMSTRUCT* di) {
         LOGFONTW lf{};
         if (!base || !GetObjectW(base, sizeof(lf), &lf)) return;
         lf.lfHeight *= SS;
+        lf.lfQuality = ANTIALIASED_QUALITY;   // grey smoothing: the glass two-pass alpha needs the same text on black and white
         HFONT f = CreateFontIndirectW(&lf);
         HGDIOBJ of = SelectObject(dc, f);
         SetTextColor(dc, c);
@@ -1163,9 +1185,9 @@ void DrawLogo(const DRAWITEMSTRUCT* di) {
         SelectObject(dc, of);
         DeleteObject(f);
     };
-    line(g_logoFont, L"VR EyeCapture", RGB(14, 16, 23));
+    line(g_logoFont, L"VR EyeCapture", glass::Current().text);
     x += 16 * SS;
-    line(g_font, L"Stereo 3D recorder for VR games", GetSysColor(COLOR_GRAYTEXT));
+    line(g_font, L"Stereo 3D recorder for VR games", glass::Current().textDim);
 
     SetStretchBltMode(di->hDC, HALFTONE);
     SetBrushOrgEx(di->hDC, 0, 0, nullptr);
@@ -1181,14 +1203,16 @@ void DrawLayoutPreview(const DRAWITEMSTRUCT* di) {
     HDC dc = CreateCompatibleDC(di->hDC);
     HBITMAP bmp = CreateCompatibleBitmap(di->hDC, w, h);
     HGDIOBJ oldBmp = SelectObject(dc, bmp);
-    const COLORREF bg = RGB(24, 26, 32), edge = RGB(150, 158, 180), txt = RGB(200, 206, 220), dim = RGB(140, 146, 162);
+    const bool dark = glass::Current().dark;
+    const COLORREF bg = (COLORREF)di->itemData;   // the card shows through (glass two-pass alpha)
+    const COLORREF edge = dark ? RGB(150, 158, 180) : RGB(110, 116, 130), txt = glass::Current().text, dim = glass::Current().textDim;
     const COLORREF colL = RGB(56, 88, 140), colR = RGB(140, 66, 66);
     const RECT all{0, 0, w, h};
     HBRUSH bgBrush = CreateSolidBrush(bg);
     FillRect(dc, &all, bgBrush);
     DeleteObject(bgBrush);
     SetBkMode(dc, TRANSPARENT);
-    HGDIOBJ oldFont = g_font ? SelectObject(dc, g_font) : nullptr;
+    HGDIOBJ oldFont = g_odFont ? SelectObject(dc, g_odFont) : nullptr;
 
     auto text = [&](int x, int y, int x2, const wchar_t* t, COLORREF c, UINT fmt = DT_LEFT) {
         SetTextColor(dc, c);
@@ -1461,6 +1485,7 @@ void LoadFromFile() {
     ParseConfigFile(g_path, c, problems);
     if (c.hotkey.text.empty()) ParseHotkey(kDefaultHotkey, c.hotkey);
     SetControls(FromConfig(c));
+    g_loadedSvrMode = elog::Widen(SteamVrModeKey(c.steamvr.mode));
     SendMessageW(Ctl(ID_AUTOSTART), BM_SETCHECK, AutostartChecked() ? BST_CHECKED : BST_UNCHECKED, 0);
     if (!problems.empty()) {
         std::wstring m = L"The configuration file contains invalid values on the following lines. The window shows the default value for each of them, and Save replaces them:\n\n";
@@ -1724,7 +1749,12 @@ void ApplyCaptured(const std::wstring& t) {
 
 void DoSave() {
     SaveResult r;
-    if (!SaveKeyValuesToFile(g_path, CollectControls(), r)) {
+    KeyValues kv = CollectControls();
+    // steamvr_mode is also set by the SteamVR games window, possibly while this window is open: written only when its drop-down
+    // was changed here (else a mode picked there meanwhile would be put back)
+    for (auto it = kv.begin(); it != kv.end(); ++it)
+        if (it->first == L"steamvr_mode" && it->second == g_loadedSvrMode) { kv.erase(it); break; }
+    if (!SaveKeyValuesToFile(g_path, kv, r)) {
         std::wstring m = L"The settings could not be saved:\n\n";
         for (const auto& p : r.problems) m += p + L"\n";
         Report(L"Not Saved", m);
@@ -1898,6 +1928,30 @@ bool CaptureKey(const MSG& m) {
 
 const UINT_PTR kHoverTimer = 1;
 
+// The glass control class for a classic one (tray/glass.h); EDIT and LISTBOX stay native (glass::FrameEdit).
+const wchar_t* GlassClass(const wchar_t* cls) {
+    if (!_wcsicmp(cls, L"BUTTON")) return glass::kButton;
+    if (!_wcsicmp(cls, L"STATIC")) return glass::kStatic;
+    if (!_wcsicmp(cls, L"COMBOBOX")) return glass::kCombo;
+    if (!_wcsicmp(cls, TRACKBAR_CLASSW)) return glass::kSlider;
+    if (!_wcsicmp(cls, PROGRESS_CLASSW)) return glass::kProgress;
+    if (!_wcsicmp(cls, WC_LINK)) return glass::kLink;
+    return cls;
+}
+
+// Colours that are not the theme's defaults: grey hints, the red frame-rate warning, the footer strip, the logo. After the
+// Create pass and whenever Windows switches light / dark / accent.
+void ApplyGlassTheme() {
+    for (HWND d : g_dim) glass::SetDim(d, true);
+    if (HWND w = Ctl(ID_FPSWARN)) glass::SetTextColor(w, glass::Current().dark ? RGB(255, 153, 164) : RGB(196, 43, 28));
+    if (HWND f = Ctl(kFooterBgId)) glass::SetPanel(f);
+    for (int id : {ID_LOGO, ID_INDPREVIEW, ID_LAYOUTPREVIEW})
+        if (HWND l = Ctl(id)) glass::SetOwnerDrawTransparent(l);
+    if (g_tip) SetWindowTheme(g_tip, glass::Current().dark ? L"DarkMode_Explorer" : nullptr, nullptr);
+    if (g_dlg) SetWindowTheme(g_dlg, glass::Current().dark ? L"DarkMode_Explorer" : nullptr, nullptr);   // the window's scroll bar
+    if (g_dlg) InvalidateRect(g_dlg, nullptr, TRUE);
+}
+
 LRESULT CALLBACK DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_COMMAND:
@@ -1941,14 +1995,6 @@ LRESULT CALLBACK DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return DefWindowProcW(h, msg, wp, lp);
     }
     case WM_DRAWITEM:
-        if (wp == kFooterBgId) {
-            const DRAWITEMSTRUCT* di = (const DRAWITEMSTRUCT*)lp;
-            FillRect(di->hDC, &di->rcItem, GetSysColorBrush(COLOR_BTNFACE));
-            RECT line = di->rcItem;
-            line.bottom = line.top + 2;
-            DrawEdge(di->hDC, &line, EDGE_ETCHED, BF_TOP);
-            return TRUE;
-        }
         if (wp == ID_INDPREVIEW) { DrawPreview((const DRAWITEMSTRUCT*)lp); return TRUE; }
         if (wp == ID_LAYOUTPREVIEW) { DrawLayoutPreview((const DRAWITEMSTRUCT*)lp); return TRUE; }
         if (wp == ID_LOGO) { DrawLogo((const DRAWITEMSTRUCT*)lp); return TRUE; }
@@ -1988,24 +2034,21 @@ LRESULT CALLBACK DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         return DefWindowProcW(h, msg, wp, lp);
-    case WM_CTLCOLORSTATIC:
-        for (HWND d : g_dim)
-            if (d == (HWND)lp) {   // hint / caption: grey text on the dialog background
-                SetBkMode((HDC)wp, TRANSPARENT);
-                SetTextColor((HDC)wp, GetSysColor(COLOR_GRAYTEXT));
-                return (LRESULT)GetSysColorBrush(COLOR_BTNFACE);
-            }
-        if ((HWND)lp == Ctl(ID_FPSWARN)) {   // the frame-rate warning: red on the dialog background
-            SetBkMode((HDC)wp, TRANSPARENT);
-            SetTextColor((HDC)wp, RGB(192, 0, 0));
-            return (LRESULT)GetSysColorBrush(COLOR_BTNFACE);
-        }
-        if ((HWND)lp == Ctl(ID_HELPTEXT)) {   // the read-only help edit: same background as the dialog
-            SetBkColor((HDC)wp, GetSysColor(COLOR_BTNFACE));
-            SetTextColor((HDC)wp, GetSysColor(COLOR_WINDOWTEXT));
-            return (LRESULT)GetSysColorBrush(COLOR_BTNFACE);
-        }
-        return DefWindowProcW(h, msg, wp, lp);
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORSTATIC:   // read-only edits (the Description panel)
+    case WM_CTLCOLORLISTBOX:
+        return (LRESULT)glass::EditBrush((HDC)wp, (HWND)lp);
+    case WM_ERASEBKGND: {
+        RECT rc;
+        GetClientRect(h, &rc);
+        glass::PaintBackground(h, (HDC)wp, rc);
+        return 1;
+    }
+    case WM_SETTINGCHANGE:
+    case WM_DWMCOLORIZATIONCOLORCHANGED:
+    case WM_THEMECHANGED:
+        if (glass::OnSettingChange(h)) ApplyGlassTheme();
+        return 0;
     case WM_QUEUE_POKE:
         UpdateQueueView();
         UpdateFpsWarning();
@@ -2074,9 +2117,10 @@ struct Builder {
             if (!dwp) SetWindowPos(c, nullptr, x, y + dy, w, hgt, SWP_NOZORDER | SWP_NOACTIVATE);
             return c;
         }
-        HWND c = CreateWindowExW(ex, cls, text, WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | style, x, y + dy, w, hgt, parent,
+        HWND c = CreateWindowExW(ex, GlassClass(cls), text, WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | style, x, y + dy, w, hgt, parent,
                                  (HMENU)(INT_PTR)id, GetModuleHandleW(nullptr), nullptr);
         if (g_font) SendMessageW(c, WM_SETFONT, (WPARAM)g_font, TRUE);
+        if (!_wcsicmp(cls, L"EDIT") || !_wcsicmp(cls, L"LISTBOX")) glass::FrameEdit(c);
         g_made.push_back(c);
         return c;
     }
@@ -2101,7 +2145,7 @@ struct Builder {
         }
         return c;
     }
-    // A hint / caption: a label drawn in the grey (COLOR_GRAYTEXT) colour, see WM_CTLCOLORSTATIC.
+    // A hint / caption: a label drawn in the grey hint colour (glass::SetDim, ApplyGlassTheme).
     HWND Hint(int x, int y, int w, const wchar_t* t, int helpId = 0) {
         HWND c = Label(x, y, w, t, helpId);
         if (pass == Pass::Create) g_dim.push_back(c);
@@ -2139,7 +2183,7 @@ struct Builder {
     // Not in g_made (nothing to move): the Move pass does nothing.
     void HiddenCheck(int id) {
         if (pass == Pass::Move) return;
-        HWND c = CreateWindowExW(0, L"BUTTON", L"", WS_CHILD | BS_AUTOCHECKBOX, 0, 0, 0, 0, parent, (HMENU)(INT_PTR)id,
+        HWND c = CreateWindowExW(0, glass::kButton, L"", WS_CHILD | BS_AUTOCHECKBOX, 0, 0, 0, 0, parent, (HMENU)(INT_PTR)id,
                                  GetModuleHandleW(nullptr), nullptr);
         if (g_font) SendMessageW(c, WM_SETFONT, (WPARAM)g_font, TRUE);
     }
@@ -2151,7 +2195,7 @@ struct Builder {
     // Explicit '|'-separated display items, for a combo that is not a config Field (ID_YTMODE).
     void Combo(int id, int x, int y, int w, const wchar_t* items) { ComboItems(id, x, y, w, items); }
     void ComboItems(int id, int x, int y, int w, const wchar_t* items) {
-        HWND c = Make(L"COMBOBOX", L"", WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, x, y, w, 160, id);
+        HWND c = Make(L"COMBOBOX", L"", WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, x, y, w, 23, id);
         Tip(c, HelpText(id));
         if (!items || pass == Pass::Move) return;
         const std::wstring o = items;
@@ -2166,7 +2210,7 @@ struct Builder {
             if (iw > widest) widest = iw;
             pos = bar + 1;
         }
-        const int dw = widest + GetSystemMetrics(SM_CXVSCROLL) + 12;
+        const int dw = widest + 28;   // the glass list: 14 px text inset + 8 px right + the scroll indicator
         SendMessageW(c, CB_SETDROPPEDWIDTH, (WPARAM)(dw > w ? dw : w), 0);
     }
 };
@@ -2195,6 +2239,7 @@ int BuildControls(HWND dlg, Builder::Pass pass, int clientW, int clientH, int sc
             SetWindowPos(g_tip, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
             SendMessageW(g_tip, TTM_SETMAXTIPWIDTH, 0, 380);
             SendMessageW(g_tip, TTM_SETDELAYTIME, TTDT_AUTOPOP, MAKELONG(30000, 0));
+            if (glass::Current().dark) SetWindowTheme(g_tip, L"DarkMode_Explorer", nullptr);
         }
     } else {
         b.dwp = BeginDeferWindowPos((int)g_made.size());
@@ -2212,11 +2257,11 @@ int BuildControls(HWND dlg, Builder::Pass pass, int clientW, int clientH, int sc
     const int pitch = 30, top = 22, gap = 8;
     auto groupH = [&](int rows) { return top + rows * pitch + 2; };
     const int unitGap = 6;
-    // column heights (rows): left Recording 7 + Video 5 + Stereo 3D 4; right Recording Indicator 5 + Export + Advanced 1. The
+    // column heights (rows): left Recording 7 + Video 5 + Stereo 3D 4; right Recording Indicator 4 + Export + Advanced 2. The
     // shorter column's groups get the difference (left: leftEx on Stereo 3D; right: spare, below).
     const int kExportRows = 10, kRecordingRows = 7, kVideoRows = 5, kStereoRows = 4;
     const int leftH = groupH(kRecordingRows) + gap + groupH(kVideoRows) + gap + groupH(kStereoRows) + gap;
-    const int rightH = groupH(5) + gap + groupH(kExportRows) + gap + groupH(1) + gap;
+    const int rightH = groupH(4) + gap + groupH(kExportRows) + gap + groupH(2) + gap;
     const int leftEx = rightH > leftH ? rightH - leftH : 0;
     int y = 6;
 
@@ -2391,10 +2436,10 @@ int BuildControls(HWND dlg, Builder::Pass pass, int clientW, int clientH, int sc
 
     // ---- Recording Indicator (fields on the left, the live preview of the view on the right; square, it grows with the
     // column up to the inside of the group)
-    int prevGrow = groupH(5) + ex1 - top - 10 - 140;
+    int prevGrow = groupH(4) + ex1 - top - 10 - 112;
     prevGrow = prevGrow < 0 ? 0 : (extraW < prevGrow ? extraW : prevGrow);
-    const int prevSize = 140 + prevGrow, prevY = ex1 > prevGrow ? (ex1 - prevGrow) / 2 : 0;
-    b.Group(gx, y, gw, groupH(5) + ex1, L"Recording Indicator");
+    const int prevSize = 112 + prevGrow, prevY = ex1 > prevGrow ? (ex1 - prevGrow) / 2 : 0;
+    b.Group(gx, y, gw, groupH(4) + ex1, L"Recording Indicator");
     r = y + top;
     b.Label(lx, r, labelW, L"Indicator:", ID_INDICATOR);
     b.Check(ID_INDICATOR, cx, r, L"Show recording indicator in headset");
@@ -2419,11 +2464,9 @@ int BuildControls(HWND dlg, Builder::Pass pass, int clientW, int clientH, int sc
         b.Label(x, r, 12, L"Z", ID_INDZ);
         b.Edit(ID_INDZ, x + 16, r, 52);
     }
-    r += pitch;
-    b.Hint(lx, r, 370, L"Z is negative: the indicator floats in front of the viewer.");
     b.Tip(b.Make(L"STATIC", L"", SS_OWNERDRAW | SS_NOTIFY, gx + gw - 12 - prevSize, y + top + prevY, prevSize, prevSize, ID_INDPREVIEW),
           HelpText(ID_INDPREVIEW));
-    y += groupH(5) + ex1 + gap;
+    y += groupH(4) + ex1 + gap;
 
     // ---- Export (fields on the left, the live layout preview on the right). The preview is 213 px wide at the minimum width and
     // grows with the column by up to 40 px (its text lines need that room; DrawLayoutPreview draws at fixed pixel positions, so
@@ -2479,9 +2522,12 @@ int BuildControls(HWND dlg, Builder::Pass pass, int clientW, int clientH, int sc
     y += groupH(kExportRows) + ex2 + gap;
 
     // ---- Advanced
-    b.Group(gx, y, gw, groupH(1) + ex3, L"Advanced");
+    b.Group(gx, y, gw, groupH(2) + ex3, L"Advanced");
     r = y + top;
     b.HiddenCheck(ID_REQTRAY);   // require_tray stays a config.ini key (default 1); the tray is required anyway, so no checkbox
+    b.Label(lx, r, labelW, L"SteamVR games:", ID_SVRMODE);
+    b.Combo(ID_SVRMODE, cx, r, comboW(ID_SVRMODE, nullptr));
+    r += pitch;
     b.Label(lx, r, labelW, L"Log level:", ID_LOGLEVEL);
     b.Combo(ID_LOGLEVEL, cx, r, 160);
     {   // one row: "Startup:" + its check right of the Log level drop-down
@@ -2489,7 +2535,7 @@ int BuildControls(HWND dlg, Builder::Pass pass, int clientW, int clientH, int sc
         b.Label(sx, r, sw, L"Startup:", ID_AUTOSTART);
         b.Check(ID_AUTOSTART, sx + sw, r, L"Start with Windows");
     }
-    y += groupH(1) + ex3 + gap;
+    y += groupH(2) + ex3 + gap;
     y = yLeftEnd > y ? yLeftEnd : y;
 
     // ---- Conversions (full width; the same two-column grid as the groups above): left = the running job (three status lines:
@@ -2583,7 +2629,7 @@ int BuildControls(HWND dlg, Builder::Pass pass, int clientW, int clientH, int sc
     b.Tip(about, HelpText(ID_ABOUTLINK));
     keep(g_footer, about);
     // created last = lowest of the footer: it only paints the background behind the note and the buttons
-    keep(g_footer, b.Make(L"STATIC", L"", SS_OWNERDRAW, 0, fy, clientW, g_footerH, kFooterBgId));
+    keep(g_footer, b.Make(L"STATIC", L"", SS_LEFT, 0, fy, clientW, g_footerH, kFooterBgId));
     if (create) {
         for (HWND g : b.groups) SetWindowPos(g, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         g_footerRaised = false;   // the footer stays below the content (Tab order) until scrolling needs it on top (RaiseFooter)
@@ -2714,23 +2760,23 @@ void CheckTextFit() {
         wchar_t buf[1024] = L"";
         GetWindowTextW(c, buf, 1024);
         const std::wstring t = buf;
-        if (!_wcsicmp(cls, L"Static")) {
-            if ((style & SS_TYPEMASK) == SS_OWNERDRAW || (style & SS_ELLIPSISMASK) || t.empty()) continue;
+        if (!_wcsicmp(cls, glass::kStatic)) {
+            if ((style & SS_TYPEMASK) == SS_OWNERDRAW || (style & SS_ELLIPSISMASK) || t.empty() || GetDlgCtrlID(c) == kFooterBgId) continue;
             ++checked;
             RECT need{0, 0, w, 0};
             DrawTextW(dc, t.c_str(), (int)t.size(), &need, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX | DT_EDITCONTROL);
             if (need.bottom > h) report(c, t, need.bottom, h, "label (height: wraps to more lines than fit)");
-        } else if (!_wcsicmp(cls, L"Button")) {
+        } else if (!_wcsicmp(cls, glass::kButton)) {
             if (t.empty()) continue;
             ++checked;
             const LONG type = style & BS_TYPEMASK;
             const int tw = textW(t);
             if (type == BS_GROUPBOX) { if (tw + 16 > w) report(c, t, tw + 16, w, "group box"); }
             else if (type == BS_AUTOCHECKBOX || type == BS_CHECKBOX) {
-                const int need = tw + GetSystemMetrics(SM_CXMENUCHECK) + 4;
+                const int need = tw + glass::kCheckTextX;
                 if (need > w) report(c, t, need, w, "check box");
             } else if (tw + 12 > w) report(c, t, tw + 12, w, "button");
-        } else if (!_wcsicmp(cls, L"SysLink")) {
+        } else if (!_wcsicmp(cls, glass::kLink)) {
             if (t.empty()) continue;
             ++checked;
             std::wstring plain;   // the text without the <a ...> / </a> tags
@@ -2740,10 +2786,10 @@ void CheckTextFit() {
             }
             const int tw = textW(plain);
             if (tw > w) report(c, plain, tw, w, "link");
-        } else if (!_wcsicmp(cls, L"ComboBox")) {
+        } else if (!_wcsicmp(cls, glass::kCombo)) {
             RECT wr{};
             GetWindowRect(c, &wr);
-            const int have = (wr.right - wr.left) - GetSystemMetrics(SM_CXVSCROLL) - 8;   // the closed combo: minus arrow and edges
+            const int have = (wr.right - wr.left) - glass::kComboTextPad;   // the closed combo: minus the text inset and the chevron
             const int n = (int)SendMessageW(c, CB_GETCOUNT, 0, 0);
             for (int i = 0; i < n; ++i) {
                 wchar_t item[256] = L"";
@@ -2795,6 +2841,8 @@ void ShowDialog(const std::wstring& configPath, std::function<void(const std::ve
     }
     INITCOMMONCONTROLSEX icc{sizeof(icc), ICC_BAR_CLASSES | ICC_PROGRESS_CLASS | ICC_LINK_CLASS};
     InitCommonControlsEx(&icc);
+    glass::Init();
+    glass::Reload();   // the theme may have changed while no window was open
     const HRESULT co = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);   // SHBrowseForFolder
     g_path = configPath;
     g_onSaved = onSaved;
@@ -2804,6 +2852,9 @@ void ShowDialog(const std::wstring& configPath, std::function<void(const std::ve
     NONCLIENTMETRICSW ncm{sizeof(ncm)};
     if (SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0)) {
         g_font = CreateFontIndirectW(&ncm.lfMessageFont);
+        LOGFONTW gf = ncm.lfMessageFont;
+        gf.lfQuality = ANTIALIASED_QUALITY;
+        g_odFont = CreateFontIndirectW(&gf);
         LOGFONTW lf = ncm.lfMessageFont;
         lf.lfHeight = -20;
         lf.lfWeight = FW_BOLD;
@@ -2817,7 +2868,7 @@ void ShowDialog(const std::wstring& configPath, std::function<void(const std::ve
         wc.hInstance = GetModuleHandleW(nullptr);
         wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
         wc.hIcon = LoadIconW(wc.hInstance, MAKEINTRESOURCEW(1));   // the app icon (tray/tray.rc): title bar, taskbar, Alt+Tab
-        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+        wc.hbrBackground = nullptr;   // WM_ERASEBKGND: glass::PaintBackground (Mica or the solid theme colour)
         wc.lpszClassName = L"EyeCaptureSettings";
         RegisterClassW(&wc);
         registered = true;
@@ -2833,12 +2884,14 @@ void ShowDialog(const std::wstring& configPath, std::function<void(const std::ve
     g_dlg = CreateWindowExW(WS_EX_APPWINDOW, L"EyeCaptureSettings", kWindowTitle, style, sx < 0 ? 0 : sx, sy < 0 ? 0 : sy,
                             w, hgt, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
     if (g_dlg) {
+        glass::ApplyWindow(g_dlg);
         // Create at the narrowest width, measure the help texts there, then one Move pass at the same provisional size: it
         // gives the natural content height with the measured Description panel (g_naturalH; independent of the window size).
         RECT pc{};
         GetClientRect(g_dlg, &pc);
         int natural = 0;
         BuildControls(g_dlg, Builder::Pass::Create, kLayoutW, pc.bottom - pc.top, 0, &natural);
+        ApplyGlassTheme();
         MeasureHelp();
         BuildControls(g_dlg, Builder::Pass::Move, kLayoutW, pc.bottom - pc.top, 0, &natural);
         g_naturalH = natural;
@@ -2878,6 +2931,7 @@ void ShowDialog(const std::wstring& configPath, std::function<void(const std::ve
         if (g_dlg) DestroyWindow(g_dlg);
     }
     if (g_font) { DeleteObject(g_font); g_font = nullptr; }
+    if (g_odFont) { DeleteObject(g_odFont); g_odFont = nullptr; }
     if (g_logoFont) { DeleteObject(g_logoFont); g_logoFont = nullptr; }
     g_dlg = nullptr;
     g_onSaved = nullptr;

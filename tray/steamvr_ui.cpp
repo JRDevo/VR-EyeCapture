@@ -2,6 +2,7 @@
 #include "steamvr_ui.h"
 #include <commctrl.h>
 #include <commdlg.h>
+#include <uxtheme.h>
 #include <algorithm>
 #include <functional>
 #include <mutex>
@@ -9,6 +10,7 @@
 #include <thread>
 #include <vector>
 #include "config.h"
+#include "glass.h"
 #include "log.h"
 #include "openvr/openvr_hooks.h"   // EYECAP_HOME_REG_KEY / _VALUE, EYECAP_TEST_HOME_KEY_ENV
 #include "steamvr_games.h"
@@ -147,7 +149,7 @@ bool Toggleable(const Row& r) {
 
 // Message box owned by the window; every box and its answer is logged (tests read both).
 int Box(const std::wstring& text, UINT flags) {
-    const int r = MessageBoxW(g_dlg, text.c_str(), kWindowTitle, flags | MB_SETFOREGROUND);
+    const int r = glass::MessageBox(g_dlg, text, kWindowTitle, flags | MB_SETFOREGROUND);
     const char* ans = r == IDYES ? "Yes" : r == IDNO ? "No" : r == IDOK ? "OK" : r == IDCANCEL ? "Cancel" : "?";
     LOGI("tray: steamvr: box: %s -> %s", N(text).c_str(), ans);
     return r;
@@ -951,10 +953,14 @@ void OnModeChanged() {
     UpdateStatus();
 }
 
+// Classic class names map to the glass controls (tray/glass.h); EDIT and LISTBOX stay native with the glass field look.
 HWND Make(const wchar_t* cls, const wchar_t* text, DWORD style, int x, int y, int w, int h, int id, DWORD ex = 0) {
-    HWND c = CreateWindowExW(ex, cls, text, WS_CHILD | WS_VISIBLE | style, x, y, w, h, g_dlg, (HMENU)(INT_PTR)id,
+    const wchar_t* gc = !_wcsicmp(cls, L"BUTTON") ? glass::kButton : !_wcsicmp(cls, L"STATIC") ? glass::kStatic
+                        : !_wcsicmp(cls, L"COMBOBOX") ? glass::kCombo : cls;
+    HWND c = CreateWindowExW(ex, gc, text, WS_CHILD | WS_VISIBLE | style, x, y, w, h, g_dlg, (HMENU)(INT_PTR)id,
                              GetModuleHandleW(nullptr), nullptr);
     if (g_font) SendMessageW(c, WM_SETFONT, (WPARAM)g_font, TRUE);
+    if (!_wcsicmp(cls, L"EDIT") || !_wcsicmp(cls, L"LISTBOX")) glass::FrameEdit(c);
     return c;
 }
 
@@ -982,16 +988,20 @@ LRESULT CALLBACK ListProc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWOR
 void DrawRow(const DRAWITEMSTRUCT* di) {
     if (di->itemID == (UINT)-1) return;
     const bool sel = (di->itemState & ODS_SELECTED) != 0;
-    FillRect(di->hDC, &di->rcItem, GetSysColorBrush(sel ? COLOR_HIGHLIGHT : COLOR_WINDOW));
+    COLORREF bgc, fgc;
+    glass::ListRowColors(sel, GetFocus() == di->hwndItem, &bgc, &fgc);
+    HBRUSH bgb = CreateSolidBrush(bgc);
+    FillRect(di->hDC, &di->rcItem, bgb);
+    DeleteObject(bgb);
     if (di->itemID >= g_rows.size()) return;
     const Row& r = g_rows[di->itemID];
     const int h = di->rcItem.bottom - di->rcItem.top, box = h - 6 > 16 ? 16 : h - 6;
     RECT cb{di->rcItem.left + 3, di->rcItem.top + (h - box) / 2, di->rcItem.left + 3 + box, di->rcItem.top + (h - box) / 2 + box};
-    DrawFrameControl(di->hDC, &cb, DFC_BUTTON, DFCS_BUTTONCHECK | DFCS_FLAT | (r.enabled ? DFCS_CHECKED : 0) | (Toggleable(r) ? 0 : DFCS_INACTIVE));
+    glass::DrawCheckBox(di->hDC, cb, r.enabled, Toggleable(r));
     SetBkMode(di->hDC, TRANSPARENT);
-    COLORREF fg = GetSysColor(sel ? COLOR_HIGHLIGHTTEXT : COLOR_WINDOWTEXT);
-    if (!sel && r.state == RowState::NeedsRepair) fg = RGB(200, 40, 40);
-    else if (!sel && (r.state == RowState::Only32 || r.state == RowState::NotFound || r.state == RowState::Unknown)) fg = GetSysColor(COLOR_GRAYTEXT);
+    COLORREF fg = fgc;
+    if (r.state == RowState::NeedsRepair) fg = glass::Current().dark ? RGB(255, 153, 164) : RGB(196, 43, 28);
+    else if (r.state == RowState::Only32 || r.state == RowState::NotFound || r.state == RowState::Unknown) fg = glass::Current().textDim;
     SetTextColor(di->hDC, fg);
     const std::wstring cols[3] = {r.name, StateText(r.state, r.repairWhy), r.root};
     const int xs[3] = {kCheckW, kColState, kColFolder}, xe[3] = {kColState - 6, kColFolder - 6, di->rcItem.right - di->rcItem.left - 4};
@@ -1000,7 +1010,7 @@ void DrawRow(const DRAWITEMSTRUCT* di) {
         DrawTextW(di->hDC, cols[i].c_str(), (int)cols[i].size(), &tr,
                   DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | (i == 2 ? DT_PATH_ELLIPSIS : DT_END_ELLIPSIS));
     }
-    if (di->itemState & ODS_FOCUS) DrawFocusRect(di->hDC, &di->rcItem);
+    if ((di->itemState & ODS_FOCUS) && !(di->itemState & ODS_NOFOCUSRECT)) DrawFocusRect(di->hDC, &di->rcItem);
 }
 
 void BuildControls() {
@@ -1012,13 +1022,13 @@ void BuildControls() {
          L"not need this (Register for VR games).",
          SS_LEFT | SS_NOPREFIX, kMargin, 10, w, 64, ID_SVR_INTRO);
     Make(L"STATIC", L"Recording mode:", SS_LEFT | SS_NOPREFIX, kMargin, 82, 110, 18, -1);
-    HWND mode = Make(L"COMBOBOX", L"", WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST, kMargin + 112, 78, w - 112, 200, ID_SVR_MODE);
+    HWND mode = Make(L"COMBOBOX", L"", WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST, kMargin + 112, 78, w - 112, 26, ID_SVR_MODE);
     for (const wchar_t* it : kModeItems) SendMessageW(mode, CB_ADDSTRING, 0, (LPARAM)it);
     Make(L"STATIC", L"", SS_LEFT | SS_NOPREFIX | SS_ENDELLIPSIS, kMargin, 110, w, 18, ID_SVR_STATUS);
     const int hy = 132;
-    Make(L"STATIC", L"Game", SS_LEFT | SS_NOPREFIX, kMargin + 2 + kCheckW, hy, kColState - kCheckW - 4, 18, ID_SVR_HEADER);
-    Make(L"STATIC", L"State", SS_LEFT | SS_NOPREFIX, kMargin + 2 + kColState, hy, kColFolder - kColState - 4, 18, -1);
-    Make(L"STATIC", L"Folder", SS_LEFT | SS_NOPREFIX, kMargin + 2 + kColFolder, hy, w - kColFolder - 4, 18, -1);
+    Make(L"STATIC", L"Game", SS_LEFT | SS_NOPREFIX, kMargin + 8 + kCheckW, hy, kColState - kCheckW - 4, 18, ID_SVR_HEADER);
+    Make(L"STATIC", L"State", SS_LEFT | SS_NOPREFIX, kMargin + 8 + kColState, hy, kColFolder - kColState - 4, 18, -1);
+    Make(L"STATIC", L"Folder", SS_LEFT | SS_NOPREFIX, kMargin + 8 + kColFolder, hy, w - kColFolder - 4, 18, -1);
     HWND lb = Make(L"LISTBOX", L"", WS_VSCROLL | WS_TABSTOP | LBS_NOTIFY | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS | LBS_NOINTEGRALHEIGHT,
                    kMargin, hy + 20, w, 240, ID_SVR_LIST, WS_EX_CLIENTEDGE);
     SetWindowSubclass(lb, ListProc, 1, 0);
@@ -1033,6 +1043,17 @@ void BuildControls() {
     Make(L"BUTTON", L"Repair", WS_TABSTOP | BS_PUSHBUTTON, kMargin + 520, by, 80, 28, ID_SVR_REPAIR);
     Make(L"BUTTON", L"Rescan", WS_TABSTOP | BS_PUSHBUTTON, kMargin + 606, by, 80, 28, ID_SVR_RESCAN);
     Make(L"BUTTON", L"Close", WS_TABSTOP | BS_PUSHBUTTON, kClientW - kMargin - 90, by, 90, 28, ID_SVR_CLOSE);
+}
+
+// Colours that are not the theme's defaults (the column headers in grey); after BuildControls and on a theme change.
+void ApplyGlassTheme() {
+    for (HWND c = GetWindow(g_dlg, GW_CHILD); c; c = GetWindow(c, GW_HWNDNEXT)) {
+        const int id = GetDlgCtrlID(c);
+        wchar_t t[16] = L"";
+        GetWindowTextW(c, t, 16);
+        if (id == ID_SVR_HEADER || (id == -1 && (!wcscmp(t, L"State") || !wcscmp(t, L"Folder")))) glass::SetDim(c, true);
+    }
+    InvalidateRect(GetDlgItem(g_dlg, ID_SVR_LIST), nullptr, TRUE);
 }
 
 LRESULT CALLBACK DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
@@ -1071,12 +1092,21 @@ LRESULT CALLBACK DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_DRAWITEM:
         if (wp == (WPARAM)ID_SVR_LIST) { DrawRow((const DRAWITEMSTRUCT*)lp); return TRUE; }
         break;
-    case WM_CTLCOLORSTATIC:
-        if ((HWND)lp == GetDlgItem(h, ID_SVR_DETAILS)) {   // the read-only details edit: the normal window background
-            SetBkColor((HDC)wp, GetSysColor(COLOR_WINDOW));
-            return (LRESULT)GetSysColorBrush(COLOR_WINDOW);
-        }
-        break;
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORSTATIC:   // the read-only details edit
+    case WM_CTLCOLORLISTBOX:
+        return (LRESULT)glass::EditBrush((HDC)wp, (HWND)lp);
+    case WM_ERASEBKGND: {
+        RECT rc;
+        GetClientRect(h, &rc);
+        glass::PaintBackground(h, (HDC)wp, rc);
+        return 1;
+    }
+    case WM_SETTINGCHANGE:
+    case WM_DWMCOLORIZATIONCOLORCHANGED:
+    case WM_THEMECHANGED:
+        if (glass::OnSettingChange(h)) ApplyGlassTheme();
+        return 0;
     case WM_CLOSE:
         g_done = true;
         return 0;
@@ -1158,6 +1188,8 @@ void ShowDialog(const Options& o) {
         const RepairCheck rc = CheckRepairs(o.installDir, "window opened");
         g_status = rc.games ? std::to_wstring(rc.games) + L" game(s) need a repair (" + rc.names + L"): click Repair." : std::wstring();
     }
+    glass::Init();
+    glass::Reload();   // the theme may have changed while no window was open
     NONCLIENTMETRICSW ncm{sizeof(ncm)};
     if (SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0)) g_font = CreateFontIndirectW(&ncm.lfMessageFont);
     static bool registered = false;
@@ -1167,7 +1199,7 @@ void ShowDialog(const Options& o) {
         wc.hInstance = GetModuleHandleW(nullptr);
         wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
         wc.hIcon = LoadIconW(wc.hInstance, MAKEINTRESOURCEW(1));   // the app icon (tray/tray.rc)
-        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+        wc.hbrBackground = nullptr;   // WM_ERASEBKGND: glass::PaintBackground
         wc.lpszClassName = kWindowClass;
         RegisterClassW(&wc);
         registered = true;
@@ -1183,7 +1215,9 @@ void ShowDialog(const Options& o) {
                             w, h, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
     if (g_dlg) {
         LOGI("tray: steamvr: window opened (list %s)", N(IniPath()).c_str());
+        glass::ApplyWindow(g_dlg);
         BuildControls();
+        ApplyGlassTheme();
         LoadMode();
         Refresh();
         StartScan("window opened");

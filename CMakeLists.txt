@@ -121,14 +121,17 @@ target_link_options(EyeCaptureMirror PRIVATE "/MANIFESTUAC:level='asInvoker' uiA
 # --- tray control app (required: the layer is dormant without it; it also registers the layer, tray/install.cpp) ---
 # tray/steamvr_ui.cpp + tray/steamvr_games.cpp: the "SteamVR games" window (enable / disable the per-game proxy);
 # src/openvr/openvr_hooks.cpp for the sidecar text and the home-key names.
+# tray/glass.cpp: the Windows 11 look (own-drawn controls, Mica) of both windows.
 add_executable(EyeCaptureTray WIN32 tray/tray.cpp tray/postprocess.cpp tray/settings.cpp tray/install.cpp tray/input.cpp
-    tray/steamvr_ui.cpp tray/steamvr_games.cpp src/openvr/openvr_hooks.cpp tray/tray.rc)
+    tray/steamvr_ui.cpp tray/steamvr_games.cpp tray/glass.cpp src/openvr/openvr_hooks.cpp tray/tray.rc)
 target_compile_options(EyeCaptureTray PRIVATE ${EYE_WARN_FLAGS})
 target_link_libraries(EyeCaptureTray PRIVATE eye_capture_core comctl32 comdlg32 dinput8 dxguid advapi32 version)
 target_include_directories(EyeCaptureTray PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tray)
 eye_add_version_info(EyeCaptureTray APP "VR EyeCapture tray app" "EyeCaptureTray.exe")
-# Manifest: runs as the invoking user, never elevates by itself (Common Controls v6 comes from a pragma in tray/settings.cpp).
-target_link_options(EyeCaptureTray PRIVATE "/MANIFESTUAC:level='asInvoker' uiAccess='false'")
+# Manifest: runs as the invoking user, never elevates by itself (Common Controls v6 comes from a pragma in tray/settings.cpp);
+# tray/compat.manifest declares Windows 10 / 11 (layered child windows for the glass look's edit fields).
+target_link_options(EyeCaptureTray PRIVATE "/MANIFESTUAC:level='asInvoker' uiAccess='false'"
+    "/MANIFESTINPUT:${CMAKE_CURRENT_SOURCE_DIR}/tray/compat.manifest")
 
 # --- live share consumer (obs/live_consumer.cpp): no libobs; used by the OBS plugin and tests/live_share_test ---
 add_library(eye_live_consumer STATIC obs/live_consumer.cpp)
@@ -175,6 +178,22 @@ if (EYE_BUILD_TESTS)
     target_link_libraries(encoder_selftest PRIVATE eye_capture_core)
     target_include_directories(encoder_selftest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
 
+    # The glass controls answer the classic BUTTON / COMBOBOX / trackbar / progress / SysLink messages; the own message dialog.
+    add_executable(glass_test tests/glass_test.cpp tray/glass.cpp)
+    target_compile_options(glass_test PRIVATE ${EYE_WARN_FLAGS})
+    target_compile_definitions(glass_test PRIVATE UNICODE _UNICODE NOMINMAX)
+    target_include_directories(glass_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tray)
+    target_link_libraries(glass_test PRIVATE comctl32)
+    target_link_options(glass_test PRIVATE "/MANIFESTINPUT:${CMAKE_CURRENT_SOURCE_DIR}/tray/compat.manifest")
+
+    # The glass look of the tray windows (tray/glass.cpp), one of each control, for screenshots. Not shipped.
+    add_executable(glass_demo WIN32 tests/glass_demo.cpp tray/glass.cpp)
+    target_compile_options(glass_demo PRIVATE ${EYE_WARN_FLAGS})
+    target_compile_definitions(glass_demo PRIVATE UNICODE _UNICODE NOMINMAX)
+    target_include_directories(glass_demo PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tray)
+    target_link_libraries(glass_demo PRIVATE comctl32)
+    target_link_options(glass_demo PRIVATE "/MANIFESTINPUT:${CMAKE_CURRENT_SOURCE_DIR}/tray/compat.manifest")
+
     # Plays the layer's side of the tray IPC (ready/recording/stopping/saved) on a private block, for testing the tray's post-processing.
     add_executable(status_sim tests/status_sim.cpp)
     target_compile_options(status_sim PRIVATE ${EYE_WARN_FLAGS})
@@ -192,7 +211,7 @@ if (EYE_BUILD_TESTS)
     target_link_libraries(control_final_test PRIVATE eye_capture_core)
 
     # Settings window: config.ini writer (in-place edit, validation, hotkey names) + driver for the real dialog (no GPU).
-    add_executable(settings_test tests/settings_test.cpp tray/settings.cpp tray/install.cpp tray/input.cpp)
+    add_executable(settings_test tests/settings_test.cpp tray/settings.cpp tray/install.cpp tray/input.cpp tray/glass.cpp)
     target_compile_options(settings_test PRIVATE ${EYE_WARN_FLAGS})
     target_link_libraries(settings_test PRIVATE eye_capture_core comctl32 advapi32 dinput8 dxguid)
     target_include_directories(settings_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tray)
