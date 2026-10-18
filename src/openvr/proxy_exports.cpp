@@ -36,6 +36,8 @@ INIT_ONCE g_once = INIT_ONCE_STATIC_INIT;
 const char* const kAccessorNames[] = {
     "LiquidVR", "VRCompositorSystemInternal", "VRControlPanel", "VRDriverDirectInternal", "VRHeadsetView",
     "VRPaths", "VRRenderModelsInternal", "VRSceneGraph", "VRTrackedCameraInternal", "VRVirtualDisplay",
+    // older Valve DLLs (not in 1.13.10): a game whose own DLL has them could not be enabled before
+    "VRDashboardManager", "VROculusDirect", "VROverlayView",
 };
 const int kAccessorCount = (int)(sizeof(kAccessorNames) / sizeof(kAccessorNames[0]));
 
@@ -52,7 +54,7 @@ std::wstring ProxyDir() {
 
 } // namespace
 
-extern "C" void* g_eyecapAccessors[10] = {};   // read by accessor_stubs.asm (0 = not resolved yet)
+extern "C" void* g_eyecapAccessors[13] = {};   // read by accessor_stubs.asm (0 = not resolved yet)
 
 namespace {
 

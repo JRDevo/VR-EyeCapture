@@ -71,6 +71,9 @@ ACCESSOR VRRenderModelsInternal, 6
 ACCESSOR VRSceneGraph, 7
 ACCESSOR VRTrackedCameraInternal, 8
 ACCESSOR VRVirtualDisplay, 9
+ACCESSOR VRDashboardManager, 10
+ACCESSOR VROculusDirect, 11
+ACCESSOR VROverlayView, 12
 
 _TEXT ENDS
 END

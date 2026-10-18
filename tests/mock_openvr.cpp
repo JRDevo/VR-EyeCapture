@@ -568,6 +568,9 @@ ACC(VRRenderModelsInternal)
 ACC(VRSceneGraph)
 ACC(VRTrackedCameraInternal)
 ACC(VRVirtualDisplay)
+ACC(VRDashboardManager)   // older Valve DLLs only (the proxy passes them through like the rest)
+ACC(VROculusDirect)
+ACC(VROverlayView)
 #undef ACC
 
 // Test only: out[0..8] = submits L, R, waitgetposes, fntable submits, invalid, stub calls, accessor calls, shutdowns,

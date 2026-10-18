@@ -4,6 +4,8 @@
 ; Deliberately the 1.13.x set: newer Valve DLLs (2.x, e.g. 2.15.6) export a SUBSET of these 23 names, older games still
 ; import the extra ones (VRCompositorSystemInternal, VRDriverDirectInternal, VRRenderModelsInternal, VRSceneGraph,
 ; VRTrackedCameraInternal); the tray refuses to enable a game whose DLL exports a name missing here (MissingExports).
+; Plus three accessors of older Valve DLLs that 1.13.10 no longer has (VRDashboardManager, VROculusDirect, VROverlayView,
+; e.g. the openvr_api.dll of UE4 games such as CYBRID): the same pass-through stubs, so those games can be enabled too.
 LIBRARY openvr_api
 EXPORTS
     LiquidVR
@@ -16,6 +18,9 @@ EXPORTS
     VRSceneGraph
     VRTrackedCameraInternal
     VRVirtualDisplay
+    VRDashboardManager
+    VROculusDirect
+    VROverlayView
     VR_GetGenericInterface
     VR_GetInitToken
     VR_GetRuntimePath

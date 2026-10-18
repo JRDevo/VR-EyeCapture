@@ -126,12 +126,13 @@ int main() {
         size_t valveExports = 0;
         for (const char* e : {"LiquidVR", "VRCompositorSystemInternal", "VRControlPanel", "VRDriverDirectInternal", "VRHeadsetView",
                               "VRPaths", "VRRenderModelsInternal", "VRSceneGraph", "VRTrackedCameraInternal", "VRVirtualDisplay",
+                              "VRDashboardManager", "VROculusDirect", "VROverlayView",   // older Valve DLLs (CYBRID)
                               "VR_GetGenericInterface", "VR_GetInitToken", "VR_GetRuntimePath", "VR_GetStringForHmdError",
                               "VR_GetVRInitErrorAsEnglishDescription", "VR_GetVRInitErrorAsSymbol", "VR_InitInternal",
                               "VR_InitInternal2", "VR_IsHmdPresent", "VR_IsInterfaceVersionValid", "VR_IsRuntimeInstalled",
                               "VR_RuntimePath", "VR_ShutdownInternal"})
             for (const std::string& x : p.exports) if (x == e) { ++valveExports; break; }
-        Check(valveExports == 23 && p.exports.size() == 24, "proxy exports all 23 Valve names (not forwarded) + EyeCaptureProxyVersion (" +
+        Check(valveExports == 26 && p.exports.size() == 27, "proxy exports all 26 Valve names (not forwarded) + EyeCaptureProxyVersion (" +
               std::to_string(p.exports.size()) + " exports)");
         Check(none.kind == DllKind::Missing, "missing file");
         const DllInfo v = InspectDll(valve);

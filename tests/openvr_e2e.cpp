@@ -146,14 +146,16 @@ int wmain(int argc, wchar_t** argv) {
     auto pLiquid = (PFN_Liquid)P("LiquidVR");
     auto pPaths = (PFN_Paths)P("VRPaths");
     auto pHeadset = (PFN_Acc)P("VRHeadsetView");
+    auto pOverlayView = (PFN_Acc)P("VROverlayView");   // one of the three older-DLL accessors (stub index 12, the last)
     auto pVer = (const char* (*)())P("EyeCaptureProxyVersion");
-    if (!pInit2 || !pShutdown || !pGet || !pLiquid || !pPaths || !pHeadset || !pVer) { printf("openvr_e2e FAIL: exports\n"); return 1; }
+    if (!pInit2 || !pShutdown || !pGet || !pLiquid || !pPaths || !pHeadset || !pOverlayView || !pVer) { printf("openvr_e2e FAIL: exports\n"); return 1; }
 
     // accessor stubs FIRST (slow path: the stub itself makes the proxy load the real DLL), then again (fast path)
     const double liq = pLiquid(1.0, 2.0, 3.0, 4.0);
     const uint64_t paths = pPaths(1, 2, 3, 4, 5);
     const double liq2 = pLiquid(5.0, 6.0, 7.0, 8.0);
     void* hv = pHeadset();
+    void* ov = pOverlayView();
     HMODULE real = GetModuleHandleW(L"openvr_api_real.dll");
     void* (*dummy)() = real ? (void* (*)())GetProcAddress(real, "MockOpenVrDummyAccessor") : nullptr;
     printf("accessor stubs: LiquidVR(1,2,3,4) = %.0f, VRPaths(1..5) = %llu, LiquidVR(5,6,7,8) = %.0f, VRHeadsetView() = %p; proxy v%s\n",
@@ -161,6 +163,7 @@ int wmain(int argc, wchar_t** argv) {
     if (liq != 1234.0 || liq2 != 5678.0) Fail("LiquidVR through the jump stub (xmm0..3 not preserved?)");
     if (paths != 12345) Fail("VRPaths through the jump stub (integer / stack arguments not preserved?)");
     if (!dummy || hv != dummy()) Fail("VRHeadsetView through the jump stub");
+    if (!dummy || ov != dummy()) Fail("VROverlayView through the jump stub (older-DLL accessor)");
     if (!pHmd || !pHmd()) Fail("VR_IsHmdPresent");
     char rt[260] = "";
     uint32_t need = 0;
