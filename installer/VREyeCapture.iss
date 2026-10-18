@@ -5,6 +5,8 @@
 ;     plus installed.txt, the marker that makes the program keep the user's data outside the read-only program folder
 ;     (config %APPDATA%\VR EyeCapture, logs and lists %LOCALAPPDATA%\VR EyeCapture, recordings <Videos>\VR EyeCapture);
 ;   - a Start menu entry; the OpenXR layer registration (EyeCaptureTray.exe --register, HKLM, while the installer is elevated);
+;   - a "Start VR EyeCapture with Windows" task (on by default): EyeCaptureTray.exe --autostart on / off as the signed-in
+;     user (start_with_windows in that user's config.ini + the HKCU Run value, the same switch as in the app window);
 ;   - "Start VR EyeCapture now" at the end (as the signed-in user, not elevated).
 ; Uninstall (Windows Settings > Apps, or the tray menu "Remove VR EyeCapture from this PC..."):
 ;   EyeCaptureTray.exe --quit (closes the running tray of this folder), --uninstall-cleanup (the original openvr_api.dll back
@@ -64,8 +66,15 @@ Source: "{#StageDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs c
 [Icons]
 Name: "{group}\VR EyeCapture"; Filename: "{app}\EyeCaptureTray.exe"; Comment: "Stereo 3D recorder for VR games"
 
+[Tasks]
+; recording needs the tray running before the game starts; the app window's "Start with Windows" is the same switch
+Name: "autostart"; Description: "Start VR EyeCapture with Windows (recording only works while it runs)"
+
 [Run]
 Filename: "{app}\EyeCaptureTray.exe"; Parameters: "--register"; StatusMsg: "Registering VR EyeCapture for OpenXR games..."; Flags: runhidden waituntilterminated
+; as the signed-in user (not elevated): that user's config.ini (start_with_windows) and HKCU Run value
+Filename: "{app}\EyeCaptureTray.exe"; Parameters: "--autostart on"; Tasks: autostart; Flags: runhidden waituntilterminated runasoriginaluser
+Filename: "{app}\EyeCaptureTray.exe"; Parameters: "--autostart off"; Tasks: not autostart; Flags: runhidden waituntilterminated runasoriginaluser
 Filename: "{app}\EyeCaptureTray.exe"; Description: "Start VR EyeCapture now"; Flags: postinstall nowait runasoriginaluser skipifsilent
 
 [UninstallRun]
@@ -73,6 +82,25 @@ Filename: "{app}\EyeCaptureTray.exe"; Parameters: "--quit"; Flags: runhidden wai
 Filename: "{app}\EyeCaptureTray.exe"; Parameters: "--uninstall-cleanup"; Flags: runhidden waituntilterminated; RunOnceId: "Cleanup"
 
 [Code]
+// After the UAC prompt the elevated setup window could open BEHIND Explorer (Windows' foreground lock: it is a new
+// process). When its first page shows, it is lifted to the top (topmost on / off: allowed for an own window without the
+// foreground right) and then asked for the focus (BringToFrontAndRestore).
+function SetWindowPos(Wnd: HWND; After: HWND; X, Y, CX, CY: Integer; Flags: UINT): BOOL;
+  external 'SetWindowPos@user32.dll stdcall';
+
+var
+  RaisedOnce: Boolean;
+
+procedure CurPageChanged(CurPageID: Integer);
+begin
+  if RaisedOnce then Exit;
+  RaisedOnce := True;
+  // HWND_TOPMOST = -1, HWND_NOTOPMOST = -2; SWP_NOMOVE or SWP_NOSIZE or SWP_SHOWWINDOW = $0043
+  SetWindowPos(WizardForm.Handle, -1, 0, 0, 0, 0, $0043);
+  SetWindowPos(WizardForm.Handle, -2, 0, 0, 0, 0, $0043);
+  BringToFrontAndRestore;
+end;
+
 // An update: close the tray of the installed copy before its files are replaced.
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var

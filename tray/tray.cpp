@@ -1545,6 +1545,37 @@ int RunQuit() {
     return left ? 1 : 0;
 }
 
+// EyeCaptureTray.exe --autostart on|off: the installer's "Start VR EyeCapture with Windows" task (run as the signed-in user,
+// not elevated). The same as ticking / clearing "Start with Windows" in the app window and clicking Save: start_with_windows
+// in the user's config.ini (seeded from the template first on an installed copy) and the HKCU Run value. A user choice, so
+// it may write the Run value (never StartupApproved). Exit code 0 = done, 1 = failed (printed / logged), 2 = usage.
+int RunAutostartCli(const std::wstring& a) {
+    const std::wstring v = a.size() > 12 ? a.substr(12) : L"";
+    if (v != L"on" && v != L"off") { CliPrint(L"usage: EyeCaptureTray.exe --autostart on|off"); return 2; }
+    const bool on = v == L"on";
+    g_exeDir = ExeDir();
+    elog::Init(LogsDir(g_exeDir) + L"\\tray.log", false);
+    ApplyTestRunKey(GetEnvironmentVariableW(L"EYECAP_TRAY_TEST_SHM", nullptr, 0) > 0);
+    SeedAppDataConfig(g_exeDir);
+    settings::SaveResult r;
+    if (!settings::SaveKeyValuesToFile(ConfigPath(g_exeDir), {{L"start_with_windows", on ? L"1" : L"0"}}, r)) {
+        std::wstring m;
+        for (const auto& p : r.problems) m += p + L" ";
+        CliPrint(L"error: config.ini: " + m);
+        LOGW("tray: --autostart %s: config.ini not written: %s", on ? "on" : "off", elog::Narrow(m).c_str());
+        return 1;
+    }
+    std::wstring err;
+    if (!install::SetAutostart(on, g_exeDir, err)) {
+        CliPrint(L"error: " + err);
+        LOGW("tray: --autostart %s: %s", on ? "on" : "off", elog::Narrow(err).c_str());
+        return 1;
+    }
+    LOGI("tray: --autostart %s: start_with_windows = %d, Run value %s", on ? "on" : "off", on ? 1 : 0, on ? "written" : "deleted");
+    CliPrint(on ? L"start with Windows: on" : L"start with Windows: off");
+    return 0;
+}
+
 // EyeCaptureTray.exe --uninstall-cleanup: what the uninstaller runs (elevated, the user's account) before it deletes the
 // files: puts the original openvr_api.dll back in every SteamVR game the user enabled, deletes the HKCU Home value, the
 // "Start with Windows" Run value(s) and the HKLM OpenXR layer registration (+ HKCU duplicates). Never asks (the uninstaller
@@ -1731,6 +1762,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
         if (a == L"--register" || a == L"--unregister") return RunRegCli(a);
         if (a == L"--quit") return RunQuit();
         if (a == L"--uninstall-cleanup") return RunUninstallCleanup();
+        if (a.compare(0, 11, L"--autostart") == 0) return RunAutostartCli(a);
         if (a == L"--inputs" || a.compare(0, 9, L"--inputs ") == 0) return RunInputs(a);
     }
     // Test-only: EYECAP_TRAY_TEST_SHM=<name> runs an extra tray instance on a private status block (no single-instance
