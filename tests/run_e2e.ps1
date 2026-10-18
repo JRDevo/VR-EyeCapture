@@ -42,6 +42,12 @@ if ($BuildLayer) {
     $layerLog = Join-Path $bin 'logs\eye_capture.log'
     Write-Host "-BuildLayer: testing $bin\eye_capture.dll (registered copy disabled for these processes)" -ForegroundColor Yellow
 }
+# every copy reads %APPDATA%\VR EyeCapture\config.ini first (config.cpp ConfigPath): on a PC with the installed app that is
+# the user's own config (codec, size, layout), so the checks below would test it instead of the defaults. An empty APPDATA
+# for these processes -> the config next to the DLL (or the defaults). The real APPDATA is not touched.
+$appDataTest = Join-Path $root 'build\e2e_appdata'
+New-Item -ItemType Directory -Force $appDataTest | Out-Null
+$env:APPDATA = $appDataTest
 $exe = Join-Path $bin 'layer_e2e.exe'
 if (-not (Test-Path $exe)) { throw "build first: $exe" }
 $results = @()

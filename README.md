@@ -926,8 +926,8 @@ thread or GPU queue.
 
 
 See [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md). Short version: Visual Studio 2022, then
-`powershell -ExecutionPolicy Bypass -File scripts\package.ps1`. It makes two zips in `dist\`: the main one and the
-separate OBS plugin zip (build notes for the plugin: [`obs/README.md`](obs/README.md)).
+`powershell -ExecutionPolicy Bypass -File scripts\package.ps1`. It makes the installer `VR-EyeCapture-Setup-v<version>.exe` and the
+separate `VR-EyeCapture-OBS-v<version>.zip` in `dist\` (build notes for the plugin: [`obs/README.md`](obs/README.md)).
 
 </details>
 
@@ -957,7 +957,7 @@ app window → Advanced → **Open log**):
 - Headset and runtime (e.g. Quest 3 via Virtual Desktop / VDXR, SteamVR).
 - GPU and driver version.
 - Windows version.
-- Tool version (the name of the zip you downloaded).
+- Tool version (the setup file name, or the `v...` line at the top of `tray.log`).
 - What you pressed and what happened (beeps heard, tray icon colour).
 - Other OpenXR layers or mods in use (the DLAA injector, OpenXR Toolkit, etc.).
 

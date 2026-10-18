@@ -2,7 +2,7 @@
 
 - **OpenXR SDK** (Khronos Group), <https://github.com/KhronosGroup/OpenXR-SDK>, tag `release-1.1.62`, fetched by CMake at
   configure time. License: Apache-2.0 (headers: Apache-2.0 OR MIT). The layer DLL uses only the headers. The OpenXR
-  loader (`openxr_loader.dll`) is built for the test programs and is not part of the release zip.
+  loader (`openxr_loader.dll`) is built for the test programs and is not part of the installer.
 - **OpenVR SDK header** (Valve Corporation), <https://github.com/ValveSoftware/openvr>, `headers/openvr.h`. License:
   BSD-3-Clause (the notice below; it is also at the top of `third_party/openvr/openvr.h`). `third_party/openvr/openvr.h` is
   a hand-written minimal subset DERIVED from Valve's header (types, enums, interface method orders and the function-table

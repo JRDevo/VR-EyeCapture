@@ -780,8 +780,10 @@ const Help kHelp[] = {
     {ID_SAVE, L"Saves the changes to config.ini. The window stays open. The next recording uses them."},
     {ID_MINIMIZE, L"Minimizes the window to the taskbar."},
     {ID_CANCEL, L"Closes the window. If you have unsaved changes, it asks first. The tray app keeps running."},
-    {ID_ABOUTLINK, L"The project page on GitHub: downloads, the latest version, the manual and bug reports." HELP_BR
-                   L"Free for noncommercial use (PolyForm Noncommercial License 1.0.0). Copyright (c) 2026 JRDevo."},
+    {ID_ABOUTLINK, L"The project page on GitHub: downloads, the manual and bug reports." HELP_BR
+                   L"• License: PolyForm Noncommercial 1.0.0. Copyright (c) 2026 JRDevo."
+                   HELP_LI L"Your recordings are yours: you may publish them and earn money from them (ads, sponsors, streams, paid content)."
+                   HELP_LI L"Do not sell the tool or put it in a paid product or service without written permission."},
 };
 #undef HELP_BR
 #undef HELP_LI
@@ -2761,7 +2763,7 @@ int BuildControls(HWND dlg, Builder::Pass pass, int clientW, int clientH, int sc
     // the project link and the copyright / licence line, right-aligned on the note's row (above the background strip)
     HWND about = b.Make(WC_LINK,
         L"<a href=\"https://github.com/JRDevo/VR-EyeCapture\">github.com/JRDevo/VR-EyeCapture</a> · Copyright (c) 2026 JRDevo · "
-        L"<a href=\"https://polyformproject.org/licenses/noncommercial/1.0.0\">PolyForm Noncommercial License 1.0.0</a>",
+        L"<a href=\"https://github.com/JRDevo/VR-EyeCapture/blob/master/LICENSE.md\">License: noncommercial, recordings are yours</a>",
         WS_TABSTOP | LWS_RIGHT, gx + noteW + 12, fy + 9, gw - noteW - 12, 16, ID_ABOUTLINK);
     b.Tip(about, HelpText(ID_ABOUTLINK));
     keep(g_footer, about);
