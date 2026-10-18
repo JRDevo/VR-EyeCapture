@@ -1350,6 +1350,15 @@ LRESULT CALLBACK EditSubclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, 
         if (GetWindowLongW(h, GWL_STYLE) & WS_VSCROLL) return DefSubclassProc(h, msg, wp, lp);
         return 0;
     }
+    case WM_WINDOWPOSCHANGED: {
+        const WINDOWPOS* wp2 = (const WINDOWPOS*)lp;
+        if (!(wp2->flags & SWP_NOSIZE) && (GetWindowLongW(h, GWL_EXSTYLE) & WS_EX_LAYERED)) {
+            // a layered child keeps its old surface when it grows: the new strip stays black / white until something repaints
+            // it. Setting the window region (a plain rectangle: the field is square) repaints the frame and the client.
+            SetWindowRgn(h, CreateRectRgn(0, 0, wp2->cx, wp2->cy), TRUE);
+        }
+        break;
+    }
     case WM_SETFOCUS:
     case WM_KILLFOCUS:
     case WM_ENABLE: {
