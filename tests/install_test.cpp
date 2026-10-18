@@ -341,6 +341,23 @@ int RunAll() {
             Check(install::AutostartStalePath(dirA).empty(), "stale path for C:\\A: none");
             Check(install::AutostartStalePath(dirB) == L"C:\\A\\EyeCaptureTray.exe", "stale path for C:\\B: C:\\A\\EyeCaptureTray.exe");
             Check(GetRunStr(L"VR EyeCapture", &stored) && stored == install::AutostartCommand(dirA), "the read calls changed nothing");
+            // the Settings check box asks AutostartPointsHere(ReadAutostart(), ExeFolder()), ExeFolder() = the exe path minus the file
+            // name (no trailing backslash); other spellings of the same folder must agree
+            Check(install::AutostartPointsHere(i1, L"C:\\A\\") && install::AutostartPointsHere(i1, L"C:/A") &&
+                      install::AutostartPointsHere(i1, L"C:\\A\\.") , "points at C:\\A with a trailing backslash / forward slash / dot spelling");
+        }
+        {   // a real folder (the scratch dir the registration tests use): written by SetAutostart(true), read back by the check-box rule
+            wchar_t tmp[MAX_PATH] = {};
+            GetTempPathW(MAX_PATH, tmp);
+            std::wstring real = tmp;
+            while (real.size() > 3 && real.back() == L'\\') real.pop_back();   // like ExeFolder(): no trailing backslash
+            Check(install::SetAutostart(true, real, err), "SetAutostart(true) for a real folder");
+            const install::AutostartInfo ir = install::ReadAutostart();
+            Check(ir.runPresent && !ir.oldPresent && !ir.disabledInTaskManager, "ReadAutostart: the VR EyeCapture value only");
+            Check(install::AutostartPointsHere(ir, real) && install::AutostartPointsHere(ir, real + L"\\"),
+                  "real folder: AutostartPointsHere(ReadAutostart(), same folder) is true (the Settings check box ticks)");
+            Check(install::SetAutostart(true, dirA, err) && install::AutostartPointsHere(install::ReadAutostart(), dirA),
+                  "SetAutostart(true) back to C:\\A");
         }
         // the user disabled it in Task Manager (odd first byte): reads as off, the record is never rewritten
         ApprovedWriteByte0(3);
