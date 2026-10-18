@@ -165,12 +165,12 @@ try {
     $odd = Join-Path $t 'other\Odd Game'; Exe $odd 'Odd Game'; Copy-Item $mock (Join-Path $odd 'openvr_api.dll')
     PickExe (Join-Path $odd 'Odd Game.exe')
     $r = Svr @('enable', 'answers=OK')
-    Step 'Odd Game: the plan says "exports MockOpenVrCounts ..., which VR EyeCapture''s proxy does not; not enabled", nothing changed' ($r.text -match 'BOX: Odd Game: nothing to enable\..*exports MockOpenVrCounts.*which VR EyeCapture''s proxy does not; not enabled' -and (Hash (Join-Path $odd 'openvr_api.dll')) -eq (Hash $mock) -and -not (Test-Path (Join-Path $odd 'openvr_api_real.dll')) -and $r.rows.Count -eq 5)
+    Step 'Odd Game: the box says it cannot be recorded: "has functions that VR EyeCapture''s copy does not have (MockOpenVrCounts ...)", nothing changed' ($r.text -match 'BOX: Odd Game cannot be recorded through SteamVR\..*has functions that VR EyeCapture''s copy does not have \(.*MockOpenVrCounts.*replacing it could crash the game' -and (Hash (Join-Path $odd 'openvr_api.dll')) -eq (Hash $mock) -and -not (Test-Path (Join-Path $odd 'openvr_api_real.dll')) -and $r.rows.Count -eq 5)
 
     Write-Host '-- tick Fake Unity'
-    $r = Svr @('toggle', 'row=Fake Unity', 'answers=Yes,OK')
-    Step 'tick Fake Unity: confirmation lists the 64-bit folder and the 32-bit one (skipped)' ($r.text -match 'BOX: Enable SteamVR recording for Fake Unity\?.*Plugins\\x86_64\|\s+will be enabled' -and $r.text -match 'Plugins\\x86\|\s+32-bit -- not supported, skipped')
-    Step 'tick Fake Unity: result box names ScrollLock and the one-click repair' ($r.text -match 'BOX: SteamVR recording is enabled for Fake Unity\..*press ScrollLock to record.*tells you at its next start; one click on Repair puts it back')
+    $r = Svr @('toggle', 'row=Fake Unity', 'answers=Yes')
+    Step 'tick Fake Unity: confirmation lists the 64-bit folder and the 32-bit one (skipped)' ($r.text -match 'BOX: Enable SteamVR recording for Fake Unity\?\|\|Close the game and SteamVR first\..*\u2022 .*Plugins\\x86_64\|\s+Will be enabled\.' -and $r.text -match 'Plugins\\x86\|\s+Skipped: 32-bit games are not supported\.')
+    Step 'tick Fake Unity: no result box after a success (the row turns On)' ($r.text -notmatch 'BOX: SteamVR recording is enabled for')
     Step 'tick Fake Unity: proxy in place, Valve''s DLL kept as openvr_api_real.dll, 32-bit copy untouched, row On' ((Hash (Join-Path $u64 'openvr_api.dll')) -eq $hProxy -and (Hash (Join-Path $u64 'openvr_api_real.dll')) -eq $hValve -and (Hash (Join-Path $u32 'openvr_api.dll')) -eq $h32 -and (Row $r 'Fake Unity') -match '\| On \|')
     $side = Get-Content (Join-Path $u64 'eye_capture_proxy.ini') -Raw -ErrorAction SilentlyContinue
     Step 'tick Fake Unity: sidecar home = the tray folder; [game] with appid 1001' ($side -match [regex]::Escape("home = $t") -and (Get-Content $ini -Raw) -match '(?ms)^\[game\]\r?\nname = Fake Unity\r?\nexe = \r?\nroot = .*?appid = 1001')
@@ -184,18 +184,18 @@ try {
     Step 'click AC Game: No -> unchanged, still Off' ((Hash (Join-Path $a 'openvr_api.dll')) -eq $hValve -and -not (Test-Path (Join-Path $a 'openvr_api_real.dll')) -and (Row $r 'AC Game') -match '\| Off \|')
 
     Write-Host '-- Enable all'
-    $r = Svr @('enableall', 'answers=Yes,OK')
-    Step 'Enable all: asks for Second VR only, lists AC (anti-cheat), OC and Old as skipped' ($r.text -match 'BOX: Enable SteamVR recording for these games\?\|\|  Second VR\|\|Skipped:\|  AC Game -- anti-cheat.*\|  OC Game -- OpenComposite.*\|  Old Game -- 32-bit')
-    Step 'Enable all: Second VR On (proxy in place), AC Game still Off' ((Hash (Join-Path $s 'openvr_api.dll')) -eq $hProxy -and (Row $r 'Second VR') -match '\| On \|' -and (Row $r 'AC Game') -match '\| Off \|' -and $r.text -match 'BOX: SteamVR recording enabled for 1 of 1 game')
+    $r = Svr @('enableall', 'answers=Yes')
+    Step 'Enable all: asks for Second VR only, lists AC (anti-cheat), OC and Old as skipped' ($r.text -match 'BOX: Enable SteamVR recording for these games\?\|\|Close the games and SteamVR first\.\|\|\u2022 Second VR\|\|Skipped:\|\u2022 AC Game: anti-cheat.*\|\u2022 OC Game: OpenComposite.*\|\u2022 Old Game: 32-bit')
+    Step 'Enable all: Second VR On (proxy in place), AC Game still Off, no result box' ((Hash (Join-Path $s 'openvr_api.dll')) -eq $hProxy -and (Row $r 'Second VR') -match '\| On \|' -and (Row $r 'AC Game') -match '\| Off \|' -and $r.text -notmatch 'BOX: SteamVR recording enabled for')
 
     Write-Host '-- tick OC Game (OpenComposite)'
-    $r = Svr @('toggle', 'row=OC Game', 'answers=Yes,Yes,OK')
+    $r = Svr @('toggle', 'row=OC Game', 'answers=Yes,Yes')
     Step 'tick OC Game: asks to restore SteamVR''s openvr_api.dll first (alternatives)' ($r.text -match 'BOX: OpenComposite is installed for OC Game in.*alternatives for the same game.*Restore SteamVR''s openvr_api\.dll here first\?')
     Step 'tick OC Game: restored + On: proxy, real = Valve''s, OpenComposite kept as .opencomposite' ((Hash (Join-Path $o 'openvr_api.dll')) -eq $hProxy -and (Hash (Join-Path $o 'openvr_api_real.dll')) -eq $hValve -and (Hash (Join-Path $o 'openvr_api.dll.opencomposite')) -eq $hOc -and (Row $r 'OC Game') -match '\| On \|')
 
     Write-Host '-- Exe Game by exe'
     PickExe (Join-Path $x 'Exe Game.exe')
-    $r = Svr @('enable', 'answers=Yes,OK')
+    $r = Svr @('enable', 'answers=Yes')
     Step 'Add a game by exe: Exe Game On (6 rows)' ((Hash (Join-Path $x 'openvr_api.dll')) -eq $hProxy -and (Row $r 'Exe Game') -match '\| On \|' -and $r.rows.Count -eq 6)
 
     Write-Host '-- repair check at tray start (detect only), the balloon click, Repair'
@@ -234,25 +234,25 @@ try {
     $hold.Dispose(); $hold = $null
 
     Write-Host '-- untick / Disable / Disable all / Unregister'
-    $r = Svr @('toggle', 'row=Fake Unity', 'answers=Yes,OK')
+    $r = Svr @('toggle', 'row=Fake Unity', 'answers=Yes')
     Step 'untick Fake Unity: Valve''s DLL back, no real / sidecar, row Off' ((Hash (Join-Path $u64 'openvr_api.dll')) -eq $hValve -and -not (Test-Path (Join-Path $u64 'openvr_api_real.dll')) -and -not (Test-Path (Join-Path $u64 'eye_capture_proxy.ini')) -and (Row $r 'Fake Unity') -match '\| Off \|')
-    $r = Svr @('reenable', 'row=Exe Game', 'answers=Yes,OK')
-    Step 'Re-enable Exe Game (the click repairs it): confirmation "enabled again (the game was updated)" + On' ($r.text -match 'BOX: Re-enable SteamVR recording for Exe Game\?.*will be enabled again \(the game was updated\)' -and (Hash (Join-Path $x 'openvr_api.dll')) -eq $hProxy -and (Row $r 'Exe Game') -match '\| On \|')
-    $r = Svr @('disable', 'row=Exe Game', 'answers=Yes,OK')
+    $r = Svr @('reenable', 'row=Exe Game', 'answers=Yes')
+    Step 'Re-enable Exe Game (the click repairs it): confirmation "enabled again (the game was updated)" + On' ($r.text -match 'BOX: Re-enable SteamVR recording for Exe Game\?.*Will be enabled again \(the game was updated\)\.' -and (Hash (Join-Path $x 'openvr_api.dll')) -eq $hProxy -and (Row $r 'Exe Game') -match '\| On \|')
+    $r = Svr @('disable', 'row=Exe Game', 'answers=Yes')
     Step 'Disable Exe Game: original back, row gone (not a Steam game)' ((Hash (Join-Path $x 'openvr_api.dll')) -eq $hValve -and (Row $r 'Exe Game') -eq '' -and $r.rows.Count -eq 5)
     Step 'Home key kept while games are still enabled' ((Get-ItemProperty -Path "HKCU:\$homeKey" -Name Home -ErrorAction SilentlyContinue).Home -eq $t)
     $r = Svr @('disableall', 'answers=No')
-    Step 'Disable all, answered No: the confirmation lists OC Game and Second VR; nothing changed' ($r.text -match 'BOX: Disable SteamVR recording for all 2 game\(s\)\?\|\|  OC Game\|  Second VR\|' -and (Hash (Join-Path $s 'openvr_api.dll')) -eq $hProxy -and (Hash (Join-Path $o 'openvr_api.dll')) -eq $hProxy -and $r.text -match 'BUTTONS: .*disableall=1')
+    Step 'Disable all, answered No: the confirmation lists OC Game and Second VR; nothing changed' ($r.text -match 'BOX: Disable SteamVR recording for all 2 game\(s\)\?\|\|Close the games and SteamVR first\.\|\|\u2022 OC Game\|\u2022 Second VR\|' -and (Hash (Join-Path $s 'openvr_api.dll')) -eq $hProxy -and (Hash (Join-Path $o 'openvr_api.dll')) -eq $hProxy -and $r.text -match 'BUTTONS: .*disableall=1')
     [System.IO.File]::WriteAllText($askFile, "Yes`r`nYes`r`n", $utf8)
     $null = Svr @('unregister')
     $log = LogText
     Step 'Unregister: asks "Also put the original openvr_api.dll back in 2 SteamVR game(s)?" (Yes)' ($log -match 'question box: Unregister VR EyeCapture from OpenXR games\?[\s\S]*?-> Yes \(test mode\)' -and $log -match 'question box: Also put the original openvr_api\.dll back in 2 SteamVR game\(s\)\?[\s\S]*?OC Game[\s\S]*?Second VR[\s\S]*?-> Yes \(test mode\)')
     Step 'Unregister: both games disabled (originals back, .opencomposite kept), no [game] left, registry part skipped in test mode' ((Hash (Join-Path $s 'openvr_api.dll')) -eq $hValve -and (Hash (Join-Path $o 'openvr_api.dll')) -eq $hValve -and (Hash (Join-Path $o 'openvr_api.dll.opencomposite')) -eq $hOc -and (Get-Content $ini -Raw) -notmatch '(?m)^\[game\]' -and $log -match 'disable all \(unregister\): 2 of 2 game\(s\) disabled' -and $log -match 'balloon \[SteamVR games\] SteamVR recording disabled for 2 of 2 game\(s\)\.' -and $log -match 'test mode without EYECAP_TRAY_TEST_REG -- the OpenXR registration part is skipped')
     Step 'Unregister: the last game gone -> the (test) Home value deleted' ($log -match 'no SteamVR game enabled any more -- deleted HKCU\\.*SvrHome' -and -not (Get-ItemProperty -Path "HKCU:\$homeKey" -Name Home -ErrorAction SilentlyContinue))
-    $r = Svr @('toggle', 'row=Second VR', 'answers=Yes,OK')
+    $r = Svr @('toggle', 'row=Second VR', 'answers=Yes')
     Step 'tick Second VR again: On, Home key written again' ((Row $r 'Second VR') -match '\| On \|' -and (Get-ItemProperty -Path "HKCU:\$homeKey" -Name Home -ErrorAction SilentlyContinue).Home -eq $t)
-    $r = Svr @('disableall', 'answers=Yes,OK')
-    Step 'Disable all, Yes: Second VR original back, Off, result box, Home value deleted, Disable all greyed' ($r.text -match 'BOX: SteamVR recording disabled for 1 of 1 game\(s\)\.' -and (Hash (Join-Path $s 'openvr_api.dll')) -eq $hValve -and (Row $r 'Second VR') -match '\| Off \|' -and -not (Get-ItemProperty -Path "HKCU:\$homeKey" -Name Home -ErrorAction SilentlyContinue) -and $r.text -match 'BUTTONS: enableall=\d disableall=0' -and (Get-Content $ini -Raw) -notmatch '(?m)^\[game\]')
+    $r = Svr @('disableall', 'answers=Yes')
+    Step 'Disable all, Yes: Second VR original back, Off, no result box, Home value deleted, Disable all greyed' ($r.text -notmatch 'BOX: SteamVR recording disabled for' -and (Hash (Join-Path $s 'openvr_api.dll')) -eq $hValve -and (Row $r 'Second VR') -match '\| Off \|' -and -not (Get-ItemProperty -Path "HKCU:\$homeKey" -Name Home -ErrorAction SilentlyContinue) -and $r.text -match 'BUTTONS: enableall=\d disableall=0' -and (Get-Content $ini -Raw) -notmatch '(?m)^\[game\]')
 
     Write-Host '-- Rescan after Old Game was uninstalled'
     Remove-Item -Recurse -Force $old; Remove-Item (Join-Path $lib2 'steamapps\appmanifest_2003.acf')

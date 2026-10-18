@@ -936,7 +936,8 @@ std::wstring MissingExportsText(const std::vector<std::string>& miss) {
     std::wstring list;
     for (size_t i = 0; i < miss.size() && i < 4; ++i) list += (i ? L", " : L"") + Widen(miss[i]);
     if (miss.size() > 4) list += L" and " + std::to_wstring(miss.size() - 4) + L" more";
-    return L"the game's openvr_api.dll exports " + list + L", which VR EyeCapture's proxy does not; not enabled";
+    return L"this game's openvr_api.dll has functions that VR EyeCapture's copy does not have (" + list +
+           L"); replacing it could crash the game, so it was not changed";
 }
 
 bool RefuseInUse(const Location& L, ActionResult& r) {

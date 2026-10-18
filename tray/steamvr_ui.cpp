@@ -88,6 +88,18 @@ std::wstring Rel(const std::wstring& root, const std::wstring& dir) {
     return dir;
 }
 
+// A result line of steamvr_games ("in use -- close the game ...") as a sentence for a message box: capital first letter,
+// " -- " as ". ", a full stop at the end.
+std::wstring Sentence(std::wstring s) {
+    for (size_t p; (p = s.find(L" -- ")) != std::wstring::npos;) {
+        s.replace(p, 4, L". ");
+        if (p + 2 < s.size()) s[p + 2] = (wchar_t)towupper(s[p + 2]);
+    }
+    if (!s.empty()) s[0] = (wchar_t)towupper(s[0]);
+    if (!s.empty() && s.back() != L'.' && s.back() != L')') s += L'.';
+    return s;
+}
+
 const wchar_t* StateText(RowState s, steamvr::RepairWhy why = steamvr::RepairWhy::GameUpdated) {
     switch (s) {
     case RowState::On: return L"On";
@@ -250,7 +262,7 @@ std::vector<std::wstring> DisableGameFolders(const std::wstring& name, const std
     std::vector<std::wstring> remaining;
     for (const std::wstring& d : dirs) {
         if (!DirExists(d)) {
-            results += L"  " + Rel(root, d) + L"\n      folder not found -- removed from the list\n";
+            results += L"• " + Rel(root, d) + L"\n    Folder not found. Removed from the list.\n";
             LOGI("tray: steamvr: disable %s: %s not found, dropped from the list", N(name).c_str(), N(d).c_str());
             continue;
         }
@@ -260,7 +272,7 @@ std::vector<std::wstring> DisableGameFolders(const std::wstring& name, const std
         // refused with nothing of ours in that folder (32-bit / OpenComposite / unknown DLL now): dropped from the list too
         const bool nothingOurs = !r.ok && r.error == 0 && L.state != LocState::OriginalMissing;
         if (!r.ok && !nothingOurs) remaining.push_back(d);
-        results += L"  " + Rel(root, d) + L"\n      " + r.message + L"\n";
+        results += L"• " + Rel(root, d) + L"\n    " + Sentence(r.message) + L"\n";
     }
     return remaining;
 }
@@ -496,50 +508,52 @@ void EnableFlow(const std::wstring& exe, const std::wstring& root, const std::ws
         L = steamvr::InspectLocation(L.dir, ver);
     }
     std::vector<size_t> todo;
-    std::wstring list;
+    std::wstring list;   // one bullet per openvr_api.dll folder: the folder, then what happens there on the next line
     for (size_t i = 0; i < sr.locations.size(); ++i) {
         const Location& L = sr.locations[i];
         std::wstring plan;
         switch (L.state) {
-        case LocState::NotEnabled: plan = L"will be enabled"; todo.push_back(i); break;
-        case LocState::ProxyMissing: plan = L"will be enabled again (the game was updated)"; todo.push_back(i); break;
+        case LocState::NotEnabled: plan = L"Will be enabled."; todo.push_back(i); break;
+        case LocState::ProxyMissing: plan = L"Will be enabled again (the game was updated)."; todo.push_back(i); break;
         case LocState::Enabled:
             plan = steamvr::RepairNeeded(L, g_opt.installDir) == steamvr::RepairWhy::Moved
-                       ? L"already enabled -- VR EyeCapture moved: its settings will point to this folder again"
-                   : L.proxyOutdated ? L"already enabled -- the proxy will be updated" : L"already enabled -- will be refreshed";
+                       ? L"Already enabled. It will point to VR EyeCapture's new folder."
+                   : L.proxyOutdated ? L"Already enabled. The recorder file will be updated." : L"Already enabled. It will be refreshed.";
             todo.push_back(i);
             break;
-        case LocState::Unsupported32: plan = L"32-bit -- not supported, skipped"; break;
+        case LocState::Unsupported32: plan = L"Skipped: 32-bit games are not supported."; break;
         case LocState::OpenComposite:
-            plan = L.hasSteamVrBackup ? L"OpenComposite -- skipped (kept)" : L"OpenComposite -- skipped (no SteamVR copy to restore)";
+            plan = L.hasSteamVrBackup ? L"Skipped: OpenComposite is installed here (left as it is)."
+                                      : L"Skipped: OpenComposite is installed here, and there is no SteamVR copy to put back.";
             break;
-        case LocState::OriginalMissing: plan = L"the original is missing -- skipped (verify the game files in Steam)"; break;
-        default: plan = L"not Valve's openvr_api.dll -- skipped"; break;
+        case LocState::OriginalMissing: plan = L"Skipped: the game's original file is missing. In Steam, verify the game files."; break;
+        default: plan = L"Skipped: this is not Valve's openvr_api.dll."; break;
         }
         if (!todo.empty() && todo.back() == i) {   // the same checks EnableLocation makes first: shown here, not acted on
             const steamvr::DllInfo* gd = steamvr::GameDllOf(L);
             const std::vector<std::string> miss = gd ? steamvr::MissingExports(*gd, srcInfo) : std::vector<std::string>();
             steamvr::ActionResult busy;
-            if (!miss.empty()) { plan = steamvr::MissingExportsText(miss); todo.pop_back(); }
-            else if (steamvr::RefuseInUse(L, busy)) { plan = busy.message; todo.pop_back(); }
+            if (!miss.empty()) { plan = Sentence(steamvr::MissingExportsText(miss)); todo.pop_back(); }
+            else if (steamvr::RefuseInUse(L, busy)) { plan = Sentence(busy.message); todo.pop_back(); }
         }
-        list += L"  " + Rel(root, L.dir) + L"\n      " + plan + L"\n";
+        list += L"• " + Rel(root, L.dir) + L"\n    " + plan + L"\n";
     }
-    if (sr.truncated) list += L"  (the folder is very large: the search stopped early)\n";
+    if (sr.truncated) list += L"(The folder is very large: the search stopped early.)\n";
     std::wstring anti;
     if (!sr.antiCheat.empty()) {
         anti = L"\nWARNING: anti-cheat found (" + Rel(root, sr.antiCheat[0]) + (sr.antiCheat.size() > 1 ? L" and more" : L"") +
-               L"). EasyAntiCheat / BattlEye may refuse to start the game or flag the changed openvr_api.dll; in an online game "
-               L"that can get your account banned. Only enable it for offline / single-player games, at your own risk.\n";
+               L"). EasyAntiCheat or BattlEye may block the game or flag the changed file. In an online game, that can get your "
+               L"account banned. Only enable it for offline games, at your own risk.\n";
     }
     if (todo.empty()) {
-        Box(name + L": nothing to enable.\n\nopenvr_api.dll found in " + root + L":\n" + list + anti, MB_OK | MB_ICONWARNING);
+        Box(name + L" cannot be recorded through SteamVR.\n\nGame folder:\n" + root + L"\n\nopenvr_api.dll found in:\n" + list + anti,
+            MB_OK | MB_ICONWARNING);
         return;
     }
-    const std::wstring q = std::wstring(reenable ? L"Re-enable" : L"Enable") + L" SteamVR recording for " + name + L"?\n\nGame folder: " +
-                           root + L"\n\nopenvr_api.dll found:\n" + list + anti +
-                           L"\nThe game's own openvr_api.dll is kept as openvr_api_real.dll next to it; Disable puts it back. "
-                           L"Close the game and SteamVR first.";
+    const std::wstring q = std::wstring(reenable ? L"Re-enable" : L"Enable") + L" SteamVR recording for " + name +
+                           L"?\n\nClose the game and SteamVR first.\n\nGame folder:\n" + root + L"\n\nopenvr_api.dll found in:\n" +
+                           list + anti +
+                           L"\nThe game's own file stays next to it as openvr_api_real.dll. Untick the game to put it back.";
     if (Box(q, MB_YESNO | (anti.empty() ? MB_ICONQUESTION : MB_ICONWARNING | MB_DEFBUTTON2)) != IDYES) {
         LOGI("tray: steamvr: %s %s: cancelled", what, N(name).c_str());
         return;
@@ -556,7 +570,7 @@ void EnableFlow(const std::wstring& exe, const std::wstring& root, const std::ws
         const steamvr::ActionResult r = steamvr::EnableLocation(L, src, g_opt.installDir, name);
         LogSteps(r, what, L.dir);
         if (r.ok) { ++okCount; e.dlls.push_back(L.dir); }
-        results += L"  " + Rel(root, L.dir) + L"\n      " + r.message + L"\n";
+        results += L"• " + Rel(root, L.dir) + L"\n    " + Sentence(r.message) + L"\n";
     }
     if (okCount) EnsureHomeKey(g_opt.installDir, g_opt.testMode);
     bool saved = true;
@@ -578,12 +592,9 @@ void EnableFlow(const std::wstring& exe, const std::wstring& root, const std::ws
     }) || (saved = false);
     const std::wstring saveErr = saved ? std::wstring() : L"\n\n(The list " + IniPath() + L" could not be written; the game folder is changed anyway.)";
     LOGI("tray: steamvr: %s %s: %zu of %zu folder(s) done", what, N(name).c_str(), okCount, todo.size());
-    const std::wstring how = g_opt.hotkey.empty() ? std::wstring(L"press your recording hotkey") : L"press " + g_opt.hotkey;
+    // success: no box (the row turns On); a box only when something did not work
     if (okCount == todo.size()) {
-        Box(L"SteamVR recording is enabled for " + name + L".\n\n" + results + L"\nStart the game from Steam with SteamVR running and " +
-                how + L" to record (this tray app must be running). After a game update or Steam's \"Verify integrity of game "
-                L"files\" the tray app tells you at its next start; one click on Repair puts it back." + saveErr,
-            MB_OK | MB_ICONINFORMATION);
+        if (!saved) Box(L"SteamVR recording is enabled for " + name + L"." + saveErr, MB_OK | MB_ICONWARNING);
     } else {
         Box(name + L": " + std::to_wstring(okCount) + L" of " + std::to_wstring(todo.size()) + L" folder(s) enabled.\n\n" + results +
                 L"\nClose the game and SteamVR, then try again. A folder that needs administrator rights cannot be changed from here." +
@@ -595,10 +606,10 @@ void EnableFlow(const std::wstring& exe, const std::wstring& root, const std::ws
 
 void DisableRow(const Row& g) {
     std::wstring where;
-    for (const std::wstring& d : g.dirs) where += L"  " + Rel(g.root, d) + L"\n";
-    if (where.empty()) where = L"  (no folder recorded)\n";
-    if (Box(L"Disable SteamVR recording for " + g.name + L"?\n\nThe game's own openvr_api.dll is put back in:\n" + where +
-                L"\nClose the game first: the files of a running game are not changed.",
+    for (const std::wstring& d : g.dirs) where += L"• " + Rel(g.root, d) + L"\n";
+    if (where.empty()) where = L"(no folder recorded)\n";
+    if (Box(L"Disable SteamVR recording for " + g.name + L"?\n\nClose the game first.\n\nThe game's own openvr_api.dll is put back in:\n" +
+                where,
             MB_YESNO | MB_ICONQUESTION) != IDYES) {
         LOGI("tray: steamvr: disable %s: cancelled", N(g.name).c_str());
         return;
@@ -614,9 +625,7 @@ void DisableRow(const Row& g) {
             if (SameDir(e.root, g.root)) e.dlls = remaining;
     });
     LOGI("tray: steamvr: disable %s: %s", N(g.name).c_str(), remaining.empty() ? "done, removed from the list" : "some folders failed");
-    if (remaining.empty())
-        Box(L"SteamVR recording is disabled for " + g.name + L".\n\n" + results, MB_OK | MB_ICONINFORMATION);
-    else
+    if (!remaining.empty())   // success: no box (the row turns Off)
         Box(g.name + L": not every folder could be changed.\n\n" + results + L"\nClose the game and SteamVR, then try again.",
             MB_OK | MB_ICONWARNING);
     Refresh(g.root);
@@ -653,18 +662,18 @@ void OnEnableAll() {
     for (size_t i = 0; i < g_rows.size(); ++i) {
         const Row& r = g_rows[i];
         if (r.enabled) continue;
-        if (r.state == RowState::Off && r.antiCheat) skipped += L"  " + r.name + L" -- anti-cheat found: tick it on its own if you want it\n";
-        else if (r.state == RowState::OpenComposite) skipped += L"  " + r.name + L" -- OpenComposite installed: tick it on its own\n";
-        else if (r.state == RowState::Only32) skipped += L"  " + r.name + L" -- 32-bit, not supported\n";
-        else if (r.state == RowState::Off) { todo.push_back(i); list += L"  " + r.name + L"\n"; }
+        if (r.state == RowState::Off && r.antiCheat) skipped += L"• " + r.name + L": anti-cheat found. Tick it on its own if you want it.\n";
+        else if (r.state == RowState::OpenComposite) skipped += L"• " + r.name + L": OpenComposite is installed. Tick it on its own.\n";
+        else if (r.state == RowState::Only32) skipped += L"• " + r.name + L": 32-bit games are not supported.\n";
+        else if (r.state == RowState::Off) { todo.push_back(i); list += L"• " + r.name + L"\n"; }
     }
     if (todo.empty()) {
         Box(L"Nothing to enable." + (skipped.empty() ? std::wstring() : L"\n\nSkipped:\n" + skipped), MB_OK | MB_ICONINFORMATION);
         return;
     }
-    if (Box(L"Enable SteamVR recording for these games?\n\n" + list + (skipped.empty() ? std::wstring() : L"\nSkipped:\n" + skipped) +
-                L"\nEach game's own openvr_api.dll is kept as openvr_api_real.dll next to it; Disable puts it back. Close the games and "
-                L"SteamVR first.",
+    if (Box(L"Enable SteamVR recording for these games?\n\nClose the games and SteamVR first.\n\n" + list +
+                (skipped.empty() ? std::wstring() : L"\nSkipped:\n" + skipped) +
+                L"\nEach game's own file stays next to it as openvr_api_real.dll. Untick a game to put it back.",
             MB_YESNO | MB_ICONQUESTION) != IDYES) {
         LOGI("tray: steamvr: enable all: cancelled");
         return;
@@ -686,16 +695,18 @@ void OnEnableAll() {
             const steamvr::ActionResult a = steamvr::EnableLocation(L, src, g_opt.installDir, r.name);
             LogSteps(a, "enable all:", L.dir);
             if (a.ok) e.dlls.push_back(L.dir);
-            else res += L"\n      " + Rel(r.root, L.dir) + L": " + a.message;
+            else res += L"\n    " + Rel(r.root, L.dir) + L": " + Sentence(a.message);
         }
         if (!e.dlls.empty()) { add.push_back(e); ++games; }
-        results += L"  " + r.name + L": " + (e.dlls.empty() ? L"not enabled" : L"enabled") + res + L"\n";
+        results += L"• " + r.name + L": " + (e.dlls.empty() ? L"not enabled" : L"enabled") + res + L"\n";
     }
     if (games) EnsureHomeKey(g_opt.installDir, g_opt.testMode);
     SaveGames([&](std::vector<GameEntry>& g) { for (const GameEntry& e : add) steamvr::UpsertGame(g, e); });
     LOGI("tray: steamvr: enable all: %zu of %zu game(s) enabled", games, todo.size());
-    Box(L"SteamVR recording enabled for " + std::to_wstring(games) + L" of " + std::to_wstring(todo.size()) + L" game(s).\n\n" + results,
-        MB_OK | (games == todo.size() ? MB_ICONINFORMATION : MB_ICONWARNING));
+    if (games != todo.size())   // all enabled: no box (the rows turn On)
+        Box(L"SteamVR recording enabled for " + std::to_wstring(games) + L" of " + std::to_wstring(todo.size()) + L" game(s).\n\n" +
+                results + L"\nClose the games and SteamVR, then try again.",
+            MB_OK | MB_ICONWARNING);
     Refresh();
 }
 
@@ -784,18 +795,18 @@ void OnDisableAll() {
         return;
     }
     std::wstring list;
-    for (const std::wstring& n : EnabledGameNames(g_opt.installDir)) list += L"  " + n + L"\n";   // sorted by name
-    if (Box(L"Disable SteamVR recording for all " + std::to_wstring(games.size()) + L" game(s)?\n\n" + list +
-                L"\nEach game's own openvr_api.dll is put back. Close the games and SteamVR first: the files of a running game are "
-                L"not changed.",
+    for (const std::wstring& n : EnabledGameNames(g_opt.installDir)) list += L"• " + n + L"\n";   // sorted by name
+    if (Box(L"Disable SteamVR recording for all " + std::to_wstring(games.size()) + L" game(s)?\n\nClose the games and SteamVR first.\n\n" +
+                list + L"\nEach game's own openvr_api.dll is put back.",
             MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES) {
         LOGI("tray: steamvr: disable all: cancelled");
         return;
     }
     const DisableAllOutcome o = DisableAllCore(g_opt.installDir, g_opt.testMode, "Disable all clicked");
-    Box(L"SteamVR recording disabled for " + std::to_wstring(o.done) + L" of " + std::to_wstring(o.games) + L" game(s).\n\n" + o.results +
-            (o.done == o.games ? std::wstring() : L"\nClose the game and SteamVR, then try again."),
-        MB_OK | (o.done == o.games ? MB_ICONINFORMATION : MB_ICONWARNING));
+    if (o.done != o.games)   // all disabled: no box (the rows turn Off)
+        Box(L"SteamVR recording disabled for " + std::to_wstring(o.done) + L" of " + std::to_wstring(o.games) + L" game(s).\n\n" +
+                o.results + L"\nClose the game and SteamVR, then try again.",
+            MB_OK | MB_ICONWARNING);
     Refresh();
 }
 

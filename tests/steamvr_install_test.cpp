@@ -251,8 +251,8 @@ int main() {
         WriteBytes(mx + L"\\openvr_api.dll", mockBytes);
         const Location now = InspectLocation(mx, ver);
         r = EnableLocation(now, proxy, home, L"Mismatch");
-        Check(now.state == LocState::NotEnabled && !r.ok && r.steps.empty() && r.message.find(L"exports MockOpenVrCounts") != std::wstring::npos &&
-                  r.message.find(L"which VR EyeCapture's proxy does not; not enabled") != std::wstring::npos &&
+        Check(now.state == LocState::NotEnabled && !r.ok && r.steps.empty() && r.message.find(L"MockOpenVrCounts") != std::wstring::npos &&
+                  r.message.find(L"replacing it could crash the game, so it was not changed") != std::wstring::npos &&
                   ReadBytes(mx + L"\\openvr_api.dll") == mockBytes && !Exists(mx + L"\\" EYECAP_PROXY_REAL_DLL),
               "export mismatch: refused, nothing changed (" + N(r.message) + ")");
         std::vector<GameEntry> g{GameEntry{L"Mismatch", L"", mx, {mx}, L""}};
