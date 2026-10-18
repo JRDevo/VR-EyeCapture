@@ -92,16 +92,29 @@ foreach ($api in $(if ($OnlyOverlays) { @() } else { @('d3d11', 'd3d12') })) {
         $m = [regex]::Match($o, 'E2E_OUTPUT=(.+)')
         $runOk = ($LASTEXITCODE -eq 0) -and $m.Success
         $verOk = $false
+        $logTxt = Get-Content (Join-Path $out 'eye_capture.log') -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+        $written = [regex]::Match([string]$logTxt, 'frames written (\d+), dropped (\d+)')
+        $nw = if ($written.Success) { [int]$written.Groups[1].Value } else { -1 }
+        $nd = if ($written.Success) { [int]$written.Groups[2].Value } else { -1 }
+        # Dropped frames: the recorder never makes the game wait -- a ring slot whose previous copy is still on the GPU ("gpu
+        # busy", D3D12) or a full ring drops that frame and counts it in the summary; the file keeps the real timestamps, so its
+        # average rate is 90 x written / (written + dropped). Measured 2026-10-18: since 2026-10-17 this PC drops 1-30 of ~345
+        # frames per D3D12 case (0 before), with the same counts for builds from before 2026-10-17 (c1c4fb6, c1a72c5, 39c00d4)
+        # -- the machine, not the code. So the rate is checked against the frames really written, and the drops get their own
+        # limit (10 %): a real stall (a copy that waits, an encoder that falls behind) drops far more than that.
+        $fpsWant = 90.0
+        $dropOk = $written.Success -and ($nw + $nd) -gt 0 -and $nd -le 0.10 * ($nw + $nd)
+        if ($written.Success -and ($nw + $nd) -gt 0) { $fpsWant = 90.0 * $nw / ($nw + $nd) }
+        $dropLine = [regex]::Match([string]$logTxt, 'dropped \d+ \([^)]*\)').Value
+        Write-Host ("  dropped frames: {0} of {1} ({2}); file rate wanted {3:N2} fps -> {4}" -f $nd, ($nw + $nd), $dropLine, $fpsWant,
+            $(if ($dropOk) { 'ok (limit 10 %)' } else { 'FAIL (over 10 % or no summary)' })) -ForegroundColor $(if ($dropOk) { 'Green' } else { 'Red' })
         if ($runOk) {
             # autorecord counts from the first frame; encoder start-up takes ~0.2-0.4 s of it
-            & (Join-Path $PSScriptRoot 'verify_mp4.ps1') -File $m.Groups[1].Value.Trim() -EyeW 1920 -EyeH 1080 -Seconds 3.7 -DurationTolerance 0.3 -ExpectAudio
-            $verOk = ($LASTEXITCODE -eq 0)
+            & (Join-Path $PSScriptRoot 'verify_mp4.ps1') -File $m.Groups[1].Value.Trim() -EyeW 1920 -EyeH 1080 -Fps $fpsWant -Seconds 3.7 -DurationTolerance 0.3 -ExpectAudio
+            $verOk = ($LASTEXITCODE -eq 0) -and $dropOk
         }
         # indicator
         $qi = QuadInfo $o
-        $logTxt = Get-Content (Join-Path $out 'eye_capture.log') -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
-        $written = [regex]::Match([string]$logTxt, 'frames written (\d+)')
-        $nw = if ($written.Success) { [int]$written.Groups[1].Value } else { -1 }
         if ($api -eq 'd3d11') {
             $indOk = $qi.ok -and $qi.bad -eq 0 -and $qi.valid -ge $nw -and $nw -gt 0 -and $qi.valid -lt $qi.total -and
                      ([string]$logTxt -match 'indicator: quad layer appended AFTER the capture')
