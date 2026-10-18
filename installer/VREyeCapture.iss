@@ -85,6 +85,24 @@ begin
     Exec(Tray, '--quit', ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, Code);
 end;
 
+// Inno Setup has no constant for the Videos folder: ask Windows (CSIDL_MYVIDEO, follows a moved Videos folder). '' = unknown.
+function SHGetFolderPath(Owner: HWND; Csidl: Integer; Token: THandle; Flags: DWORD; Path: String): HResult;
+  external 'SHGetFolderPathW@shell32.dll stdcall';
+
+function UserVideosDir(): String;
+var
+  Buf: String;
+  Z: Integer;
+begin
+  Result := '';
+  Buf := StringOfChar(#0, 1024);
+  if SHGetFolderPath(0, $000E, 0, 0, Buf) = 0 then
+  begin
+    Z := Pos(#0, Buf);
+    if Z > 0 then Result := Copy(Buf, 1, Z - 1) else Result := Buf;
+  end;
+end;
+
 // After the files are gone: the user's own data, only on a Yes (No is the default; nothing is asked in a silent uninstall).
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
@@ -99,7 +117,9 @@ begin
       DelTree(ExpandConstant('{userappdata}\VR EyeCapture'), True, True, True);
       DelTree(ExpandConstant('{localappdata}\VR EyeCapture'), True, True, True);
     end;
-  Videos := ExpandConstant('{uservideos}\VR EyeCapture');
+  Videos := UserVideosDir();
+  if Videos = '' then Exit;
+  Videos := Videos + '\VR EyeCapture';
   if DirExists(Videos) then
     if MsgBox('Also delete your recordings?' #13#10#13#10 + Videos + #13#10#13#10 +
               'This deletes every video in that folder. Choose No to keep them.', mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES then
