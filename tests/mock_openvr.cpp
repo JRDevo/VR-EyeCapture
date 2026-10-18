@@ -33,6 +33,7 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <utility>
 #include "../third_party/openvr/openvr.h"
 #include "test_motion.h"
 #include "test_pattern.h"
@@ -366,6 +367,102 @@ RawObj g_sys019{kSys019};
 
 int g_dummyAccessor[4];
 
+// ---- IVROverlay (the proxy's in-headset dot): "FnTable:IVROverlay_027" (MOCK_OPENVR_OVERLAY=026: only _026; none: no
+// IVROverlay at all). The slots the proxy uses record what they got; every other slot is a counting stub of its own (not
+// g_stubCalls, which the fake game checks for the compositor). At shutdown: "mock overlay: ..." (VR_ShutdownInternal).
+struct OvState {
+    int64_t creates = 0, destroys = 0, shows = 0, hides = 0, textures = 0, alphas = 0, sorts = 0, widths = 0, transforms = 0, other = 0;
+    std::string key, version;
+    uint64_t handle = 0;
+    float width = 0, x = 0, y = 0, z = 0, alphaMin = 2, alphaMax = -1;
+    uint32_t device = 99;
+    int texW = 0, texH = 0, r = -1, g = -1, b = -1, a = -1;   // the last texture: size + centre pixel (RGBA bytes)
+    int64_t badHandle = 0;
+};
+OvState g_ov;
+void* g_ovTable[64];
+int OvCheck(uint64_t h) { if (!h || h != g_ov.handle) { ++g_ov.badHandle; return 10; } return 0; }   // 10 = InvalidHandle
+int OvCreate(char* key, char* name, uint64_t* out) {
+    (void)name;
+    std::lock_guard<std::mutex> lk(g_m);
+    ++g_ov.creates;
+    g_ov.key = key ? key : "";
+    g_ov.handle = 0x5EED0000ull + (uint64_t)g_ov.creates;
+    if (out) *out = g_ov.handle;
+    return 0;
+}
+int OvDestroy(uint64_t h) { std::lock_guard<std::mutex> lk(g_m); ++g_ov.destroys; const int e = OvCheck(h); g_ov.handle = 0; return e; }
+int OvShow(uint64_t h) { std::lock_guard<std::mutex> lk(g_m); ++g_ov.shows; return OvCheck(h); }
+int OvHide(uint64_t h) { std::lock_guard<std::mutex> lk(g_m); ++g_ov.hides; return OvCheck(h); }
+int OvAlpha(uint64_t h, float a) {
+    std::lock_guard<std::mutex> lk(g_m);
+    ++g_ov.alphas;
+    if (a < g_ov.alphaMin) g_ov.alphaMin = a;
+    if (a > g_ov.alphaMax) g_ov.alphaMax = a;
+    return OvCheck(h);
+}
+int OvSort(uint64_t h, uint32_t) { std::lock_guard<std::mutex> lk(g_m); ++g_ov.sorts; return OvCheck(h); }
+int OvWidth(uint64_t h, float w) { std::lock_guard<std::mutex> lk(g_m); ++g_ov.widths; g_ov.width = w; return OvCheck(h); }
+int OvTransform(uint64_t h, uint32_t dev, vr::HmdMatrix34_t* m) {
+    std::lock_guard<std::mutex> lk(g_m);
+    ++g_ov.transforms;
+    g_ov.device = dev;
+    if (m) { g_ov.x = m->m[0][3]; g_ov.y = m->m[1][3]; g_ov.z = m->m[2][3]; }
+    return OvCheck(h);
+}
+// Reads the centre pixel back on the texture's own device (the proxy calls this inside the game's Submit, on its thread).
+int OvTexture(uint64_t h, vr::Texture_t* t) {
+    std::lock_guard<std::mutex> lk(g_m);
+    ++g_ov.textures;
+    if (!t || !t->handle || t->eType != vr::TextureType_DirectX) return 3;   // InvalidParameter
+    ID3D11Texture2D* tex = static_cast<ID3D11Texture2D*>(t->handle);
+    D3D11_TEXTURE2D_DESC d{};
+    tex->GetDesc(&d);
+    g_ov.texW = (int)d.Width;
+    g_ov.texH = (int)d.Height;
+    ID3D11Device* dev = nullptr;
+    tex->GetDevice(&dev);
+    ID3D11DeviceContext* ctx = nullptr;
+    dev->GetImmediateContext(&ctx);
+    D3D11_TEXTURE2D_DESC sd = d;
+    sd.Usage = D3D11_USAGE_STAGING;
+    sd.BindFlags = 0;
+    sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    sd.MiscFlags = 0;
+    ID3D11Texture2D* st = nullptr;
+    if (SUCCEEDED(dev->CreateTexture2D(&sd, nullptr, &st))) {
+        ctx->CopyResource(st, tex);
+        D3D11_MAPPED_SUBRESOURCE m{};
+        if (SUCCEEDED(ctx->Map(st, 0, D3D11_MAP_READ, 0, &m))) {
+            const uint8_t* p = (const uint8_t*)m.pData + (size_t)(d.Height / 2) * m.RowPitch + (size_t)(d.Width / 2) * 4;
+            g_ov.r = p[0]; g_ov.g = p[1]; g_ov.b = p[2]; g_ov.a = p[3];
+            ctx->Unmap(st, 0);
+        }
+        st->Release();
+    }
+    ctx->Release();
+    dev->Release();
+    return OvCheck(h);
+}
+template <int N> intptr_t OvStub() { std::lock_guard<std::mutex> lk(g_m); ++g_ov.other; return 0; }
+template <int... I> void FillOvStubs(std::integer_sequence<int, I...>) { ((g_ovTable[I] = (void*)&OvStub<I>), ...); }
+// slots as in src/openvr/openvr_versions.h kOverlayVersions (Valve's openvr_capi.h)
+void* OverlayTable(const std::string& version) {
+    FillOvStubs(std::make_integer_sequence<int, 64>{});
+    const bool v26 = version == "IVROverlay_026";
+    g_ovTable[1] = (void*)&OvCreate;
+    g_ovTable[2] = (void*)&OvDestroy;
+    g_ovTable[15] = (void*)&OvAlpha;
+    g_ovTable[19] = (void*)&OvSort;
+    g_ovTable[21] = (void*)&OvWidth;
+    g_ovTable[34] = (void*)&OvTransform;
+    g_ovTable[v26 ? 43 : 41] = (void*)&OvShow;
+    g_ovTable[v26 ? 44 : 42] = (void*)&OvHide;
+    g_ovTable[v26 ? 60 : 58] = (void*)&OvTexture;
+    g_ov.version = version;
+    return g_ovTable;
+}
+
 } // namespace
 
 // ---------------------------------------------------------------- exports (Valve's names)
@@ -400,6 +497,13 @@ MOCK_EXPORT void VR_ShutdownInternal() {
            (long long)g_stubCalls.load(), (long long)g_accessorCalls.load(), (long long)g_systemCalls.load(),
            (long long)g_mirrorGets.load(), (long long)g_mirrorReleases.load(), (long long)g_events.load(),
            (long long)g_backgroundInits.load(), g_asked.c_str());
+    printf("mock overlay: version %s, creates %lld key %s, width %.3f, transform dev %u at (%.2f, %.2f, %.2f), textures %lld "
+           "(last %dx%d centre %d,%d,%d,%d), shows %lld hides %lld, alpha calls %lld (min %.2f max %.2f), sort %lld, destroys %lld, "
+           "bad handles %lld, other slots %lld\n",
+           g_ov.version.empty() ? "-" : g_ov.version.c_str(), (long long)g_ov.creates, g_ov.key.empty() ? "-" : g_ov.key.c_str(),
+           g_ov.width, g_ov.device, g_ov.x, g_ov.y, g_ov.z, (long long)g_ov.textures, g_ov.texW, g_ov.texH, g_ov.r, g_ov.g, g_ov.b,
+           g_ov.a, (long long)g_ov.shows, (long long)g_ov.hides, (long long)g_ov.alphas, g_ov.alphaMin, g_ov.alphaMax,
+           (long long)g_ov.sorts, (long long)g_ov.destroys, (long long)g_ov.badHandle, (long long)g_ov.other);
     fflush(stdout);
 }
 
@@ -419,6 +523,11 @@ MOCK_EXPORT void* VR_GetGenericInterface(const char* name, vr::EVRInitError* e) 
     if (n == "FnTable:IVRCompositor_022") return g_fn022;
     if (n == "IVRSystem_022" && !only019) return static_cast<vr::IVRSystem*>(&g_sys022);
     if (n == "IVRSystem_019") return &g_sys019;
+    {
+        const std::string ov = Env("MOCK_OPENVR_OVERLAY");   // "" = _027, "026" = only _026, "none" = no IVROverlay
+        if (n == "FnTable:IVROverlay_027" && ov.empty()) return OverlayTable("IVROverlay_027");
+        if (n == "FnTable:IVROverlay_026" && ov == "026") return OverlayTable("IVROverlay_026");
+    }
     if (e) *e = vr::VRInitError_Init_InterfaceNotFound;
     return nullptr;
 }

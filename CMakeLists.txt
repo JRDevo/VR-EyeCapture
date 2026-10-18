@@ -100,6 +100,7 @@ enable_language(ASM_MASM)
 add_library(openvr_proxy SHARED
     src/openvr/proxy_exports.cpp
     src/openvr/openvr_capture.cpp
+    src/openvr/openvr_indicator.cpp
     src/openvr/openvr_hooks.cpp
     src/openvr/accessor_stubs.asm
     src/openvr/openvr_api.def)

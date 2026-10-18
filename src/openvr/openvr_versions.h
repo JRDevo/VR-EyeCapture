@@ -55,6 +55,22 @@ const SystemVersion kSystemVersions[] = {
 };
 const int kSystemVersionCount = (int)(sizeof(kSystemVersions) / sizeof(kSystemVersions[0]));
 
+// IVROverlay (only called, never hooked; the in-headset recording dot, src/openvr/openvr_indicator.cpp): the proxy asks the
+// real DLL itself for "FnTable:IVROverlay_0xx" (newest first) -- SteamVR serves older versions too, whatever the game uses.
+// Slots = positions in the VR_IVROverlay_FnTable struct of Valve's openvr_capi.h of that version, checked 2026-10-18 against
+// the headers of openvr v2.5.1 (_027), v1.23.7 (_026) and v1.16.8 (_025). The signatures of these methods are the same in
+// all three (C function tables: no this pointer, the overlay handle is a uint64_t).
+struct OverlayVersion {
+    const char* name;                 // "IVROverlay_027" (asked as "FnTable:" + name)
+    uint32_t create, destroy, alpha, sortOrder, width, transformDeviceRelative, show, hide, setTexture;
+};
+const OverlayVersion kOverlayVersions[] = {
+    {"IVROverlay_027", 1, 2, 15, 19, 21, 34, 41, 42, 58},
+    {"IVROverlay_026", 1, 2, 15, 19, 21, 34, 43, 44, 60},
+    {"IVROverlay_025", 1, 2, 15, 19, 21, 32, 41, 42, 57},
+};
+const int kOverlayVersionCount = (int)(sizeof(kOverlayVersions) / sizeof(kOverlayVersions[0]));
+
 const char kFnTablePrefix[] = "FnTable:";
 
 // "IVRCompositor_028" / "FnTable:IVRCompositor_028" -> index into kCompositorVersions, *fnTable = the FnTable form.

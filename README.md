@@ -280,8 +280,9 @@ any per-user HKCU copy, which would make some loaders load the layer twice) and 
 2. Press **ScrollLock** (the default hotkey) → one beep (880 Hz) in the headset: recording.
 3. Press **ScrollLock** again → two beeps: stopped, the MP4 is finalized.
    One long low beep = it could not start (see the log).
-   The beeps play on the Windows default playback device. If that is the device being recorded (the usual setup), they
-   are in the recording too: set `beeps = 0` (app window: Recording -> Beeps) to switch them off.
+   The beeps are played by the game's own process, so you hear them wherever you hear the game (they no longer depend on
+   the "System sounds" volume in the Windows volume mixer). They play on the Windows default playback device; if that is
+   the device being recorded (the usual setup), they are in the recording too: set `beeps = 0` (app window: Recording -> Beeps) to switch them off.
 4. The file lands in the `captures` folder next to `eye_capture.dll`, named
    `<game exe>_<yyyyMMdd_HHmmss>_SBS.mp4`, e.g. `eurotrucks2_20261009_201512_SBS.mp4` (`_VR180.mp4` / `_VR360.mp4` in
    dome mode, see "VR180 / VR360 dome mode").
@@ -521,8 +522,11 @@ OBS live view (also not with `record_overlays = 1`: only the layers the game and
 Settings in `config.ini` `[indicator]`: `vr_indicator = 0` turns it off; `indicator_live = 0` keeps it off for the live
 view (the dot then only shows for recordings); `indicator_x/y/z` move it (metres, relative
 to your head), `indicator_size` and `indicator_opacity` change size and maximum opacity. The app window has fields
-for the position, size and opacity (Position X / Y / Z, Size, Opacity); `indicator_live` is in `config.ini` only. Direct3D 11 games (ETS2 / ATS)
+for the position, size and opacity (Position X / Y / Z, Size, Opacity); `indicator_live` is in `config.ini` only. OpenXR: Direct3D 11 games (ETS2 / ATS)
 only for now; on Direct3D 12 the log says `indicator: not available on D3D12 yet` and recording works as before.
+SteamVR games (per-game recording) show the same dot as a SteamVR overlay that SteamVR draws after the game's images were
+copied, so it is not in the video either; `steamvr_indicator = 0` (`[steamvr]`) turns it off for SteamVR games only.
+Quick mode never shows a dot: it records SteamVR's finished picture, so a dot would be in the video.
 If the runtime ever rejects the extra layer, the indicator switches itself off for the session and the game's frame is
 submitted unchanged (logged).
 
@@ -797,8 +801,8 @@ file back. Nothing is installed globally, nothing is injected, and other games a
 
 **What you get.** The same recordings as with OpenXR games: hotkey, tray icon, beeps, `config.ini` settings (codec,
 bitrate, `symmetric_fov`, head smoothing, the VR180 / VR360 dome), audio, the MKV for YouTube, and the OBS live view.
-Not yet: the in-headset dot (`steamvr_indicator`), Direct3D 12 / Vulkan / OpenGL games (logged, the game runs
-unrecorded), 32-bit games. SteamVR's own overlays (dashboard, chaperone) are not in the game's images, so they are never
+The in-headset dot works too (a SteamVR overlay, never in the video; `steamvr_indicator = 0` turns it off). Not yet:
+Direct3D 12 / Vulkan / OpenGL games (logged, the game runs unrecorded), 32-bit games. SteamVR's own overlays (dashboard, chaperone) are not in the game's images, so they are never
 recorded.
 
 **Settings** (`[steamvr]` in `config.ini`): `steamvr_enabled = 0` makes the copy pass everything through without
@@ -814,7 +818,8 @@ still records the per-game way (the better one wins automatically). Quick mode u
 SteamVR installation (found through `%LOCALAPPDATA%\openvr\openvrpaths.vrpath`; VR EyeCapture ships no Valve file). Without
 SteamVR installed the tray says *"Quick mode needs SteamVR installed (openvr_api.dll not found in the SteamVR folder)"* once
 and does not try again until you change the mode or SteamVR restarts. **Per game** (the default) records only the ticked
-games; **Off** records no SteamVR game. Quick mode itself has not been tried with a real headset yet — reports welcome.
+games; **Off** records no SteamVR game. Quick mode has no in-headset dot (it would be in its video): the beeps and the
+tray icon show the state. Quick mode itself has not been tried with a real headset yet — reports welcome.
 
 **After a game update.** Steam's "Verify integrity of game files" and game updates put Valve's `openvr_api.dll` back. The
 tray app notices it at its next start, only for the games you ticked, and shows one notification: *"SteamVR recording: N

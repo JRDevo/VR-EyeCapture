@@ -15,6 +15,11 @@
         MP4 (verify_mp4.ps1: size 3840x1080, 90 fps, st3d, audio, grey steps = gamma, left half = left eye: bounds / slices /
         eye order), log lines for the load banner, the patch (vtable / FnTable), the layout and the record start.
       two / cpp with the right eye submitted first.
+      in-headset dot (IVROverlay; the mock's "FnTable:IVROverlay_027" records every call, "mock overlay: ..."): one overlay
+        with a per-process key, width / HMD-relative position from indicator_size / _x / _y / _z, a 64x64 texture per state
+        (the last one = saved, green), shown, pulsed through SetOverlayAlpha (0.35 .. 1.0), destroyed at shutdown, no bad
+        handle, no other slot; vr_indicator = 0 or steamvr_indicator = 0: no IVROverlay asked; only IVROverlay_026 (MOCK_OPENVR_OVERLAY=026): its own
+        slots; no IVROverlay at all: logged, no dot, recorded anyway.
       symmetric_fov 1 with --pose wait / --pose submit (the mock then has no WaitGetPoses pose) / IVRSystem_019 only: the
         frame is the symmetric size openvr_e2e computes from the mock's GetProjectionRaw (E2E_SYM) -- wrong fov signs or
         no pose give the raw 3840x1080 instead; --pose none: raw size and the log says "none (raw eyes)".
@@ -73,7 +78,7 @@ $saved = @{}
 foreach ($n in 'APPDATA', 'XR_EYE_CAPTURE_TEST_HOME_KEY', 'XR_EYE_CAPTURE_REQUIRE_TRAY', 'XR_EYE_CAPTURE_TRAY_IPC', 'XR_EYE_CAPTURE_AUTORECORD',
                'XR_EYE_CAPTURE_CONFIG', 'MOCK_OPENVR_SYSTEM', 'XR_EYE_CAPTURE_OUTPUT_DIR', 'XR_EYE_CAPTURE_MIRROR_OPENVR_DLL',
                'XR_EYE_CAPTURE_TEST_SHM', 'EYECAP_TRAY_TEST_SHM', 'EYECAP_TRAY_TEST_VRSERVER', 'MOCK_OPENVR_QUIT_AFTER_MS',
-               'MOCK_OPENVR_MIRROR_COMBINED', 'MOCK_OPENVR_NO_SERVER', 'MOCK_OPENVR_SCENE_PID', 'MOCK_OPENVR_MIRROR_KEYEDMUTEX', 'XR_EYE_CAPTURE_TEST_OPENVRPATHS') { $saved[$n] = [Environment]::GetEnvironmentVariable($n) }
+               'MOCK_OPENVR_MIRROR_COMBINED', 'MOCK_OPENVR_NO_SERVER', 'MOCK_OPENVR_SCENE_PID', 'MOCK_OPENVR_MIRROR_KEYEDMUTEX', 'XR_EYE_CAPTURE_TEST_OPENVRPATHS', 'MOCK_OPENVR_OVERLAY') { $saved[$n] = [Environment]::GetEnvironmentVariable($n) }
 $env:APPDATA = $appdata
 $env:XR_EYE_CAPTURE_TEST_HOME_KEY = $testKey
 $env:XR_EYE_CAPTURE_REQUIRE_TRAY = '0'
@@ -147,6 +152,85 @@ if (Want 'two_cpp_rightfirst') {
     Need ($null -ne $r.mp4) 'no MP4' ([ref]$f)
     if ($r.mp4) { & (Join-Path $PSScriptRoot 'verify_mp4.ps1') -File $r.mp4 -EyeW 1920 -EyeH 1080 -Fps 90 -Seconds 3.7 -DurationTolerance 0.4 -ExpectAudio; Need ($LASTEXITCODE -eq 0) 'verify_mp4 (left half must still be the left eye)' ([ref]$f) }
     Record 'two_cpp_rightfirst' $f
+}
+
+# ---- in-headset dot (IVROverlay) ----
+function OverlayInfo($out) {
+    $m = [regex]::Match($out, 'mock overlay: version (\S+), creates (\d+) key (\S+), width ([\d.]+), transform dev (\d+) at \(([-\d.]+), ([-\d.]+), ([-\d.]+)\), textures (\d+) \(last (\d+)x(\d+) centre (-?\d+),(-?\d+),(-?\d+),(-?\d+)\), shows (\d+) hides (\d+), alpha calls (\d+) \(min ([-\d.]+) max ([-\d.]+)\), sort (\d+), destroys (\d+), bad handles (\d+), other slots (\d+)')
+    if (-not $m.Success) { return $null }
+    $g = $m.Groups
+    return @{ ver = $g[1].Value; creates = [int]$g[2].Value; key = $g[3].Value; width = [double]$g[4].Value; dev = [int]$g[5].Value
+              x = [double]$g[6].Value; y = [double]$g[7].Value; z = [double]$g[8].Value; textures = [int]$g[9].Value
+              texW = [int]$g[10].Value; texH = [int]$g[11].Value; rgba = @([int]$g[12].Value, [int]$g[13].Value, [int]$g[14].Value, [int]$g[15].Value)
+              shows = [int]$g[16].Value; hides = [int]$g[17].Value; alphas = [int]$g[18].Value; amin = [double]$g[19].Value; amax = [double]$g[20].Value
+              sorts = [int]$g[21].Value; destroys = [int]$g[22].Value; bad = [int]$g[23].Value; other = [int]$g[24].Value }
+}
+foreach ($iface in 'cpp', 'fntable') {
+    $name = "indicator_$iface"
+    if (-not (Want $name)) { continue }
+    $r = RunCase $name @('--layout', 'two', '--iface', $iface, '--seconds', '5') ($rawCfg + ';vr_indicator=1;indicator_x=0.30;indicator_y=-0.25;indicator_z=-1.0;indicator_size=0.03;indicator_opacity=1.0')
+    $f = @()
+    $o = OverlayInfo $r.out
+    Need ($r.code -eq 0) 'openvr_e2e failed' ([ref]$f)
+    Need ($null -ne $o) 'no "mock overlay" line' ([ref]$f)
+    if ($o) {
+        Need ($o.ver -eq 'IVROverlay_027' -and $o.creates -eq 1) "one overlay through FnTable:IVROverlay_027 (got $($o.ver), $($o.creates))" ([ref]$f)
+        Need ($o.key -match '^jrdevo\.eyecapture\.indicator\.\d+$') "per-process key (got $($o.key))" ([ref]$f)
+        Need ([math]::Abs($o.width - 0.03) -lt 0.0005) "width = indicator_size 0.03 (got $($o.width))" ([ref]$f)
+        Need ($o.dev -eq 0 -and [math]::Abs($o.x - 0.30) -lt 0.005 -and [math]::Abs($o.y + 0.25) -lt 0.005 -and [math]::Abs($o.z + 1.0) -lt 0.005) "HMD-relative at (0.30, -0.25, -1.00) (got dev $($o.dev) at $($o.x), $($o.y), $($o.z))" ([ref]$f)
+        Need ($o.textures -ge 3 -and $o.texW -eq 64 -and $o.texH -eq 64) "a 64x64 texture per state, starting + recording + saved (got $($o.textures), $($o.texW)x$($o.texH))" ([ref]$f)
+        Need ($o.rgba[0] -lt 80 -and $o.rgba[1] -gt 180 -and $o.rgba[2] -lt 110 -and $o.rgba[3] -gt 240) "the last texture is the green 'saved' dot (centre $($o.rgba -join ','))" ([ref]$f)
+        Need ($o.shows -ge 1 -and $o.alphas -ge 20 -and $o.amin -le 0.40 -and $o.amax -ge 0.99) "shown and pulsed (shows $($o.shows), alpha calls $($o.alphas), $($o.amin)..$($o.amax))" ([ref]$f)
+        Need ($o.destroys -eq 1 -and $o.bad -eq 0 -and $o.other -eq 0) "destroyed once, no bad handle, no other slot called (destroys $($o.destroys), bad $($o.bad), other $($o.other))" ([ref]$f)
+    }
+    Need ($r.log -match 'indicator: SteamVR overlay jrdevo\.eyecapture\.indicator\.\d+ created through FnTable:IVROverlay_027') 'created line' ([ref]$f)
+    Need ($r.log -match 'indicator: dot shown in the headset \(state starting\)') 'shown line' ([ref]$f)
+    Need ($null -ne $r.mp4) 'no MP4' ([ref]$f)
+    if ($r.mp4) { & (Join-Path $PSScriptRoot 'verify_mp4.ps1') -File $r.mp4 -EyeW 1920 -EyeH 1080 -Fps 90 -Seconds 3.7 -DurationTolerance 0.4 -ExpectAudio; Need ($LASTEXITCODE -eq 0) 'verify_mp4 (the pattern, no dot in the recording)' ([ref]$f) }
+    Record $name $f
+}
+if (Want 'indicator_off') {
+    $r = RunCase 'indicator_off' @('--layout', 'two', '--seconds', '4') ($rawCfg + ';vr_indicator=0')
+    $f = @()
+    $o = OverlayInfo $r.out
+    Need ($r.code -eq 0) 'openvr_e2e failed' ([ref]$f)
+    Need ($o -and $o.creates -eq 0 -and $o.ver -eq '-') 'no overlay with vr_indicator = 0' ([ref]$f)
+    Need ($r.out -notmatch 'IVROverlay') 'IVROverlay was asked' ([ref]$f)
+    Need ($r.log -match 'indicator: off \(vr_indicator = 0\)') 'off line' ([ref]$f)
+    Need ($null -ne $r.mp4) 'no MP4' ([ref]$f)
+    Record 'indicator_off' $f
+}
+if (Want 'indicator_steamvr_off') {
+    $r = RunCase 'indicator_steamvr_off' @('--layout', 'two', '--seconds', '4') ($rawCfg + ';vr_indicator=1;steamvr_indicator=0')
+    $f = @()
+    $o = OverlayInfo $r.out
+    Need ($r.code -eq 0) 'openvr_e2e failed' ([ref]$f)
+    Need ($o -and $o.creates -eq 0 -and $r.out -notmatch 'IVROverlay') 'no overlay with steamvr_indicator = 0' ([ref]$f)
+    Need ($r.log -match 'indicator: off \(steamvr_indicator = 0\)') 'off line' ([ref]$f)
+    Need ($null -ne $r.mp4) 'no MP4' ([ref]$f)
+    Record 'indicator_steamvr_off' $f
+}
+if (Want 'indicator_026') {
+    $env:MOCK_OPENVR_OVERLAY = '026'
+    $r = RunCase 'indicator_026' @('--layout', 'two', '--seconds', '4') ($rawCfg + ';vr_indicator=1')
+    $env:MOCK_OPENVR_OVERLAY = $null
+    $f = @()
+    $o = OverlayInfo $r.out
+    Need ($r.code -eq 0) 'openvr_e2e failed' ([ref]$f)
+    Need ($o -and $o.ver -eq 'IVROverlay_026' -and $o.creates -eq 1 -and $o.shows -ge 1 -and $o.textures -ge 2 -and $o.bad -eq 0 -and $o.other -eq 0) 'IVROverlay_026 fallback with its own slots (show 43, texture 60)' ([ref]$f)
+    Need ($null -ne $r.mp4) 'no MP4' ([ref]$f)
+    Record 'indicator_026' $f
+}
+if (Want 'indicator_none') {
+    $env:MOCK_OPENVR_OVERLAY = 'none'
+    $r = RunCase 'indicator_none' @('--layout', 'two', '--seconds', '4') ($rawCfg + ';vr_indicator=1')
+    $env:MOCK_OPENVR_OVERLAY = $null
+    $f = @()
+    Need ($r.code -eq 0) 'openvr_e2e failed' ([ref]$f)
+    Need ($r.log -match 'indicator: the runtime offers none of IVROverlay_027 / _026 / _025 -- no dot in the headset for this VR session \(recording unaffected\)') 'no-overlay line' ([ref]$f)
+    Need ($r.log -match 'recording summary: OK') 'recorded anyway' ([ref]$f)
+    Need ($null -ne $r.mp4) 'no MP4' ([ref]$f)
+    Record 'indicator_none' $f
 }
 
 # ---- two VR sessions in one process: shutdown restores the hooks, the re-init re-arms them and records again ----

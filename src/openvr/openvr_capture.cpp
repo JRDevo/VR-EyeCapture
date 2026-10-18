@@ -23,6 +23,7 @@
 #include "live_share_proto.h"
 #include "log.h"
 #include "openvr_hooks.h"
+#include "openvr_indicator.h"
 #include "openvr_versions.h"
 #include "recorder.h"
 #include "shared_status.h"
@@ -76,6 +77,9 @@ struct OvrState {
     std::unique_ptr<Recorder>     rec;
     std::unique_ptr<LiveShare>    live;
     ComPtr<ID3D11Device>          dev;
+    // the in-headset dot (openvr_indicator.h): created at the first pair of a VR session while vr_indicator = steamvr_indicator = 1
+    std::unique_ptr<OvrIndicator> ind;
+    IndicatorTracker              indTracker;
     bool     srcFailed = false, faulted = false;
     std::map<void*, TexInfo> tex;      // per submitted texture pointer (no destroy event in OpenVR)
     uint64_t texUse = 0;
@@ -311,6 +315,16 @@ void CapturePair() {
         if (g.cfg.gamma == GammaMode::Srgb) s = true;
         else if (g.cfg.gamma == GammaMode::Linear) s = false;
         g.live->Frame(eyes[0], eyes[1], stage, s, ts, g.cfg.head, false, nullptr);
+    }
+    // the dot: an overlay the compositor draws after this Submit -- the eye images above are already copied
+    if (g.cfg.indicator.enabled && g.cfg.steamvr.indicator) {
+        if (!g.ind) g.ind = std::make_unique<OvrIndicator>(g.cfg.indicator);
+        const RecState st = g.rec->State();
+        std::string msg;
+        if (g.indTracker.NeedsMessage(st)) msg = g.rec->Status().message;
+        const double now = (double)QpcNow100ns() * 1e-7;
+        const bool live = g.cfg.indicator.live && g.live && g.live->Active();
+        g.ind->Frame(g.realGet, g.dev.Get(), g.indTracker.Update(st, msg, now, live), now);
     }
 }
 
@@ -727,6 +741,12 @@ void OvrProcessInit(const std::wstring& proxyDir, bool realLoaded, const std::ws
     }
     LOGI("steamvr: steamvr_enabled 1 | steamvr_mode %s (a game with the proxy always records through it) | steamvr_pose_source %s | require_tray %d | supported: D3D11 textures, IVRCompositor_019.._028 "
          "(C++ and FnTable)", SteamVrModeKey(g.cfg.steamvr.mode), SteamVrPoseSourceKey(g.cfg.steamvr.poseSource), g.cfg.requireTray ? 1 : 0);
+    if (g.cfg.indicator.enabled && g.cfg.steamvr.indicator)
+        LOGI("indicator: on (vr_indicator = 1, steamvr_indicator = 1) -- SteamVR overlay dot in the headset while recording at (%.2f, %.2f, %.2f) m from "
+             "the head, %.3f m, opacity %.2f%s; never in the recording", g.cfg.indicator.x, g.cfg.indicator.y, g.cfg.indicator.z,
+             g.cfg.indicator.size, g.cfg.indicator.opacity, g.cfg.indicator.live ? ", violet while a live viewer receives frames" : "");
+    else
+        LOGI("indicator: off (%s)", g.cfg.indicator.enabled ? "steamvr_indicator = 0" : "vr_indicator = 0");
     g.active = true;
     g_active = true;
 }
@@ -835,6 +855,11 @@ void OvrOnShutdown() {
         int kept = 0;
         const int restored = g_patches.RestoreAll((void*)&HookCpp_WaitGetPoses, (void*)&HookCpp_Submit, &kept);
         if (restored || kept) LOGI("steamvr: shutdown -- %d vtable(s) restored%s", restored, kept ? ", some slots were patched over by someone else (left)" : "");
+        if (g.ind) {   // before the device goes: the overlay's texture lives on it
+            g.ind->Destroy();
+            g.ind.reset();
+        }
+        g.indTracker = IndicatorTracker();
         rec = std::move(g.rec);
         live = std::move(g.live);
         src = std::move(g.src);

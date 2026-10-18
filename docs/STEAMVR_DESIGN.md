@@ -6,7 +6,10 @@ Changed 2026-10-18 (user): the repair after game updates is "detect + ask with o
 ## Decisions on the open questions (lead, 2026-10-17)
 1. **No mirror-texture spike.** `IVRCompositor::GetMirrorTextureD3D11` gives the compositor's output (SteamVR UI and
    chaperone in it, no per-frame render pose, the compositor's pacing). The proxy records the game's own eye images.
-2. **v1 ships without the in-headset dot.** Beeps + tray icon tell the state. The `IVROverlay` dot is phase 2.
+2. ~~**v1 ships without the in-headset dot.**~~ Changed 2026-10-18: the `IVROverlay` dot is in v0.5.0 for per-game recording
+   (§3; the user did not hear / see the state in Crisis VRigade 2). Quick mode has NO dot (user decision 2026-10-18: the mirror
+   records the compositor output, a dot would be in its video). The cues play through PlaySound from the game process since
+   2026-10-18 (Beep() used the often-muted "System sounds" session).
 3. ~~v1 enable flow = pick the game exe; Steam library auto-listing is phase 2.~~ Changed 2026-10-17 (user): Steam library
    auto-discovery and the repair after game updates are **v1** (see §4; since 2026-10-18 detect + one click, not automatic); "Add a game by exe..." stays for
    non-Steam games.
@@ -104,13 +107,19 @@ non-elevated by the tray when the user enables a game, not at start). Neither �
   `control.cpp` is a process singleton — one front end per process. (3) `VrIndicator` is OpenXR-only; only
   `RenderIndicator` / `IndicatorTracker` are reused (phase 2). (4) `settings_test` / `install_test` now link control.cpp.
 
-## 3. VR indicator — phase 2
-`IVROverlay_027` (fallback 026/025) from inside the game process: overlay `jrdevo.eyecapture.indicator`, HMD-relative
-transform from `indicator_x/y/z`, 64x64 texture from `RenderIndicator`, Show/Hide from `IndicatorTracker`. Never in the
-recording. `src\openvr\openvr_indicator.{h,cpp}`, ~200 lines.
+## 3. VR indicator (built 2026-10-18)
+`src\openvr\openvr_indicator.{h,cpp}`: the proxy asks the real DLL itself for `FnTable:IVROverlay_027` (fallback _026 / _025;
+slots in `openvr_versions.h` `kOverlayVersions`, checked against Valve's openvr_capi.h of v2.5.1 / v1.23.7 / v1.16.8) at the
+first pair that shows something. Overlay key `jrdevo.eyecapture.indicator.<pid>` (unique system-wide), width =
+`indicator_size`, `SetOverlayTransformTrackedDeviceRelative(HMD, indicator_x/y/z)`, sort order 1000, a 64x64 R8G8B8A8 texture
+on the game's device filled by `RenderIndicator` (ColorSpace_Gamma) only when the state changes, the recording pulse through
+`SetOverlayAlpha` (max 30 calls/s), Show/Hide from `IndicatorTracker`; all inside the second eye's Submit under `g_lock`,
+after the capture. DestroyOverlay at VR_ShutdownInternal. Any error / SEH fault: logged once, dot off for that VR session,
+capture unaffected. On while `vr_indicator = 1` and `steamvr_indicator = 1`. Tests: `run_steamvr.ps1` indicator_* (the mock's
+IVROverlay records every call). Not yet seen on a real headset.
 
 ## 4. Config / logging / tray
-- `config.ini` `[steamvr]`: `steamvr_enabled = 1` (0 = pure forwarder), `steamvr_indicator = 1` (phase 2),
+- `config.ini` `[steamvr]`: `steamvr_enabled = 1` (0 = pure forwarder), `steamvr_indicator = 1` (the dot, §3),
   `steamvr_pose_source = auto | submit | waitgetposes`. Everything else applies unchanged and reloads per recording.
   Commit config.ini only with new keys at code defaults (it is also the user's live config).
 - Log: the same `<home>\logs\eye_capture.log` (pid on every line); banner

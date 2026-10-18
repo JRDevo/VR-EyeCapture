@@ -50,7 +50,7 @@ enum class SteamVrMode { PerGame, Quick, Off };
 struct SteamVrSettings {
     SteamVrMode       mode = SteamVrMode::PerGame;   // steamvr_mode = per_game | quick | off
     bool              enabled = true;      // steamvr_enabled: 0 = the proxy is a pure forwarder (no capture, no hooks)
-    bool              indicator = true;    // steamvr_indicator: in-headset dot (phase 2; parsed, not used yet)
+    bool              indicator = true;    // steamvr_indicator: in-headset dot for SteamVR games (and vr_indicator)
     SteamVrPoseSource poseSource = SteamVrPoseSource::Auto;   // steamvr_pose_source = auto | submit | waitgetposes
 };
 const char* SteamVrPoseSourceKey(SteamVrPoseSource s);
