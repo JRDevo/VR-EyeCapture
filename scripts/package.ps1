@@ -1,19 +1,24 @@
 <#
-    package.ps1 -- build Release and make the distributable zip.
+    package.ps1 -- build Release and make the installer (user decision 2026-10-18: installer only, no zip release -- an
+    uninstall through Windows Settings > Apps always cleans up; a deleted zip folder left registry entries and game files).
 
-    Produces dist\VR-EyeCapture-v<version>.zip containing:
+    Produces dist\VR-EyeCapture-Setup-v<version>.exe (Inno Setup 6, installer\VREyeCapture.iss) from the stage folder
+    dist\VR-EyeCapture-v<version>\ containing:
         eye_capture.dll, XR_APILAYER_JRDEVO_eye_capture.json, EyeCaptureTray.exe, config.ini,
         steamvr\openvr_api.dll (the SteamVR proxy -- never loose in the root: the tray's "SteamVR games" copies it into a
         game folder), EyeCaptureMirror.exe for the SteamVR quick mode (it loads SteamVR's own openvr_api.dll from the
         user's SteamVR install; no Valve binary is shipped),
         scripts\make_mkv.ps1, scripts\make_thumbnail.ps1 (+ scripts\thumbnail_overlay.png), README.md, THIRD_PARTY.md
-    Users only unzip and run EyeCaptureTray.exe: it registers the layer itself (one UAC prompt; tray/install.cpp) and
-    unregisters it from its tray menu. scripts\install.ps1 / uninstall.ps1 are developer scripts and stay out of the zip.
+        and installed.txt (the marker: the installed copy keeps the user's data in %APPDATA% / %LOCALAPPDATA% / Videos,
+        config.h IsInstalledCopy).
+    The installer registers the layer (elevated, once) and its uninstaller cleans everything up (EyeCaptureTray.exe
+    --uninstall-cleanup). scripts\install.ps1 / uninstall.ps1 are developer scripts and stay out of it.
+    ISCC.exe: %LOCALAPPDATA%\Programs\Inno Setup 6, Program Files (x86)\Inno Setup 6 or Program Files\Inno Setup 6.
 
     Also produces dist\VR-EyeCapture-OBS-v<version>.zip (a separate release asset, only for OBS users):
         obs-eyecapture.dll, README.md (obs\README.md), COPYING.md (obs\COPYING.md: the plugin is GPL-2.0-or-later),
         LICENSE.md (the PolyForm Noncommercial license of the rest of the project, which COPYING.md refers to)
-    The OBS plugin is never in the main zip.
+    The OBS plugin is never in the installer.
 
     The version comes from project(... VERSION x.y.z) in CMakeLists.txt.
     Windows PowerShell 5.1 compatible.  powershell -ExecutionPolicy Bypass -File scripts\package.ps1
@@ -52,9 +57,9 @@ if ($LASTEXITCODE -ne 0) { Fail "cmake build failed ($LASTEXITCODE)" }
 $rel = Join-Path $buildDir 'Release'
 $stageName = "VR-EyeCapture-v$version"
 $stage = Join-Path $distDir $stageName
-$zip = Join-Path $distDir "$stageName.zip"
+$setup = Join-Path $distDir "VR-EyeCapture-Setup-v$version.exe"
 if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
-if (Test-Path $zip) { Remove-Item -Force $zip }
+if (Test-Path $setup) { Remove-Item -Force $setup }
 New-Item -ItemType Directory -Force -Path (Join-Path $stage 'scripts'), (Join-Path $stage 'steamvr') | Out-Null
 
 $files = @(
@@ -83,13 +88,21 @@ if ($git) {
     [System.IO.File]::WriteAllText((Join-Path $stage 'config.ini'), (($committed -join "`r`n") + "`r`n"), (New-Object System.Text.UTF8Encoding $false))
     Write-Host 'config.ini: committed version (HEAD), not the working copy'
 } else { Write-Host 'WARNING: git not found -- config.ini copied from the working tree' -ForegroundColor Yellow }
-Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip -Force
-Write-Host "`nCreated $zip" -ForegroundColor Green
-Add-Type -AssemblyName System.IO.Compression.FileSystem
-$archive = [System.IO.Compression.ZipFile]::OpenRead($zip)
-try { foreach ($e in $archive.Entries) { "  {0,10}  {1}" -f $e.Length, $e.FullName } } finally { $archive.Dispose() }
+# the marker of an installed copy (config.h kInstalledMarker)
+[System.IO.File]::WriteAllText((Join-Path $stage 'installed.txt'),
+    "Installed by the VR EyeCapture setup. Your settings are in %APPDATA%\VR EyeCapture, logs in %LOCALAPPDATA%\VR EyeCapture\logs,`r`nrecordings in Videos\VR EyeCapture (unless you chose another folder). Uninstall: Windows Settings > Apps > VR EyeCapture.`r`n",
+    (New-Object System.Text.UTF8Encoding $false))
+Get-ChildItem -Recurse -File $stage | ForEach-Object { "  {0,10}  {1}" -f $_.Length, $_.FullName.Substring($stage.Length + 1) }
+$iscc = $null
+foreach ($cand in @("$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe", "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "$env:ProgramFiles\Inno Setup 6\ISCC.exe")) {
+    if (Test-Path $cand) { $iscc = $cand; break }
+}
+if (-not $iscc) { Fail 'ISCC.exe (Inno Setup 6) not found' }
+& $iscc /Q "/DAppVersion=$version" "/DStageDir=$stage" "/DOutDir=$distDir" (Join-Path $root 'installer\VREyeCapture.iss')
+if ($LASTEXITCODE -ne 0) { Fail "ISCC failed ($LASTEXITCODE)" }
+Write-Host "`nCreated $setup ($([math]::Round((Get-Item $setup).Length / 1MB, 1)) MB)" -ForegroundColor Green
 
-# --- separate OBS plugin zip (own release asset; not in the main zip) ---
+# --- separate OBS plugin zip (own release asset; not in the installer) ---
 $obsName = "VR-EyeCapture-OBS-v$version"
 $obsStage = Join-Path $distDir $obsName
 $obsZip = Join-Path $distDir "$obsName.zip"

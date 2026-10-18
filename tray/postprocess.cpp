@@ -531,7 +531,7 @@ void Processor::SaveQueue() {
         for (const auto& q : queue_) add(q);
     }
     out += "\n]}\n";
-    const std::wstring path = exeDir_ + L"\\queue.json", tmp = path + L".tmp";
+    const std::wstring path = UserDataDir(exeDir_) + L"\\queue.json", tmp = path + L".tmp";
     HANDLE h = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) { LOGW("queue: cannot write %s (error %lu)", N(tmp).c_str(), GetLastError()); return; }
     DWORD put = 0;
@@ -545,7 +545,7 @@ void Processor::SaveQueue() {
 }
 
 void Processor::LoadQueue() {
-    const std::wstring path = exeDir_ + L"\\queue.json";
+    const std::wstring path = UserDataDir(exeDir_) + L"\\queue.json";
     HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
     if (h == INVALID_HANDLE_VALUE) return;
     std::string text;

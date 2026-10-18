@@ -57,6 +57,8 @@ std::vector<std::wstring> EnabledGameNames(const std::wstring& installDir);
 // Disables every enabled game (no question: the caller asked; the tray's Unregister flow), logs it, deletes the Home value when
 // none is left, refreshes an open window. Returns the text for the result balloon / box; *allOk = every game was disabled.
 std::wstring DisableAllGames(const std::wstring& installDir, bool testMode, const char* why, bool* allOk = nullptr);
+// Uninstall: deletes the HKCU Home value when it names installDir or a folder that no longer exists (as after the last Disable).
+void RemoveHomeKey(const std::wstring& installDir, bool testMode);
 
 // Our openvr_api.dll to install: <installDir>\openvr_api.dll (the tray runs from build\Release), then
 // <installDir>\steamvr\openvr_api.dll (the release zip), then <installDir>\build\Release\openvr_api.dll (the dev tree).

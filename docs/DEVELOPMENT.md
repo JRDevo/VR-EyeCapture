@@ -106,6 +106,20 @@ workaround, they are what a well-mannered app does anyway:
   `EyeCaptureTray` and `EyeCaptureMirror` in CMakeLists.txt; Common Controls v6 comes from a pragma in `settings.cpp`).
 - No obfuscation, packing or anti-AV tricks. If a scanner still blocks a build, report it; do not work around it.
 
+## Installer and the installed copy (0.5.0)
+
+User decision 2026-10-18: the release is an installer only (`scripts\package.ps1` -> `dist\VR-EyeCapture-Setup-v<version>.exe`,
+Inno Setup 6, `installer\VREyeCapture.iss`; the OBS plugin stays a separate zip). The setup puts `installed.txt` next to the
+program; `config.h` `IsInstalledCopy` then moves everything the program writes out of the read-only program folder: logs,
+`queue.json` and `steamvr_games.ini` to `%LOCALAPPDATA%\VR EyeCapture` (`UserDataDir` / `LogsDir`), the config to
+`%APPDATA%\VR EyeCapture\config.ini` (`SeedAppDataConfig` copies the template once at tray start), the default output
+folder to `<Videos>\VR EyeCapture` (`DefaultCapturesDir`). A folder without the marker (this development folder, every
+test folder) keeps everything next to the exe / DLL, as before. Setup: `--register` (elevated), Start menu, "Start VR
+EyeCapture now" as the original user; update: `--quit` of the installed copy first. Uninstall: `--quit`, `--uninstall-cleanup`
+(SteamVR games disabled, Home value, Run value, HKLM layer, HKCU duplicates), files, then two Yes / No questions (settings +
+logs, recordings; No by default). Tests: `run_install.ps1` 3c (installed copy with scratch LOCALAPPDATA / APPDATA /
+`XR_EYE_CAPTURE_TEST_VIDEOS`, `--quit`, `--uninstall-cleanup` on test keys). The setup itself needs a UAC prompt: run it by hand.
+
 ## Data path
 
 ```

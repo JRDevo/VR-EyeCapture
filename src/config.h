@@ -113,6 +113,24 @@ void ApplyConfigOverrides(const std::wstring& list, Config& c);
 // %APPDATA% folder names of the config: the current one and the one before the rename.
 constexpr const wchar_t kAppDataFolder[] = L"VR EyeCapture";
 constexpr const wchar_t kOldAppDataFolder[] = L"OpenXR-EyeCapture";
+// Installed copy vs. a portable / developer folder. The installer puts kInstalledMarker next to EyeCaptureTray.exe,
+// eye_capture.dll and EyeCaptureMirror.exe; the program folder (Program Files) is then read-only, so everything the app
+// writes goes to the user's folders: logs and the tray's lists to %LOCALAPPDATA%\VR EyeCapture, the config to
+// %APPDATA%\VR EyeCapture\config.ini (seeded from the program folder's copy), recordings to <Videos>\VR EyeCapture. Without
+// the marker (the development folder, test folders) everything stays next to the app, as before.
+// Tests: XR_EYE_CAPTURE_TEST_VIDEOS replaces the Videos folder; LOCALAPPDATA / APPDATA are read from the environment.
+constexpr const wchar_t kInstalledMarker[] = L"installed.txt";
+bool IsInstalledCopy(const std::wstring& appDir);
+// Writable folder for logs and the tray's files (queue.json, steamvr_games.ini): %LOCALAPPDATA%\VR EyeCapture when installed
+// (the program folder when LOCALAPPDATA is not set), else appDir. No trailing slash; not created here.
+std::wstring UserDataDir(const std::wstring& appDir);
+std::wstring LogsDir(const std::wstring& appDir);            // UserDataDir(appDir) + "\logs"
+// Recordings when output_dir is empty: <Videos>\VR EyeCapture when installed, else appDir\captures.
+std::wstring DefaultCapturesDir(const std::wstring& appDir);
+// Installed copy, once at tray start: no %APPDATA%\VR EyeCapture\config.ini (and none in the old folder) -> appDir\config.ini
+// (the commented template the installer ships) is copied there, so Save has a writable file. 1 = copied, 0 = nothing to do,
+// < 0 = -Win32 error.
+int SeedAppDataConfig(const std::wstring& appDir);
 // Path LoadConfig would read (may not exist): the %APPDATA% copy (new folder, then old) if present, else <dllDir>\config.ini.
 std::wstring ConfigPath(const std::wstring& dllDir);
 // The tray, once at start: %APPDATA%\OpenXR-EyeCapture\config.ini exists and %APPDATA%\VR EyeCapture\config.ini does not ->

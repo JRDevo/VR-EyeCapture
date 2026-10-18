@@ -747,7 +747,7 @@ const Help kHelp[] = {
                L"state. \"waiting for you\": added with Add to queue (or restored after the tray restarted); it waits for Start. "
                L"\"waiting: converts when ...\": it starts when the Convert setting allows. Automatic recordings show \"(current "
                L"settings)\": they use the saved settings as they are when the conversion starts. Select several with Ctrl or Shift. "
-               L"The list is kept when the tray app is closed (queue.json next to it)."},
+               L"The list is kept when the tray app is closed (queue.json)."},
     {ID_QSTART, L"Starts the selected conversions, one after another, whatever the Convert setting says."},
     {ID_QSTARTALL, L"Starts every waiting conversion, one after another in list order, whatever the Convert setting says."},
     {ID_QREMOVE, L"Removes the selected conversions from the list. The MP4 is not deleted; convert it later with 'Convert a recording...'."},
@@ -1051,7 +1051,7 @@ void UpdateFreeSpace() {
     if (g_dlg) KillTimer(g_dlg, kFreeSpaceTimer);   // a pending debounced refresh is done by this call
     std::wstring dir = Trim(GetText(ID_OUTDIR));
     const bool def = dir.empty();
-    if (def) dir = ExeFolder() + L"\\captures";
+    if (def) dir = DefaultCapturesDir(ExeFolder());
     // one query (an offline network drive can take seconds per GetDiskFreeSpaceExW); the text is disk::FreeText's
     unsigned long long f = 0;
     const bool known = disk::FreeBytes(dir, f);
@@ -1797,7 +1797,7 @@ void DoBrowse() {
     dlg->SetOptions(opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
     dlg->SetTitle(L"Select the folder for recordings (and the converted files)");
     std::wstring start = Trim(GetText(ID_OUTDIR));
-    if (start.empty()) start = ExeFolder() + L"\\captures";
+    if (start.empty()) start = DefaultCapturesDir(ExeFolder());
     while (!start.empty() && GetFileAttributesW(start.c_str()) == INVALID_FILE_ATTRIBUTES) {   // nearest existing parent
         const size_t slash = start.find_last_of(L"\\/");
         if (slash == std::wstring::npos) { start.clear(); break; }

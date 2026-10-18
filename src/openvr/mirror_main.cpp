@@ -426,7 +426,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR cmdLine, int) {
             if (!h.empty()) g.home = h;
         }
     }
-    g.logPath = g.home + L"\\logs\\eye_capture.log";
+    g.logPath = LogsDir(g.home) + L"\\eye_capture.log";
     elog::Init(g.logPath, false);
     LoadConfig(g.home, g.cfg);
     g.env = ReadCaptureEnv();

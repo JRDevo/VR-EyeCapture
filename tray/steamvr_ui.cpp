@@ -69,7 +69,9 @@ bool DirExists(const std::wstring& p) {
     return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
 }
 bool Exists(const std::wstring& p) { return GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES; }
-std::wstring IniPathFor(const std::wstring& dir) { return dir + L"\\steamvr_games.ini"; }
+// The list lives with the user's data: next to the app in a portable / development folder, %LOCALAPPDATA%\VR EyeCapture when
+// installed (config.h UserDataDir). `dir` = the install folder.
+std::wstring IniPathFor(const std::wstring& dir) { return UserDataDir(dir) + L"\\steamvr_games.ini"; }
 std::wstring IniPath() { return IniPathFor(g_opt.installDir); }
 std::string N(const std::wstring& w) { return elog::Narrow(w); }
 bool SameDir(const std::wstring& a, const std::wstring& b) { return _wcsicmp(a.c_str(), b.c_str()) == 0; }
@@ -1118,6 +1120,8 @@ LRESULT CALLBACK DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
 } // namespace
 
 HWND DialogWindow() { return g_dlg; }
+
+void RemoveHomeKey(const std::wstring& installDir, bool testMode) { DeleteHomeKey(installDir, testMode); }
 
 std::wstring FindProxySource(const std::wstring& installDir, std::wstring* tried) {
     if (tried) tried->clear();

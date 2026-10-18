@@ -11,6 +11,11 @@
                           value = tt3\json, stale gone) -> CU duplicate -> registered=yes hkcu_duplicate=yes -> --register
                           removes it -> --unregister (exit 0) -> registered=no; dll missing -> --register exit 1 and
                           files=missing; read-only LM key -> --register exit 5. tray.log has the --register lines.
+    3c. installed copy (installed.txt next to the exe; LOCALAPPDATA / APPDATA / XR_EYE_CAPTURE_TEST_VIDEOS = scratch folders):
+                          tray.log in %LOCALAPPDATA%\VR EyeCapture\logs, config.ini seeded to %APPDATA%\VR EyeCapture, the
+                          default recordings folder <Videos>\VR EyeCapture, nothing written next to the exe; --quit closes the
+                          running tray of that folder; --uninstall-cleanup removes the (test) Run value, the (test) HKLM
+                          registration and the (test) Home value.
     3b. start_with_windows = 1 in config.ini: the start restores the tray's OWN Run value when missing / another folder (test Run
                           key), never over a value switched off in Task Manager, never writes StartupApproved.
     3. GUI on test keys  : the start must not touch the startup registration: with a stale old-name "OpenXR-EyeCapture" Run value
@@ -216,6 +221,54 @@ try {
     Remove-Item -Path $runKey -Recurse -Force
     Remove-Item -Path "$($runKey)Approved" -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item Env:\EYECAP_TRAY_TEST_SHM
+
+    # ---- 3c. installed copy: user data outside the program folder; the installer's --quit / --uninstall-cleanup
+    if ($gui -and -not $gui.HasExited) { Stop-Process -Id $gui.Id; $gui = $null }
+    $ti = Join-Path $root 'build\tt3i'
+    Get-Process EyeCaptureTray -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$ti*" } | Stop-Process
+    if (Test-Path $ti) { Remove-Item -Recurse -Force $ti }
+    New-Item -ItemType Directory -Force $ti, (Join-Path $ti 'local'), (Join-Path $ti 'roam'), (Join-Path $ti 'videos') | Out-Null
+    Copy-Item $trayBin $ti
+    Copy-Item (Join-Path $root 'config.ini') $ti
+    New-Item -ItemType File (Join-Path $ti $jsonName) | Out-Null
+    New-Item -ItemType File (Join-Path $ti 'eye_capture.dll') | Out-Null
+    Set-Content (Join-Path $ti 'installed.txt') 'test' -Encoding ascii
+    $exeI = Join-Path $ti 'EyeCaptureTray.exe'
+    $oldLocal = $env:LOCALAPPDATA
+    $env:LOCALAPPDATA = Join-Path $ti 'local'; $env:APPDATA = Join-Path $ti 'roam'; $env:XR_EYE_CAPTURE_TEST_VIDEOS = Join-Path $ti 'videos'
+    $env:EYECAP_TRAY_TEST_SHM = 'eyecap-install-test'
+    try {
+        $gui = Start-Process $exeI -PassThru
+        Start-Sleep -Seconds 3
+        $trayLog = Join-Path $ti 'local\VR EyeCapture\logs\tray.log'
+        $log = if (Test-Path $trayLog) { Get-Content $trayLog -Raw -Encoding UTF8 } else { '' }
+        Step 'installed copy: tray.log in %LOCALAPPDATA%\VR EyeCapture\logs, none next to the exe' ((Test-Path $trayLog) -and -not (Test-Path (Join-Path $ti 'logs')))
+        Step 'installed copy: config.ini seeded to %APPDATA%\VR EyeCapture, logged' ((Test-Path (Join-Path $ti 'roam\VR EyeCapture\config.ini')) -and $log -match 'installed copy -- config\.ini copied from the program folder')
+        Step 'installed copy: default recordings folder <Videos>\VR EyeCapture' ($log -match [regex]::Escape("recordings by default in $ti\videos\VR EyeCapture"))
+        $r = TrayCli $exeI '--quit'
+        Start-Sleep -Milliseconds 300
+        Step '--quit: the running tray of this folder exits' ($r.code -eq 0 -and $r.out -match 'quit: 1 tray\(s\) of this folder asked to exit, 0 still running' -and $gui.HasExited)
+        $gui = $null
+        # what the uninstaller cleans: test Run value, test HKLM registration of this folder, test Home value
+        New-Item -Path $runKey -Force | Out-Null
+        New-ItemProperty -Path $runKey -Name 'VR EyeCapture' -Value ('"' + $exeI + '"') -PropertyType String -Force | Out-Null
+        SetVal $lmKey (Join-Path $ti $jsonName)
+        $homeKey = 'HKCU:\Software\OpenXR-EyeCapture-Test\Home'
+        New-Item -Path $homeKey -Force | Out-Null
+        New-ItemProperty -Path $homeKey -Name 'Home' -Value $ti -PropertyType String -Force | Out-Null
+        $env:XR_EYE_CAPTURE_TEST_HOME_KEY = 'Software\OpenXR-EyeCapture-Test\Home'
+        $r = TrayCli $exeI '--uninstall-cleanup'
+        Remove-Item Env:\XR_EYE_CAPTURE_TEST_HOME_KEY
+        $runLeft = (Get-Item $runKey -ErrorAction SilentlyContinue).GetValueNames() -contains 'VR EyeCapture'
+        $homeLeft = (Test-Path $homeKey) -and ((Get-Item $homeKey).GetValueNames() -contains 'Home')
+        Step '--uninstall-cleanup: exit 0; Run value, HKLM registration and Home value removed' ($r.code -eq 0 -and -not $runLeft -and (Ours $lmKey).Count -eq 0 -and -not $homeLeft -and $r.out -match 'OpenXR layer: unregistered' -and $r.out -match 'start with Windows: removed')
+    } finally {
+        $env:LOCALAPPDATA = $oldLocal
+        Remove-Item Env:\XR_EYE_CAPTURE_TEST_VIDEOS -ErrorAction SilentlyContinue
+        Remove-Item Env:\EYECAP_TRAY_TEST_SHM -ErrorAction SilentlyContinue
+        Remove-Item -Path $runKey -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path 'HKCU:\Software\OpenXR-EyeCapture-Test\Home' -Recurse -Force -ErrorAction SilentlyContinue
+    }
 } finally {
     $env:APPDATA = $oldAppdata
     foreach ($v in @('EYECAP_TRAY_TEST_REG_ROOTS', 'EYECAP_TRAY_TEST_RUN_KEY', 'EYECAP_TRAY_TEST_SHM', 'EYECAP_TRAY_TEST_REG')) { Remove-Item "Env:\$v" -ErrorAction SilentlyContinue }

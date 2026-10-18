@@ -80,7 +80,7 @@ games with Direct3D 11.
   DaVinci Resolve and other editors that dislike variable frame rate; off by default (the real frame times are kept).
 - **Dormant unless the tray runs** — the layer does nothing while the tray app is not running.
 - **Works alongside the [ETS2 / ATS DLAA + DLSS injector mod](https://github.com/JRDevo/ETS2-ATS-DLAA-DLSS-Injection-Mod)**.
-- **Log for bug reports** — `logs\eye_capture.log` and `logs\tray.log`.
+- **Log for bug reports** — `eye_capture.log` and `tray.log` in `%LOCALAPPDATA%\VR EyeCapture\logs`.
 
 ## Examples
 
@@ -141,11 +141,11 @@ conversion queue); **right-click** it for the menu.
 | **Pause conversion** / **Resume conversion** | Only while a conversion runs. Pauses the running ffmpeg (it uses no CPU / GPU while paused; the tooltip says "paused") and continues it later. |
 | **Cancel conversion** | Only while a conversion runs. Stops it and deletes the half-written file of that step (`<name>.part`). The MP4 is always kept (even with `keep_mp4 = 0`), files finished earlier in the same conversion stay, and recordings waiting behind it still convert. A balloon says "Conversion cancelled: <file>". |
 | **Start recording** / **Stop recording** | Starts or stops a recording in the running VR game. Same as your hotkey (shown next to it). Greyed out while no game is running. |
-| **Open captures folder** | Opens the folder with your recordings (`captures\` unless you set another one). |
+| **Open captures folder** | Opens the folder with your recordings (`Videos\VR EyeCapture` unless you set another one). |
 | **Convert last recording now** | Converts the newest recording at once (the YouTube `.mkv`, the 8K copy, the flat copy, whatever you switched on), even if conversion is set to wait until the game closes or to "When I say". |
 | **Convert a recording...** | Opens a file dialog in the captures folder; every MP4 you pick (several with Ctrl / Shift) is converted at once, one after another, whatever the Convert setting says. Only recordings are accepted: a converted file (`.mkv`, `_FLAT.mp4`) or any other file is refused with a "Not a recording" balloon, so it can never be re-converted and deleted. The same button is in the app window. |
 | **Tag a video as 3D** | A submenu for videos made elsewhere (for example a side-by-side OBS recording): **Side by side...** or **Top / bottom...** opens a file dialog in your Videos folder (`.mkv`, `.mp4`, `.mov`, several allowed). Each file is copied, without re-encoding, into `<name>_3D.mkv` next to it with the 3D tag YouTube reads (never overwriting; `(2)` is added if the name exists). It runs in the background, does not disturb a running conversion, and a balloon tells you when it is done. |
-| **Open log** | Opens the recorder's log, `logs\eye_capture.log` (the tray's own log is `logs\tray.log` next to it). Useful when something does not work, and for bug reports. |
+| **Open log** | Opens the recorder's log, `eye_capture.log` in `%LOCALAPPDATA%\VR EyeCapture\logs` (the tray's own log is `tray.log` next to it). Useful when something does not work, and for bug reports. |
 | **Open VR EyeCapture** (bold; same as left-click) | Opens the app window (below). |
 | **Edit config** | Opens `config.ini` in Notepad, for the few keys the window does not show. |
 | **Register for VR games...** / **Unregister from VR games...** | Tells Windows that OpenXR games may load the recorder (one administrator prompt), or removes that again. Needed once. |
@@ -165,7 +165,7 @@ Point at any setting and the **Description** box at the bottom explains it. **Sa
 | **Stereo 3D** | **Projection**: flat stereo (side by side, normal) or the experimental VR180 / VR360 dome. **Dome fill** and **Fade after**: dome mode only (greyed while Projection is Flat). **Options**: *Symmetric field of view* lines both eyes up so the 3D is comfortable (leave on), *Swap eyes* if left and right look swapped, *Level horizon (roll lock)* keeps the horizon level. **Head smoothing**: calms small head shakes (0 = off), with the **FOV scale** (field of view scale) next to it: zooms in a little to hide the edges. |
 | **Recording Indicator** | A small red dot that you see in the headset while recording, never in the video. Size, opacity and where it floats. |
 | **Export** | **YouTube output**: the plain 3D MKV, the sharper 8K 3D MKV (slower to make), both, or none. **8K bitrate**: 100, 150 (default) or 200 Mbit/s for the 8K file (NVIDIA encoder). **8K codec**: HEVC (default) or AV1 (RTX 40 / 50; sharper at the same bitrate, falls back to HEVC). **Convert**: immediately, when the VR session ends, when the game exits (so it does not cost frame rate while you play), or *When I say* (never on its own). **Convert a recording...**: pick MP4s to convert next. **Add to queue...**: pick MP4s that wait in the Conversions list until you click Start / Start all. Both use the Export settings the window shows at that moment (saved or not) for those files. **Also create a 2D (flat) video** for people without a headset. **Keep original MP4**. **Output layout**: how the two eyes are packed for YouTube (top/bottom, half height is what YouTube likes; greyed for VR180 / VR360). **Eye crop**: 16:9 widescreen (recommended; plays in the Quest YouTube app and gets 8K), 4:3 (taller view), 4:3 padded to 16:9 (the taller view with black side bars, 7680x4320 so it still gets 8K) or none (full eye, but tall videos may crash the Quest YouTube player). **Record directly in the YouTube layout (no re-encode)** (`record_for_youtube`): the recording itself is made in that output layout and eye crop at the 8K size, so the tray only copies it into the `.mkv` (seconds) and that `.mkv` is the upload; the 8K bitrate / codec are greyed then (no separate 8K file), and the full side-by-side picture is not kept. Flat projection only. |
-| **Conversions** | Live view of the conversion queue (refreshes twice a second). **Running**: the file, its format, the step (MKV, flat or 8K), percent, time left, or why it waits; a progress bar; **Pause** / **Resume** and **Cancel** (when the running conversion waits for the Convert setting, Pause reads **Run now** and starts it). **Waiting**: the conversions in the order they run, each as `<file> - <format> - <state>`, e.g. `rec.mp4 - 8K AV1 100M, 4:3, tb_half - waiting for you`. States: *next*, *waiting for you* (added with Add to queue, or restored after a restart: waits for Start), *waiting: converts when the game closes* (the Convert setting), *queued*. Automatic recordings show *(current settings)*: they use the saved settings as they are when their conversion starts. Select one or several (Ctrl / Shift) and click **Start** (they run next, in order), **Start all** (every waiting one, in list order), or **Remove** (the MP4 stays). The list is saved in `queue.json` next to the tray app; after a restart every entry comes back as *waiting for you*. |
+| **Conversions** | Live view of the conversion queue (refreshes twice a second). **Running**: the file, its format, the step (MKV, flat or 8K), percent, time left, or why it waits; a progress bar; **Pause** / **Resume** and **Cancel** (when the running conversion waits for the Convert setting, Pause reads **Run now** and starts it). **Waiting**: the conversions in the order they run, each as `<file> - <format> - <state>`, e.g. `rec.mp4 - 8K AV1 100M, 4:3, tb_half - waiting for you`. States: *next*, *waiting for you* (added with Add to queue, or restored after a restart: waits for Start), *waiting: converts when the game closes* (the Convert setting), *queued*. Automatic recordings show *(current settings)*: they use the saved settings as they are when their conversion starts. Select one or several (Ctrl / Shift) and click **Start** (they run next, in order), **Start all** (every waiting one, in list order), or **Remove** (the MP4 stays). The list is saved in `queue.json` (in `%LOCALAPPDATA%\VR EyeCapture`); after a restart every entry comes back as *waiting for you*. |
 | **Advanced** | **SteamVR games**: how SteamVR games are recorded (per game, quick mode or off; the same setting as in the SteamVR games window). **Log level** (how much goes into the log) and **Start with Windows** (starts the tray app when you log in). |
 | Buttons | **Open config.ini**, **Restore Defaults** (fills in the defaults, nothing saved until Save), **Save**, **Cancel**. |
 
@@ -180,7 +180,7 @@ Point at any setting and the **Description** box at the bottom explains it. **Sa
 
 
 **[Download the latest release here](https://github.com/JRDevo/VR-EyeCapture/releases/latest)**
-— get `VR-EyeCapture-v<version>.zip` under **Assets**, then follow [Install](#install) below.
+— get `VR-EyeCapture-Setup-v<version>.exe` under **Assets**, then follow [Install](#install) below.
 (The green **Code** button downloads the source code, not the tool.) To build it yourself, see "Building from source".
 
 This is an unofficial fan project. It is not affiliated with, or endorsed by, SCS Software, The Khronos Group, Meta,
@@ -215,14 +215,14 @@ OpenXR is a trademark of The Khronos Group.
 </summary>
 
 
-1. Unzip `VR-EyeCapture-v<version>.zip` to a folder you keep (the layer is loaded from there), for example
-   `C:\Tools\VR EyeCapture`.
-2. Run `EyeCaptureTray.exe`. The first time it asks *"VR EyeCapture is not registered for OpenXR games yet. Register
-   VR EyeCapture for OpenXR games now?"*: click **Yes** and accept the one Windows administrator (UAC) prompt. That registers the layer for all OpenXR
-   apps: `HKLM\SOFTWARE\Khronos\OpenXR\1\ApiLayers\Implicit\<folder>\XR_APILAYER_JRDEVO_eye_capture.json = 0`
-   (any older registration from another folder is replaced). Clicked No? Right-click the tray icon →
-   **Register for VR games...** whenever you are ready; until then the tooltip says "Not registered for VR games".
-   Moved the folder? Start the tray from the new folder and it offers to re-register from there.
+1. Run `VR-EyeCapture-Setup-v<version>.exe` and accept the one Windows administrator (UAC) prompt. It installs into
+   `C:\Program Files\VR EyeCapture` (you can pick another folder), adds a Start menu entry and registers the layer for all
+   OpenXR apps: `HKLM\SOFTWARE\Khronos\OpenXR\1\ApiLayers\Implicit\<folder>\XR_APILAYER_JRDEVO_eye_capture.json = 0`
+   (any older registration from another folder is replaced).
+2. At the end, leave **Start VR EyeCapture now** ticked: the tray icon appears. Later: Start menu → **VR EyeCapture**.
+   The program folder stays read-only; your data lives in your own folders: settings in
+   `%APPDATA%\VR EyeCapture\config.ini`, logs in `%LOCALAPPDATA%\VR EyeCapture\logs`, recordings in
+   `Videos\VR EyeCapture` (unless you pick another output folder).
 3. Optional: tick **Start with Windows** in the app window → Advanced so the tray app always runs (it must run before the
    game, see "How it works"). This writes one Run entry for your Windows account (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`,
    value `VR EyeCapture`; Task Manager > Startup apps lists it as "VR EyeCapture"). Your choice is also saved in config.ini
@@ -233,19 +233,20 @@ OpenXR is a trademark of The Khronos Group.
 4. SteamVR (OpenVR) games need one more step: tray menu → **SteamVR games...** → tick the games
    ([SteamVR games](#steamvr-games-virtual-desktop--steamvr)).
 
-Updating from OpenXR-EyeCapture (v0.4 or older): unzip the new version over the old folder, or into a new folder and
-start the tray from there (it offers to re-register). Your settings in `%APPDATA%\OpenXR-EyeCapture\config.ini` are
-copied to `%APPDATA%\VR EyeCapture\config.ini` at the first start (the old file is left alone).
+Updating: run the new setup; it closes the tray app, replaces the program and keeps your settings and recordings. From
+OpenXR-EyeCapture (v0.4 or older, a zip folder): your settings in `%APPDATA%\OpenXR-EyeCapture\config.ini` are copied to
+`%APPDATA%\VR EyeCapture\config.ini` at the first start (the old file is left alone); then delete the old folder (its
+registration is replaced by the setup).
 
-Uninstall: untick **Start with Windows** in the app window first (or delete that Run value), then right-click the tray
-icon → **Unregister from VR games...** (one UAC prompt). If SteamVR games are enabled it also asks *"Also put the original
-openvr_api.dll back in N SteamVR game(s)?"*: **Yes** disables them all (the same as **Disable all** in **SteamVR
-games...**; close those games and SteamVR first). Exit the tray app and delete the folder (recordings in `captures\` stay
-until you delete them). When the last SteamVR game is disabled, the tray also deletes the
-`HKCU\Software\OpenXR-EyeCapture` value `Home` it wrote when you enabled one.
+Uninstall: Windows Settings → Apps → **VR EyeCapture** → Uninstall, or tray menu → **Remove VR EyeCapture from this PC...**
+(the same). It closes the tray app, puts the original `openvr_api.dll` back in every SteamVR game you enabled (close those
+games and SteamVR first), removes the layer registration, the Start with Windows entry and the `HKCU\Software\OpenXR-EyeCapture`
+value `Home`, deletes the program, and then asks twice (No is the default): delete your settings and logs? delete your
+recordings in `Videos\VR EyeCapture`? Nothing else is left behind.
 
 Command-line forms (from an administrator prompt): `EyeCaptureTray.exe --register` / `--unregister` (exit code 0 = done,
-5 = no administrator rights); `EyeCaptureTray.exe --status` prints `registered=yes|no|stale` and `autostart=yes|no` among the status fields.
+5 = no administrator rights); `EyeCaptureTray.exe --status` prints `registered=yes|no|stale` and `autostart=yes|no` among the status fields;
+`--quit` closes the running tray app of that folder and `--uninstall-cleanup` does the uninstaller's clean-up (both used by the setup).
 `scripts\install.ps1` / `uninstall.ps1` are only for building from source (see [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)).
 
 </details>
@@ -285,7 +286,7 @@ any per-user HKCU copy, which would make some loaders load the layer twice) and 
    The beeps are played by the game's own process, so you hear them wherever you hear the game (they no longer depend on
    the "System sounds" volume in the Windows volume mixer). They play on the Windows default playback device; if that is
    the device being recorded (the usual setup), they are in the recording too: set `beeps = 0` (app window: Recording -> Beeps) to switch them off.
-4. The file lands in the `captures` folder next to `eye_capture.dll`, named
+4. The file lands in `Videos\VR EyeCapture` (or the output folder you set), named
    `<game exe>_<yyyyMMdd_HHmmss>_SBS.mp4`, e.g. `eurotrucks2_20261009_201512_SBS.mp4` (`_VR180.mp4` / `_VR360.mp4` in
    dome mode, see "VR180 / VR360 dome mode").
 
@@ -789,7 +790,7 @@ A game that is not in Steam: **Add a game by exe...** and pick its `.exe`. Untic
 `openvr_api.dll` back; **Disable all** does that for every enabled game (one confirmation). Each game shows its state:
 **On**, **Off**, **Needs repair** (game updated / VR EyeCapture moved / older recorder version: click **Repair**, see
 below), **OpenComposite installed**, **32-bit, not supported**. The list and the last scan are kept in `steamvr_games.ini`
-next to the tray app; the files in the game folder are what counts. Enabling a game also writes one per-user registry
+in `%LOCALAPPDATA%\VR EyeCapture`; the files in the game folder are what counts. Enabling a game also writes one per-user registry
 value, `HKCU\Software\OpenXR-EyeCapture` → `Home` = the VR EyeCapture folder (no administrator rights; a fallback for
 the recorder when a game folder lacks its small settings file); it is deleted again when you disable the last game.
 
@@ -855,7 +856,7 @@ The log is the same `logs\eye_capture.log` (the block starts with `==== VR EyeCa
 </summary>
 
 
-`logs\eye_capture.log` next to the DLL, with a copy in the output folder. Every OpenXR app that starts writes a block:
+`eye_capture.log` in `%LOCALAPPDATA%\VR EyeCapture\logs`, with a copy in the output folder. Every OpenXR app that starts writes a block:
 the game exe, runtime, graphics API (`capture AVAILABLE` / `DISABLED`), every swapchain (format, size, array, MSAA),
 the frame layout it detected (`TWO_SWAPCHAINS`, `TEXTURE_ARRAY`, `ONE_SWAPCHAIN_TWO_RECTS`), the encoder it picked
 (e.g. `NVIDIA HEVC Encoder MFT [hardware]`) and a summary per recording (frames written / dropped, duration, file).
@@ -944,12 +945,13 @@ separate OBS plugin zip (build notes for the plugin: [`obs/README.md`](obs/READM
 If something goes wrong, [open an issue](../../issues/new/choose) on this GitHub page and attach the files below.
 Without the logs I usually can't tell what happened.
 
-**Files to attach** — the logs are in the tool's folder (next to `eye_capture.dll`):
+**Files to attach** — the logs are in `%LOCALAPPDATA%\VR EyeCapture\logs` (paste that into the Explorer address bar, or
+tray menu → **Open log**):
 
 - **`logs\eye_capture.log`** — **required, always.**
 - **`logs\tray.log`** — **required.**
 - **`config.ini`** — **required** (your settings). Usually `%APPDATA%\VR EyeCapture\config.ini` (paste that into the
-  Explorer address bar); without that file, the one next to `eye_capture.dll`. The first lines of `logs\eye_capture.log`
+  Explorer address bar); without that file, the template in the program folder. The first lines of `logs\eye_capture.log`
   name the one in use (`config ...`).
 
 **Write in the issue:**

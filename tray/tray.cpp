@@ -80,7 +80,7 @@ const UINT WM_UNREGISTER = WM_APP + 11;     // "Unregister from VR games..." (= 
 const UINT kTimer = 1;
 const UINT kTipTimer = 2;     // one-shot: end of the "settings saved" tooltip
 enum : UINT { ID_TOGGLE = 100, ID_FOLDER, ID_CONVERT, ID_LOG, ID_SETTINGS, ID_CONFIG, ID_EXIT, ID_REGISTER, ID_UNREGISTER,
-               ID_CONVERT_PICK, ID_JOB_INFO, ID_JOB_PAUSE, ID_JOB_CANCEL, ID_TAG3D_SBS, ID_TAG3D_TB, ID_STEAMVR };
+               ID_CONVERT_PICK, ID_JOB_INFO, ID_JOB_PAUSE, ID_JOB_CANCEL, ID_TAG3D_SBS, ID_TAG3D_TB, ID_STEAMVR, ID_REMOVE };
 const wchar_t kAppTitle[] = L"VR EyeCapture";
 // tray icon frames (resource 101 + value); recording and converting alternate A / B (lens colours swapped) every 0.5 s
 enum : int { kIcoNoGame, kIcoReady, kIcoRecA, kIcoRecB, kIcoBusy, kIcoConvA, kIcoConvB, kIcoCount };
@@ -352,7 +352,7 @@ void ScanCaptures() {
     LoadConfig(g_exeDir, cfg);
     if (!cfg.postMkv && !cfg.postFlat && !cfg.postYt8k) return;
     std::wstring dir = g_st.outputDir[0] ? std::wstring(g_st.outputDir) : cfg.outputDir;
-    if (dir.empty()) dir = g_exeDir + L"\\captures";
+    if (dir.empty()) dir = DefaultCapturesDir(g_exeDir);
     WIN32_FIND_DATAW fd;
     HANDLE h = FindFirstFileW((dir + L"\\*.mp4").c_str(), &fd);
     if (h == INVALID_HANDLE_VALUE) return;
@@ -1307,6 +1307,9 @@ void ShowMenu() {
         AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     }
     AppendMenuW(m, MF_STRING, ID_STEAMVR, L"SteamVR games...");
+    // installed copy: the uninstaller (the same as Windows Settings > Apps > VR EyeCapture > Uninstall)
+    if (IsInstalledCopy(g_exeDir) && GetFileAttributesW((g_exeDir + L"\\unins000.exe").c_str()) != INVALID_FILE_ATTRIBUTES)
+        AppendMenuW(m, MF_STRING, ID_REMOVE, L"Remove VR EyeCapture from this PC...");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING, ID_EXIT, L"Exit");
     POINT pt;
@@ -1346,7 +1349,7 @@ void ShowMenu() {
         Refresh();
         break;
     case ID_LOG:
-        OpenPath(g_live && g_st.logPath[0] ? std::wstring(g_st.logPath) : g_exeDir + L"\\logs\\eye_capture.log");
+        OpenPath(g_live && g_st.logPath[0] ? std::wstring(g_st.logPath) : LogsDir(g_exeDir) + L"\\eye_capture.log");
         break;
     case ID_SETTINGS:
         OpenSettings();
@@ -1365,6 +1368,12 @@ void ShowMenu() {
     case ID_STEAMVR:
         OpenSteamVrGames();
         break;
+    case ID_REMOVE: {   // the uninstaller asks itself, closes this tray (--quit) and cleans up (--uninstall-cleanup)
+        const std::wstring un = g_exeDir + L"\\unins000.exe";
+        const HINSTANCE r = ShellExecuteW(nullptr, L"open", un.c_str(), nullptr, g_exeDir.c_str(), SW_SHOWNORMAL);
+        LOGI("tray: Remove VR EyeCapture from this PC: started %s (%s)", elog::Narrow(un).c_str(), (INT_PTR)r > 32 ? "ok" : "failed");
+        break;
+    }
     case ID_EXIT:
         DestroyWindow(g_wnd);
         break;
@@ -1483,7 +1492,7 @@ void CliPrint(const std::wstring& s) {
 int RunRegCli(const std::wstring& arg) {
     const bool reg = arg == L"--register";
     g_exeDir = ExeDir();
-    elog::Init(g_exeDir + L"\\logs\\tray.log", false);
+    elog::Init(LogsDir(g_exeDir) + L"\\tray.log", false);
     {
         Config cfg;
         LoadConfig(g_exeDir, cfg);
@@ -1510,6 +1519,72 @@ int RunRegCli(const std::wstring& arg) {
     return 0;
 }
 
+// EyeCaptureTray.exe --quit: closes every running tray of THIS folder (WM_CLOSE to its message window = the menu's Exit) and
+// waits up to 10 s for each. For the installer (before files are replaced or removed). Exit code 0 = none left running.
+int RunQuit() {
+    const std::wstring dir = ExeDir();
+    std::vector<HANDLE> procs;
+    for (HWND w = nullptr; (w = FindWindowExW(HWND_MESSAGE, w, L"OpenXREyeCaptureTray", nullptr)) != nullptr;) {
+        DWORD pid = 0;
+        GetWindowThreadProcessId(w, &pid);
+        if (!pid || pid == GetCurrentProcessId()) continue;
+        HANDLE p = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid);
+        if (!p) continue;
+        wchar_t path[MAX_PATH] = L"";
+        DWORD n = MAX_PATH;
+        std::wstring d;
+        if (QueryFullProcessImageNameW(p, 0, path, &n)) { d = path; d = d.substr(0, d.find_last_of(L'\\')); }
+        if (_wcsicmp(d.c_str(), dir.c_str()) != 0) { CloseHandle(p); continue; }
+        PostMessageW(w, WM_CLOSE, 0, 0);
+        procs.push_back(p);
+    }
+    int left = 0;
+    for (HANDLE p : procs) {
+        if (WaitForSingleObject(p, 10000) != WAIT_OBJECT_0) ++left;
+        CloseHandle(p);
+    }
+    CliPrint(L"quit: " + std::to_wstring(procs.size()) + L" tray(s) of this folder asked to exit, " + std::to_wstring(left) + L" still running");
+    return left ? 1 : 0;
+}
+
+// EyeCaptureTray.exe --uninstall-cleanup: what the uninstaller runs (elevated, the user's account) before it deletes the
+// files: puts the original openvr_api.dll back in every SteamVR game the user enabled, deletes the HKCU Home value, the
+// "Start with Windows" Run value(s) and the HKLM OpenXR layer registration (+ HKCU duplicates). Never asks (the uninstaller
+// did). Test keys apply as for the GUI (EYECAP_TRAY_TEST_REG_ROOTS, EYECAP_TRAY_TEST_RUN_KEY, XR_EYE_CAPTURE_TEST_HOME_KEY;
+// EYECAP_TRAY_TEST_SHM = test mode). Exit code 0 = everything done, 1 = something failed (logged / printed).
+int RunUninstallCleanup() {
+    g_exeDir = ExeDir();
+    elog::Init(LogsDir(g_exeDir) + L"\\tray.log", false);
+    Config cfg;
+    LoadConfig(g_exeDir, cfg);
+    elog::SetLevel(cfg.logLevel);
+    const bool testMode = GetEnvironmentVariableW(L"EYECAP_TRAY_TEST_SHM", nullptr, 0) > 0;
+    ApplyTestRegRoots();
+    ApplyTestRunKey(testMode);
+    LOGI("tray: --uninstall-cleanup (exe folder %s%s)", elog::Narrow(g_exeDir).c_str(), testMode ? ", test mode" : "");
+    bool ok = true;
+    if (!steamvr_ui::EnabledGameNames(g_exeDir).empty()) {
+        bool svrOk = true;
+        const std::wstring t = steamvr_ui::DisableAllGames(g_exeDir, testMode, "uninstall", &svrOk);
+        CliPrint(L"steamvr: " + t);
+        if (!svrOk) ok = false;
+    } else {
+        CliPrint(L"steamvr: no game enabled");
+    }
+    steamvr_ui::RemoveHomeKey(g_exeDir, testMode);
+    std::wstring err;
+    if (install::SetAutostart(false, g_exeDir, err)) CliPrint(L"start with Windows: removed");
+    else { ok = false; CliPrint(L"start with Windows: " + err); LOGW("tray: uninstall: %s", elog::Narrow(err).c_str()); }
+    long winErr = 0;
+    if (testMode && GetEnvironmentVariableW(L"EYECAP_TRAY_TEST_REG_ROOTS", nullptr, 0) == 0)
+        CliPrint(L"OpenXR layer: test mode without EYECAP_TRAY_TEST_REG_ROOTS -- skipped");
+    else if (install::Unregister(g_exeDir, err, &winErr)) CliPrint(L"OpenXR layer: unregistered");
+    else { ok = false; CliPrint(L"OpenXR layer: " + err); LOGW("tray: uninstall: %s", elog::Narrow(err).c_str()); }
+    install::RemoveHkcuDuplicates();
+    LOGI("tray: --uninstall-cleanup %s", ok ? "done" : "done with errors");
+    return ok ? 0 : 1;
+}
+
 // EyeCaptureTray.exe --inputs [seconds]: lists the Xbox controllers and DirectInput game controllers (wheels, pedals,
 // button boxes ...), then for N seconds (default 15) prints every button press as the text the `hotkey` setting takes
 // ("Pad:A", "Joy:Thrustmaster T300RS Racing Wheel:Button3"). Hold several buttons for a combination; the text is printed
@@ -1523,7 +1598,7 @@ int RunInputs(const std::wstring& arg) {
         if (v > 0 && v <= 3600) secs = v;
     }
     g_exeDir = ExeDir();
-    elog::Init(g_exeDir + L"\\logs\\tray.log", false);
+    elog::Init(LogsDir(g_exeDir) + L"\\tray.log", false);
     Config cfg;
     LoadConfig(g_exeDir, cfg);
     elog::SetLevel(cfg.logLevel);
@@ -1625,7 +1700,7 @@ int RunCli(const std::wstring& arg) {
 // Prints "ok <output file>" / "error: <reason>"; exit code 0 = tagged, 2 = bad arguments, 1 = failed. Logs to logs\tray.log.
 int RunTag3d(const std::wstring& arg) {
     g_exeDir = ExeDir();
-    elog::Init(g_exeDir + L"\\logs\\tray.log", false);
+    elog::Init(LogsDir(g_exeDir) + L"\\tray.log", false);
     std::wstring rest = arg.substr(8);   // after "--tag3d "
     while (!rest.empty() && rest.front() == L' ') rest.erase(0, 1);
     const size_t sp = rest.find(L' ');
@@ -1656,6 +1731,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
         if (a.compare(0, 8, L"--tag3d ") == 0) return RunTag3d(a);
         if (a == L"--start" || a == L"--stop" || a == L"--toggle" || a == L"--status") return RunCli(a);
         if (a == L"--register" || a == L"--unregister") return RunRegCli(a);
+        if (a == L"--quit") return RunQuit();
+        if (a == L"--uninstall-cleanup") return RunUninstallCleanup();
         if (a == L"--inputs" || a.compare(0, 9, L"--inputs ") == 0) return RunInputs(a);
     }
     // Test-only: EYECAP_TRAY_TEST_SHM=<name> runs an extra tray instance on a private status block (no single-instance
@@ -1679,7 +1756,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     g_inst = inst;
     g_exeDir = ExeDir();
     GetSystemTimeAsFileTime(&g_trayStart);
-    elog::Init(g_exeDir + L"\\logs\\tray.log", false);
+    elog::Init(LogsDir(g_exeDir) + L"\\tray.log", false);
     LOGI("tray: started%s (exe folder %s)", testMode ? " [TEST MODE, private status block]" : "", elog::Narrow(g_exeDir).c_str());
     ApplyTestRunKey(testMode);   // before the settings window can open
     // %APPDATA%\OpenXR-EyeCapture\config.ini is copied once to %APPDATA%\VR EyeCapture (a plain file copy, no registry).
@@ -1689,6 +1766,14 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
         const int m = MigrateAppDataConfig(&from, &to);
         if (m > 0) LOGI("tray: config.ini copied from the old folder %s to %s (the old file is kept)", elog::Narrow(from).c_str(), elog::Narrow(to).c_str());
         else if (m < 0) LOGW("tray: could not copy %s to %s (error %d); the old file is still used", elog::Narrow(from).c_str(), elog::Narrow(to).c_str(), -m);
+        // installed copy (Program Files is read-only): the config the user edits is %APPDATA%\VR EyeCapture\config.ini, seeded
+        // once from the commented template in the program folder
+        const int s = SeedAppDataConfig(g_exeDir);
+        if (s > 0) LOGI("tray: installed copy -- config.ini copied from the program folder to %s", elog::Narrow(ConfigPath(g_exeDir)).c_str());
+        else if (s < 0) LOGW("tray: installed copy -- could not create %%APPDATA%%\\VR EyeCapture\\config.ini (error %d)", -s);
+        if (IsInstalledCopy(g_exeDir))
+            LOGI("tray: installed copy -- logs and lists in %s, recordings by default in %s", elog::Narrow(UserDataDir(g_exeDir)).c_str(),
+                 elog::Narrow(DefaultCapturesDir(g_exeDir)).c_str());
     }
     g_shm = testMode ? EyeCapOpenShared(&g_map, testShm) : EyeCapOpenShared(&g_map);
     for (int i = 0; i < kIcoCount; ++i) g_icons[i] = LoadTrayIcon(i);

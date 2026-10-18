@@ -56,7 +56,7 @@ target_compile_definitions(eye_capture_core PUBLIC
     EYE_CAPTURE_VERSION="${PROJECT_VERSION}")
 target_compile_options(eye_capture_core PRIVATE ${EYE_WARN_FLAGS})
 target_link_libraries(eye_capture_core PUBLIC
-    d3d11 d3d12 dxgi d3dcompiler mfplat mfreadwrite mfuuid ole32 strmiids shell32 winmm OpenXR::headers)
+    d3d11 d3d12 dxgi d3dcompiler mfplat mfreadwrite mfuuid ole32 strmiids shell32 uuid winmm OpenXR::headers)
 
 # Version information resource (CompanyName, ProductName, FileDescription, versions from project(VERSION)) for every binary we
 # ship, so the files identify themselves in Explorer / antivirus tools. kind = APP or DLL.

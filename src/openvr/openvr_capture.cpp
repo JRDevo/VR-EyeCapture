@@ -708,7 +708,7 @@ void OvrProcessInit(const std::wstring& proxyDir, bool realLoaded, const std::ws
     g.home = ph.home;
     g.gameName = ph.game;
     g.exeName = ExeBaseName();
-    g.logPath = g.home + L"\\logs\\eye_capture.log";
+    g.logPath = LogsDir(g.home) + L"\\eye_capture.log";
     elog::Init(g.logPath, false);
     LoadConfig(g.home, g.cfg);
     g.env = ReadCaptureEnv();

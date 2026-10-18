@@ -1,6 +1,8 @@
 // config -- see config.h.
 #include "config.h"
 #include <windows.h>
+#include <shlobj.h>
+#include <knownfolders.h>
 #include <cwctype>
 #include <fstream>
 #include <sstream>
@@ -126,6 +128,53 @@ std::wstring ConfigPath(const std::wstring& dllDir) {
     return dllDir + L"\\config.ini";
 }
 
+bool IsInstalledCopy(const std::wstring& appDir) {
+    return !appDir.empty() && FileExists(appDir + L"\\" + kInstalledMarker);
+}
+
+namespace {
+std::wstring EnvDir(const wchar_t* name) {
+    wchar_t v[MAX_PATH];
+    const DWORD n = GetEnvironmentVariableW(name, v, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return std::wstring();
+    std::wstring s = v;
+    while (!s.empty() && (s.back() == L'\\' || s.back() == L'/')) s.pop_back();
+    return s;
+}
+} // namespace
+
+std::wstring UserDataDir(const std::wstring& appDir) {
+    if (!IsInstalledCopy(appDir)) return appDir;
+    const std::wstring la = EnvDir(L"LOCALAPPDATA");
+    return la.empty() ? appDir : la + L"\\" + kAppDataFolder;
+}
+
+std::wstring LogsDir(const std::wstring& appDir) { return UserDataDir(appDir) + L"\\logs"; }
+
+std::wstring DefaultCapturesDir(const std::wstring& appDir) {
+    if (!IsInstalledCopy(appDir)) return appDir + L"\\captures";
+    std::wstring videos = EnvDir(L"XR_EYE_CAPTURE_TEST_VIDEOS");
+    if (videos.empty()) {
+        PWSTR p = nullptr;
+        if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Videos, KF_FLAG_DEFAULT, nullptr, &p)) && p) videos = p;
+        if (p) CoTaskMemFree(p);
+    }
+    return videos.empty() ? UserDataDir(appDir) + L"\\captures" : videos + L"\\" + kAppDataFolder;
+}
+
+int SeedAppDataConfig(const std::wstring& appDir) {
+    if (!IsInstalledCopy(appDir)) return 0;
+    const std::wstring newP = AppDataConfig(kAppDataFolder), oldP = AppDataConfig(kOldAppDataFolder), tmpl = appDir + L"\\config.ini";
+    if (newP.empty() || FileExists(newP) || (!oldP.empty() && FileExists(oldP)) || !FileExists(tmpl)) return 0;
+    SHCreateDirectoryExW(nullptr, newP.substr(0, newP.find_last_of(L'\\')).c_str(), nullptr);
+    if (!CopyFileW(tmpl.c_str(), newP.c_str(), TRUE)) {
+        const DWORD e = GetLastError();
+        return e == ERROR_FILE_EXISTS ? 0 : -(int)(e ? e : 1);
+    }
+    SetFileAttributesW(newP.c_str(), FILE_ATTRIBUTE_NORMAL);   // the copy of a read-only program-folder file must be writable
+    return 1;
+}
+
 int MigrateAppDataConfig(std::wstring* from, std::wstring* to) {
     const std::wstring oldP = AppDataConfig(kOldAppDataFolder), newP = AppDataConfig(kAppDataFolder);
     if (from) *from = oldP;
@@ -142,7 +191,7 @@ int MigrateAppDataConfig(std::wstring* from, std::wstring* to) {
 void LoadConfig(const std::wstring& dllDir, Config& c) {
     c = Config();
     ParseHotkey(kDefaultHotkey, c.hotkey);
-    c.outputDir = dllDir + L"\\captures";
+    c.outputDir = DefaultCapturesDir(dllDir);
 
     const std::wstring path = ConfigPath(dllDir);
     if (!FileExists(path)) {

@@ -161,7 +161,7 @@ std::wstring ModuleDir() { return ModuleDirOf((const void*)&ModuleDir); }
 void InitProcess() {
     g_dllDir = ModuleDir();
     g_exeName = ExeBaseName();
-    g_logPath = g_dllDir + L"\\logs\\eye_capture.log";
+    g_logPath = LogsDir(g_dllDir) + L"\\eye_capture.log";
     elog::Init(g_logPath, false);
     LoadConfig(g_dllDir, g_cfg);
     const CaptureEnv env = ReadCaptureEnv();
