@@ -544,242 +544,226 @@ void Relayout();
 void TryClose();
 
 
-// ---- help texts: hover tooltip + the "Description" panel. Product-documentation style: short, neutral, complete sentences.
+// ---- help texts: hover tooltip + the "Description" panel. Written for people, not for the log: a short first line that says what
+// the setting does, a blank line, then one point per line ("• " bullets for choices). The panel is as tall as the longest
+// text (MeasureHelp) and the window must still fit 1080p (settings_test), so keep every text at about 11 lines or less at the
+// narrowest width (about 160 characters per line).
+#define HELP_BR L"\r\n\r\n"
+#define HELP_LI L"\r\n• "
 const wchar_t* const kOverview =
-    L"Point at a setting to see its description here.\r\n"
-    L"How it works: for OpenXR games eye_capture.dll is an OpenXR API layer; for SteamVR games a copy of openvr_api.dll in the game's "
-    L"folder does the same (tray menu: SteamVR games...). While this tray app is running and the hotkey is pressed, the recorder copies the "
-    L"two eye images that the game submits to the headset, encodes them on the GPU and writes an MP4 file, which the tray then converts "
-    L"to a 3D MKV for YouTube (or, with 'Record directly in the YouTube layout' in the Export group, only copies it into the MKV). "
-    L"Nothing is injected into the game. Saved changes apply to the next recording.";
+    L"Point at a setting to see what it does here." HELP_BR
+    L"How it works:"
+    HELP_LI L"Press the hotkey in a VR game. VR EyeCapture copies the two eye images that the game sends to your headset and saves them as an MP4 file."
+    HELP_LI L"OpenXR games are recorded by an OpenXR layer (eye_capture.dll). SteamVR games need a small one-time setup: footer button SteamVR games..."
+    HELP_LI L"After the recording, this tray app turns the MP4 into a 3D MKV file that you can upload to YouTube (see Export)."
+    HELP_LI L"Nothing is injected into the game. Recording only works while this tray app is running." HELP_BR
+    L"Saved changes apply to the next recording.";
 
 struct Help { int id; const wchar_t* text; };
 const Help kHelp[] = {
-    {ID_HOTKEY, L"Starts and stops a recording while the game is running. Press the hotkey once to start and again to stop. "
-                L"Choose a key that the game does not use (ScrollLock works well). Several hotkeys may be listed, separated by commas; any of them works.\r\n"
-                L"Keyboard keys and mouse buttons (MouseMiddle, MouseX1, MouseX2) are read when the game starts, so restart the game after changing them.\r\n"
-                L"Xbox controller: Pad:A, Pad:Back+Start (hold both), Pad2:LB (second controller only). "
-                L"Wheel or joystick: Joy:*:Button3 (any device) or Joy:T300RS:Button5+Button6 (any device whose name contains T300RS); "
-                L"POVUp, POVDown, POVLeft and POVRight address the hat switch. "
-                L"Controller and wheel buttons take effect immediately.\r\n"
-                L"To list the button names of a wheel, run EyeCaptureTray.exe --inputs in a command prompt."},
-    {ID_HOTKEY_PICK, L"Click, then press a key, a mouse side button, an Xbox controller button (hold several for a combination) or a "
-                     L"wheel or joystick button. Esc cancels. The captured input replaces the current contents of the field."},
-    {ID_HOTKEY_ADD, L"Click, then press a key, a mouse side button, an Xbox controller button (hold several for a combination) or a "
-                    L"wheel or joystick button. Esc cancels. The captured input is added to the list, so the existing hotkeys keep working."},
-    {ID_CODEC, L"Video compression format. HEVC (H.265) gives the best quality per megabyte and is the format YouTube expects for "
-               L"high-resolution 3D video. H.264 (AVC) is older and plays in more programs, but produces larger or softer files "
-               L"(and is limited to 4096 px wide). AV1 needs a graphics card that encodes AV1 (NVIDIA RTX 40 / 50 series): about "
-               L"the HEVC quality at two thirds of the bitrate (default 80 Mbit/s). For 8K at VR frame rates the encoder runs at "
-               L"its faster quality setting so no frames are dropped. Without an AV1 encoder the recording is made in HEVC."},
-    {ID_BITRATE, L"Video bitrate of the recording in megabits per second. A higher bitrate gives a sharper picture (most visible in fast "
-                 L"motion) and larger files. Default: 120 Mbit/s for HEVC, 80 Mbit/s for H.264 and AV1.\r\n"
-                 L"File size per hour of recording: 120 Mbit/s = about 54 GB, 150 = 68 GB, 200 = 90 GB, 250 = 113 GB, 300 = 135 GB.\r\n"
-                 L"Suggested: 250 Mbit/s at 60 fps or more, the default 120 Mbit/s at 30 fps. A value set in config.ini that is not in "
-                 L"the list is shown as Custom and is preserved."},
-    {ID_BITRATEHINT, L"File size of one hour of recording at the selected bitrate (video only; audio adds about 0.1 GB)."},
-    {ID_YT8KBITRATE, L"Bitrate of the 8K 3D MKV (YouTube output with 8K) when the NVIDIA encoder is used. 150 Mbit/s (default) keeps "
-                     L"YouTube's 8K tier well fed; 200 Mbit/s gives a little more detail in fast motion and larger files; 100 Mbit/s "
-                     L"makes smaller files. The peak rate is 4/3 of the value. With the AV1 8K codec the same value gives a better "
-                     L"picture: about 100 Mbit/s AV1 looks like 150 Mbit/s HEVC. Without an NVIDIA GPU the slower x265 encoder is used "
-                     L"at constant quality and this setting does not apply. Unavailable with 'Record directly in the YouTube layout' "
-                     L"(no 8K file is made: the recording itself is uploaded)."},
-    {ID_YT8KCODEC, L"Encoder of the 8K 3D MKV. HEVC (default) works on every NVIDIA GPU with NVENC. AV1 needs an NVIDIA RTX 40 / 50 "
-                   L"series GPU: a sharper picture at the same 8K bitrate (8-bit AV1, which YouTube accepts). Without AV1 support the "
-                   L"8K file is made in HEVC. Only used when the YouTube output includes the 8K file. An AV1 8K file is named "
-                   L"<name>_YT8K_AV1.mkv (with a crop tag: _YT8K_4x3_AV1.mkv), so an HEVC and an AV1 copy of one recording can sit "
-                   L"side by side; when HEVC had to be used, the file gets the plain name. Unavailable with 'Record directly in the "
-                   L"YouTube layout' (no 8K file is made)."},
-    {ID_OUTFREE, L"Free space on the drive of the output folder. Recordings and their converted files (MKV, 8K, flat) are all written "
-                 L"there; nothing large goes to drive C: unless the folder is on C:. A recording or conversion does not start with "
-                 L"less than 10 GB free, and a recording stops (and is saved) when the drive drops below 2 GB."},
-    {ID_FPSWARN, L"Shown only while a game runs at a frame rate that 60 does not divide evenly (72, 80, 90, 144 fps ...). YouTube plays "
-                 L"at most 60 fps and the 8K conversion makes 60 fps, so some frames are dropped unevenly and the motion stutters a little. "
-                 L"A headset refresh rate of 120 Hz (or 60 Hz) gives smooth video; set it in Virtual Desktop or the headset settings."},
-    {ID_MAXWIDTH, L"Width of the recorded video: the whole side-by-side frame, both eyes together. "
-                  L"Native uses the full size that the headset provides (very large on a Quest 3, up to the codec limit).\r\n"
-                  L"A smaller size reduces the GPU load during recording (the symmetric view and head smoothing pass is drawn at this size, "
-                  L"not at full size) and produces smaller files. 3840 px (4K) is a good balance; use 2560 px (2K) or 1920 px (1080p) on weaker GPUs. "
-                  L"The height follows the aspect ratio of the picture. A value set manually in config.ini is shown as Custom and is preserved. "
-                  L"Applies to the next recording."},
-    {ID_MAXFPS, L"Limits the frame rate of the recording. 0 records every frame that the headset displays (72 or 90 fps). "
-                L"60 or 30 fps produces smaller files and a lower GPU load. YouTube plays 60 fps."},
-    {ID_RATECONTROL, L"How the encoder spends the bitrate.\r\n"
-                     L"VBR (default): variable bitrate around the Bitrate setting; complex scenes get more, simple ones less.\r\n"
-                     L"CBR: a constant bitrate (the Bitrate setting) whatever the scene; predictable file size, simple scenes waste "
-                     L"bits.\r\n"
-                     L"Constant QP: every frame at the same quality (the QP field); the Bitrate setting is not used and the file size "
-                     L"follows the picture, so fast, detailed scenes make much larger files. With AV1 the QP is passed to the encoder "
-                     L"as a quality value (the NVIDIA AV1 encoder takes no QP). Applies to the next recording."},
-    {ID_QP, L"Constant QP only (greyed for VBR and CBR): the quantizer of every frame, 0 = best quality (huge files) to 51 = "
-            L"worst. About 18 to 24 looks very good; each step of 6 roughly halves or doubles the file size. Default 24."},
-    {ID_PRESET, L"Encoder preset: how much effort the GPU encoder spends per frame (quality_vs_speed in config.ini). Fastest uses "
-                L"the least GPU time; Best quality compresses better (a sharper picture at the same bitrate) but is slower and can "
-                L"drop frames at high resolutions and frame rates, especially with Constant QP. Auto uses the encoder's default; "
-                L"with AV1 above 1 Gpixel/s (8K at 72 / 90 fps) Auto picks a fast setting so no frames are dropped. A value set in "
-                L"config.ini that is not in the list is shown as Custom and is preserved."},
-    {ID_CFR, L"Writes exactly one video frame per frame period (the recording's frame rate, at most the Frame rate limit), with equal "
-             L"durations. Video editors such as DaVinci Resolve handle such files better. A frame that arrives twice in one period "
-             L"is dropped and a missing one repeats the previous frame (at most 5 seconds in a row). Cleared (default), the real "
-             L"frame times are kept (variable frame rate), which plays perfectly in players and on YouTube. The sound is not changed."},
-    {ID_BEEPS, L"Plays a short beep when a recording starts (one beep), stops (two beeps) or cannot start (one long low beep). The "
-               L"beeps play on the Windows default playback device. When that is the device being recorded (the usual setup), "
-               L"the beeps are heard in the recording; clear this option to keep them out. Applies to the next recording."},
-    {ID_OUTDIR, L"Folder in which recordings are saved; the converted files go next to them. If empty, the 'captures' folder next to "
-                L"eye_capture.dll is used. Pick a folder on a drive with plenty of free space (about 54 GB per hour at the default bitrate)."},
-    {ID_BROWSE, L"Selects the output folder, on any drive. The free space of that drive is shown below the field."},
-    {ID_AUDIO, L"Records the system audio (the Windows playback device) into the video."},
-    {ID_OVERLAYS, L"Includes the panels that the game or other mods display as separate layers in the headset, such as menus, the DLAA "
-                  L"injector's VR panel and its fps box. They are positioned and blended into the video as the headset shows them. "
-                  L"When cleared, only the game's 3D view is recorded.\r\n"
-                  L"The Virtual Desktop and Quest system menus (and the guardian) are added by the headset itself and cannot be "
-                  L"recorded. The red recording indicator is never recorded. Applies to the next recording."},
-    {ID_AUDIODEV, L"Part of the name of the playback device to record, for example 'Virtual Desktop Audio'. "
-                  L"If empty, the Windows default playback device is used."},
-    {ID_PROJECTION, L"Flat stereo produces a regular side-by-side 3D video that shows exactly what was seen in the headset. "
-                    L"Recommended; it plays everywhere.\r\n"
-                    L"VR180 and VR360 are EXPERIMENTAL. The video becomes a dome that can be explored with a VR player. "
-                    L"However, the game draws only what the headset is looking at (about 100 degrees). The dome shows live video there, "
-                    L"older video where the view was previously, and black where it was never looked at. It is not a live 360-degree world. "
-                    L"Requires a VR180 or VR360 player (YouTube VR, DeoVR, Virtual Desktop Videos). "
-                    L"Symmetric field of view and head smoothing are not used in dome mode."},
-    {ID_FILL, L"Dome projections (VR180 / VR360) only; unavailable while Projection is Flat stereo. 'Hold last seen view' keeps "
-              L"previously viewed areas on the dome until they fade. 'Black' shows only the live view; everything else is black."},
-    {ID_FILLFADE, L"Dome projections only; unavailable while Projection is Flat stereo. Time in seconds that an older area remains "
-                  L"visible before it fades to black (the fade itself takes 2 seconds). 0 = never fade."},
-    {ID_SYMFOV, L"Flat projection only. The headset renders each eye with an asymmetric field of view (wider on the outside). "
-                L"This option re-projects both eyes to one symmetric view, so that a 3D player can fuse them without eye strain. "
-                L"Costs one GPU pass per frame. Clear it only to record the raw eye images."},
-    {ID_SWAP, L"Places the right eye in the left half and the left eye in the right half of the frame. Use it if the 3D effect appears inside out."},
-    {ID_ROLL, L"Flat projection with head smoothing above 0. Keeps the horizon level in the video when the head is tilted."},
-    {ID_SMOOTH, L"Flat projection only. 0 = off: the video follows the head exactly. Higher values remove small head movements; "
-                L"each frame is re-projected against a smoothed head direction. Large turns still follow the head. "
-                L"Costs one GPU pass per frame. Black edges are prevented automatically (edge_guard in config.ini, on by default)."},
-    {ID_FOVSCALE, L"Flat projection with head smoothing on. The video shows this fraction of the game's field of view (0.5 to 1). "
-                  L"The trimmed border is the margin that the smoothing correction needs at the edges. 1 = no margin; "
-                  L"0.9 = about 3 degrees on every side (default). Smaller values leave more margin and show less of the view."},
-    {ID_INDICATOR, L"Shows a small red dot in the headset while a recording is in progress. The dot is not part of the video. "
+    {ID_HOTKEY, L"The key or button that starts and stops a recording. Press it once to start, again to stop." HELP_BR
+                L"• Pick a key the game does not use. ScrollLock works well. List several, separated by commas: any of them works."
+                HELP_LI L"Keyboard keys and mouse buttons (MouseMiddle, MouseX1, MouseX2) are read when the game starts: restart the game after a change."
+                HELP_LI L"Xbox controller: Pad:A, Pad:Back+Start (hold both), Pad2:LB (second controller only)."
+                HELP_LI L"Wheel or joystick: Joy:*:Button3 (any device), Joy:T300RS:Button5+Button6 (a device whose name contains T300RS); POVUp / POVDown / POVLeft / POVRight for the hat switch."
+                HELP_LI L"Controller and wheel buttons work at once, without a game restart." HELP_BR
+                L"To see the button names of a wheel, run EyeCaptureTray.exe --inputs in a command prompt."},
+    {ID_HOTKEY_PICK, L"Sets the hotkey by pressing it." HELP_BR
+                     L"Click, then press a key, a mouse side button, a controller button (hold several for a combination) or a wheel button. "
+                     L"It replaces what is in the field. Esc cancels."},
+    {ID_HOTKEY_ADD, L"Adds one more hotkey by pressing it." HELP_BR
+                    L"Click, then press a key, a mouse side button, a controller button (hold several for a combination) or a wheel button. "
+                    L"It is added to the list, so the hotkeys you already have keep working. Esc cancels."},
+    {ID_CODEC, L"The video format of the recording." HELP_BR
+               L"• HEVC / H.265 (recommended): the best quality per megabyte. The format YouTube expects for large 3D video."
+               HELP_LI L"H.264: older, plays in more programs, but files are bigger or softer. Limited to 4096 px wide."
+               HELP_LI L"AV1: needs an NVIDIA RTX 40 / 50 card. About HEVC quality at two thirds of the bitrate (default 80 Mbit/s)." HELP_BR
+               L"For 8K at VR frame rates the encoder uses its faster setting, so no frames are dropped. Without an AV1 encoder the recording is made in HEVC."},
+    {ID_BITRATE, L"How much data per second the video gets. More = a sharper picture (most visible in fast motion) and bigger files." HELP_BR
+                 L"• Default: 120 Mbit/s for HEVC, 80 Mbit/s for H.264 and AV1."
+                 HELP_LI L"Suggested: 250 Mbit/s at 60 fps or more; the default at 30 fps."
+                 HELP_LI L"One hour of recording: 120 Mbit/s = about 54 GB, 150 = 68 GB, 200 = 90 GB, 250 = 113 GB, 300 = 135 GB." HELP_BR
+                 L"A value from config.ini that is not in the list shows as Custom and is kept."},
+    {ID_BITRATEHINT, L"The size of one hour of recording at this bitrate (video only; sound adds about 0.1 GB)."},
+    {ID_YT8KBITRATE, L"How much data per second the 8K 3D MKV gets (only when YouTube output makes the 8K file)." HELP_BR
+                     L"• 150 Mbit/s (default): keeps YouTube's 8K quality well fed."
+                     HELP_LI L"200 Mbit/s: a little more detail in fast motion, bigger files. 100 Mbit/s: smaller files."
+                     HELP_LI L"With the AV1 8K codec the same value looks better: about 100 Mbit/s AV1 looks like 150 Mbit/s HEVC." HELP_BR
+                     L"Without an NVIDIA graphics card the slower x265 encoder is used at a fixed quality, and this setting does nothing. "
+                     L"Greyed with 'Record directly in the YouTube layout': then the recording itself is the file to upload."},
+    {ID_YT8KCODEC, L"The video format of the 8K 3D MKV (only when YouTube output makes the 8K file)." HELP_BR
+                   L"• HEVC (default): works on every NVIDIA card with NVENC."
+                   HELP_LI L"AV1: needs an NVIDIA RTX 40 / 50 card. A sharper picture at the same 8K bitrate. YouTube accepts it." HELP_BR
+                   L"An AV1 file gets _AV1 in its name (<name>_YT8K_AV1.mkv), so an HEVC and an AV1 copy of one recording can sit side by side. "
+                   L"If AV1 is not available, the file is made in HEVC with the plain name. Greyed with 'Record directly in the YouTube layout'."},
+    {ID_OUTFREE, L"Free space on the drive of the output folder." HELP_BR
+                 L"• Recordings and all converted files go there. Nothing large goes to drive C: unless the folder is on C:."
+                 HELP_LI L"Below 10 GB free, recordings and conversions do not start."
+                 HELP_LI L"Below 2 GB, a running recording stops and is saved."},
+    {ID_FPSWARN, L"The game runs at a frame rate that does not divide evenly into 60 fps (72, 80, 90, 144 fps ...)." HELP_BR
+                 L"YouTube plays at most 60 fps, and the 8K file is 60 fps. Some frames are then dropped unevenly, and motion stutters a little." HELP_BR
+                 L"Fix: set the headset to 120 Hz (or 60 Hz) in Virtual Desktop or the headset settings."},
+    {ID_MAXWIDTH, L"The width of the recorded video: both eyes side by side." HELP_BR
+                  L"• Native: the full size from the headset. Very large on a Quest 3 (up to the codec limit)."
+                  HELP_LI L"3840 px (4K): a good balance. 2560 px (2K) or 1920 px (1080p): for weaker graphics cards."
+                  HELP_LI L"Smaller = less GPU work while you play and smaller files. The height follows automatically." HELP_BR
+                  L"A value from config.ini that is not in the list shows as Custom and is kept."},
+    {ID_MAXFPS, L"The highest frame rate of the recording." HELP_BR
+                L"• 0: every frame the headset shows (72, 90, 120 fps ...)."
+                HELP_LI L"60 or 30: smaller files and less GPU work. YouTube plays at most 60 fps."},
+    {ID_RATECONTROL, L"How the encoder spends the bitrate." HELP_BR
+                     L"• VBR (default): around the Bitrate setting. Busy scenes get more, calm scenes less."
+                     HELP_LI L"CBR: always the Bitrate setting. Predictable file size, but calm scenes waste space."
+                     HELP_LI L"Constant QP: every frame at the same quality (the QP field). Bitrate is not used; fast, detailed scenes make much bigger files." HELP_BR
+                     L"With AV1, the QP is passed on as a quality value (the NVIDIA AV1 encoder has no real QP)."},
+    {ID_QP, L"The quality of every frame with Constant QP (greyed for VBR and CBR)." HELP_BR
+            L"• 0 = best quality and huge files, 51 = worst. Default 24."
+            HELP_LI L"18 to 24 looks very good. Each step of 6 about halves or doubles the file size."},
+    {ID_PRESET, L"How hard the graphics card works on each frame (quality_vs_speed in config.ini)." HELP_BR
+                L"• Auto (default): the encoder's own choice. With AV1 at 8K and 72 / 90 fps it picks a fast setting, so no frames are dropped."
+                HELP_LI L"Fastest: the least GPU time."
+                HELP_LI L"Best quality: a sharper picture at the same bitrate, but slower. At high resolutions and frame rates it can drop frames." HELP_BR
+                L"A value from config.ini that is not in the list shows as Custom and is kept."},
+    {ID_CFR, L"Writes exactly one frame per frame period, all the same length." HELP_BR
+             L"• Ticked: video editors such as DaVinci Resolve handle the file better. A doubled frame is dropped; a missing one repeats the last (up to 5 seconds)."
+             HELP_LI L"Cleared (default): the real frame times are kept. Plays perfectly in players and on YouTube." HELP_BR
+             L"The sound is not changed."},
+    {ID_BEEPS, L"Beeps in the headset when a recording starts (one beep), stops (two beeps) or cannot start (one long low beep)." HELP_BR
+               L"The beeps play on the Windows default playback device. That is usually the device being recorded, so the beeps are "
+               L"in the video too. Clear this to keep them out."},
+    {ID_OUTDIR, L"The folder where recordings are saved. The converted files go next to them." HELP_BR
+                L"• Empty: the 'captures' folder next to the app."
+                HELP_LI L"Pick a drive with lots of free space: about 54 GB per hour at the default bitrate."},
+    {ID_BROWSE, L"Picks the output folder, on any drive. The free space of that drive is shown below the field."},
+    {ID_AUDIO, L"Records the sound of your PC (the Windows playback device) into the video."},
+    {ID_OVERLAYS, L"Records the menus and panels that float in front of you in the headset." HELP_BR
+                  L"• Ticked: game menus and mod panels (such as the DLAA injector's VR panel) are in the video, placed as you saw them."
+                  HELP_LI L"Cleared: only the game's 3D view is recorded." HELP_BR
+                  L"The Virtual Desktop and Quest menus (and the guardian) come from the headset itself and are never recorded. Neither is the red recording dot."},
+    {ID_AUDIODEV, L"Which playback device to record." HELP_BR
+                  L"• Empty: the Windows default playback device."
+                  HELP_LI L"Or part of a device name, for example 'Virtual Desktop Audio'."},
+    {ID_PROJECTION, L"The shape of the video." HELP_BR
+                    L"• Flat stereo (recommended): a normal side-by-side 3D video of exactly what you saw. Plays everywhere."
+                    HELP_LI L"VR180 / VR360 (EXPERIMENTAL): a dome you can look around in with a VR player (YouTube VR, DeoVR, Virtual Desktop)." HELP_BR
+                    L"The game only draws where you look (about 100 degrees). The dome shows live video there, older video where you looked "
+                    L"before, and black where you never looked. Symmetric field of view and head smoothing are off in dome mode."},
+    {ID_FILL, L"VR180 / VR360 only: what the dome shows where you are not looking now." HELP_BR
+              L"• Hold last seen view: the last picture of that area stays until it fades."
+              HELP_LI L"Black: only the live view; the rest is black."},
+    {ID_FILLFADE, L"VR180 / VR360 only: how many seconds an older area stays before it fades to black (the fade takes 2 seconds)." HELP_BR
+                  L"0 = never fade."},
+    {ID_SYMFOV, L"Makes the 3D comfortable to watch (flat stereo only)." HELP_BR
+                L"The headset draws each eye with a lopsided view (wider on the outside). This turns both eyes into one even view, so a 3D "
+                L"player can show them without eye strain. Costs a little GPU time. Clear it only to record the raw eye images."},
+    {ID_SWAP, L"Swaps the left and right eye in the video. Use it if the 3D looks inside out."},
+    {ID_ROLL, L"Keeps the horizon level in the video when you tilt your head (flat stereo with head smoothing above 0)."},
+    {ID_SMOOTH, L"Takes the shake out of your head movement in the video (flat stereo only)." HELP_BR
+                L"• 0 = off: the video follows your head exactly."
+                HELP_LI L"Higher: small head movements are smoothed away. Big turns still follow your head."
+                HELP_LI L"Costs a little GPU time. Black edges are prevented automatically (edge_guard in config.ini)."},
+    {ID_FOVSCALE, L"How much of the game's view the video shows, with head smoothing on (0.5 to 1)." HELP_BR
+                  L"Smoothing needs a margin at the edges to move the picture. 1 = no margin. 0.9 (default) = about 3 degrees on each side. "
+                  L"Smaller values give more margin and show less."},
+    {ID_INDICATOR, L"Shows a small red dot in the headset while a recording runs. The dot is never in the video." HELP_BR
                    L"Direct3D 11 games only (ETS2 / ATS). Read when the game starts."},
-    {ID_INDX, L"Horizontal position of the dot relative to straight ahead, in metres. 0 = centre, positive = right, negative = left. Default 0.22."},
-    {ID_INDY, L"Vertical position of the dot, in metres. 0 = eye level, positive = up, negative = down. Default -0.16 (slightly below centre)."},
-    {ID_INDZ, L"Distance of the dot in front of the viewer, in metres. Always negative (-0.8 = 80 cm ahead). A greater distance makes the dot appear smaller. Default -0.8."},
-    {ID_INDSIZE, L"Edge length of the dot in metres at its distance Z. At -0.8 m: 0.02 is about 1.4 degrees, 0.005 is a small dot, "
-                 L"0.002 is a few pixels. Below about 0.001 the dot is smaller than one headset pixel and disappears. The smallest allowed value is 0.0005."},
-    {ID_INDOPACITY, L"Opacity of the red dot. 1 = fully visible, 0.3 = faint."},
-    {ID_SVRMODE, L"How SteamVR games are recorded. Per game (best quality): only the games ticked in the SteamVR games window "
-                 L"(footer button), from the game's own eye images; head smoothing, symmetric field of view and VR180 / VR360 work. "
-                 L"Quick mode: no setup -- while SteamVR runs, SteamVR's own mirror picture is recorded (lower resolution, SteamVR's "
-                 L"menus and boundary visible, flat side-by-side only, no in-headset dot); a ticked game still records the per-game way. "
-                 L"Off: SteamVR games are not recorded. The same setting as the drop-down at the top of the SteamVR games window."},
-    {ID_INDPREVIEW, L"Approximate position of the dot in the headset view. The circle represents the field of view; the centre is straight ahead."},
-    {ID_LAYOUTPREVIEW, L"Scale drawing of the files that the tray creates, with their sizes in pixels. Left: the recording (an example "
-                       L"from a Quest 3: 8192x4630, both eyes side by side; the hatched part of each eye is removed by Eye crop). "
-                       L"Right: the 3D copy, with the left eye (L) and right eye (R) arranged as set in Output layout. It follows Resolution, "
-                       L"Codec, Output layout, Eye crop, YouTube output, Record directly in the YouTube layout and Projection. With "
-                       L"'Record directly in the YouTube layout', the left side is the headset's view and the right side is the recording "
-                       L"itself, which is uploaded as it is after a quick copy into the MKV. VR180 and VR360 recordings are copied unchanged."},
-    {ID_YTMODE, L"Files that the tray creates after each recording, for uploading to YouTube.\r\n"
-                L"3D MKV: the recording in the selected output layout, with the 3D tags that YouTube reads. With Side by side, full this is a copy that takes "
-                L"seconds; the other layouts are re-encoded. YouTube plays it in its 4K tier.\r\n"
-                L"8K 3D MKV (higher quality, slower; <name>_YT8K.mkv; with a 4:3 or no eye crop: <name>_YT8K_4x3.mkv / _YT8K_full.mkv; "
-                L"with the AV1 8K codec _AV1 is added): 3D in the selected Output layout "
-                L"(default top/bottom, half height, short side 4320), 60 fps. "
-                L"YouTube reads 3D as half-format, so the picture is not stretched. "
-                L"YouTube then keeps its 8K tier and a much higher bitrate, so the 3D picture is much sharper in the headset. "
-                L"Re-encoded on the GPU in about twice the clip length. Flat 3D recordings only.\r\n"
-                L"A recording made with 'Record directly in the YouTube layout' is already in this form: its 3D MKV is a quick copy and "
-                L"no separate 8K file is made.\r\n"
-                L"Upload the .mkv file named in the notification. An existing file is never overwritten (the new file gets \" (2)\" in its name)."},
-    {ID_RECORDYT, L"Records the video directly in the layout that YouTube needs, so nothing has to be re-encoded afterwards. Each frame is "
-                  L"written in the selected Output layout (default top/bottom, half height) with Eye crop applied and a short side of 4320 "
-                  L"pixels (a Quest 3 at 16:9 gives 7680x4320). The tray then only copies the recording into the 3D MKV, which takes "
-                  L"seconds; that MKV is the file to upload.\r\n"
-                  L"The full side-by-side picture is not kept: Output layout and Eye crop are part of the recording and cannot be changed "
-                  L"later, and the 8K 3D MKV, 8K bitrate and 8K codec do not apply (the recording already is the 8K file; a 2D video can "
-                  L"still be made). Frames wider than 4096 px need HEVC or AV1 (H.264 is limited to 4096 px, so the frame is made smaller); "
-                  L"Resolution limits the frame width. A Frame rate limit of 60 fps is recommended (YouTube plays at most 60 fps). "
-                  L"Flat recordings only; VR180 and VR360 ignore it. Applies to the next recording."},
-    {ID_LAYOUT3D, L"Arrangement of the two eyes in the files that the tray creates from a flat recording (the 3D MKV and the 8K 3D MKV). "
-                  L"The recording itself remains full side by side, unless 'Record directly in the YouTube layout' is selected: then the "
-                  L"recording is made in this layout. Unavailable for VR180 and VR360, which have fixed layouts.\r\n"
-                  L"Top/bottom, half height: the layout that YouTube requires. The frame has the shape of one eye; each eye is squeezed to half height, "
-                  L"left eye on top. The MKV is re-encoded (slower than a plain copy).\r\n"
-                  L"Side by side, half width: each eye is squeezed to half width. The MKV is re-encoded.\r\n"
-                  L"Side by side, full: the recording as it is, left eye on the left, each eye at its own shape. The MKV is a fast copy "
-                  L"without re-encoding. YouTube shows it stretched; use it for headset players and 3D TVs.\r\n"
-                  L"Top/bottom, full: each eye keeps its own shape, left eye on top. The MKV is re-encoded."},
-    {ID_EYECROP, L"Flat recordings often have eyes that are taller than wide. A tall top/bottom video crashes the YouTube player on "
-                 L"Quest, and YouTube limits it to 2160p. This setting removes the top and bottom of each eye (the same amount for both, centred) before "
-                 L"the 3D MKV and 8K 3D MKV are created; nothing is stretched.\r\n"
-                 L"16:9 (default, recommended for YouTube 8K): wide view. The 8K copy is 7680x4320, which plays on Quest and receives "
-                 L"YouTube's 8K tier.\r\n"
-                 L"4:3: taller view; the 8K copy is 5760x4320. At 5760 px wide YouTube likely puts it in its 4K tier (lower bitrate), "
-                 L"so it looks softer than 16:9 on YouTube.\r\n"
-                 L"4:3, padded to 16:9: keeps the taller 4:3 view and adds black bars left and right, so the 8K copy is 7680x4320 "
-                 L"(the picture 5760 px wide in the middle) and receives YouTube's 8K tier. Nothing is stretched.\r\n"
-                 L"None: the full eye is kept, so the video is tall. The Quest YouTube player may crash on it and YouTube stays at 2160p.\r\n"
-                 L"An eye that is already wider than the selected shape is not cropped. Flat 3D recordings only; the MKV is re-encoded "
-                 L"(not a plain copy) whenever it is cropped. With 'Record directly in the YouTube layout' the crop is applied while "
-                 L"recording instead.\r\n"
-                 L"With 4:3, 4:3 padded or None, the file names carry a tag (_4x3 / _4x3pad / _full, for example <name>_YT8K_4x3.mkv), so converting one "
-                 L"recording with two crop settings keeps both files."},
-    {ID_KEEPMP4, L"Keeps the original MP4 next to the MKV files. When cleared, the MP4 is deleted once the 3D MKV has been created and verified. "
-                 L"The MP4 is always kept when no 3D MKV is created, and while another conversion of it still waits in the list."},
-    {ID_POSTWHEN, L"When the tray converts a finished recording (the MKV, 8K and flat files). Conversion uses the CPU and GPU, "
-                  L"so running it during a game can reduce the frame rate.\r\n"
-                  L"Immediately: as soon as the recording is saved.\r\n"
-                  L"When the VR session ends: once no game has a VR session open (for example, after leaving VR or closing the game). "
-                  L"If VR starts again while a conversion is running, the conversion is paused and continues afterwards.\r\n"
-                  L"When the game exits (default): once the game that made the recording has exited and no VR game is running.\r\n"
-                  L"When I say: never converts on its own. Use 'Convert a recording...' in this window or the tray menu. Finished recordings "
-                  L"wait in the Conversions list below; select them and click Start, or click Start all.\r\n"
-                  L"\"Convert last recording now\" and \"Convert a recording...\" always start immediately; recordings added with "
-                  L"\"Add to queue...\" always wait for Start."},
-    {ID_CONVERTPICK, L"Opens a file dialog in the captures folder. Each MP4 you pick is converted next (after the running conversion), "
-                     L"whatever the Convert setting says, with the Export settings shown in this window now (YouTube output, 8K bitrate "
-                     L"and codec, eye crop, output layout, 2D video, keep MP4), even when they are not saved. Select several files with "
-                     L"Ctrl or Shift; they convert one after another."},
-    {ID_ADDQUEUE, L"Opens a file dialog in the captures folder. Each MP4 you pick is added to the Conversions list with the Export "
-                  L"settings shown in this window now (saved or not), and WAITS there until you click Start or Start all, whatever "
-                  L"the Convert setting says. To make several versions of one recording (for example 16:9 and 4:3, or HEVC and AV1), "
-                  L"change the Export settings and add the same file again. Each version gets its own file name (_4x3, _full, _AV1, "
-                  L"or \" (2)\")."},
-    {ID_QSTATUS, L"The conversion that is running now: file, its format (the files it makes, crop, layout), step (MKV, flat or 8K), "
-                 L"progress and the estimated time left. "
-                 L"A conversion that waits for the Convert setting (for example, while the game is still running) says why it waits."},
-    {ID_QPROGRESS, L"Progress of the running step (needs ffprobe, which ships next to ffmpeg). Yellow while paused."},
-    {ID_QPAUSE, L"Pause suspends the running conversion (ffmpeg) without losing progress; Resume continues it. When the conversion "
-                L"waits because of the Convert setting, the button reads Run now and starts it at once."},
-    {ID_QCANCEL, L"Stops the running conversion and deletes its unfinished output. The MP4 is kept, so it can be converted later. "
-                 L"Waiting recordings continue."},
-    {ID_QLIST, L"Conversions waiting, in the order they run: file, format (MKV / 8K codec and bitrate / 2D, eye crop, layout) and "
-               L"state. \"waiting for you\": added with Add to queue (or restored after the tray restarted); it waits for Start. "
-               L"\"waiting: converts when ...\": it starts when the Convert setting allows. Automatic recordings show \"(current "
-               L"settings)\": they use the saved settings as they are when the conversion starts. Select several with Ctrl or Shift. "
-               L"The list is kept when the tray app is closed (queue.json)."},
+    {ID_INDX, L"Left / right position of the dot, in metres. 0 = centre, positive = right, negative = left. Default 0.22."},
+    {ID_INDY, L"Up / down position of the dot, in metres. 0 = eye level, positive = up, negative = down. Default -0.16."},
+    {ID_INDZ, L"Distance of the dot in front of you, in metres. Always negative: -0.8 = 80 cm ahead (default). Farther = smaller."},
+    {ID_INDSIZE, L"Size of the dot, in metres." HELP_BR
+                 L"• At -0.8 m: 0.02 is about 1.4 degrees, 0.005 is a small dot, 0.002 is a few pixels."
+                 HELP_LI L"Below about 0.001 the dot is smaller than one headset pixel and disappears. The smallest value is 0.0005."},
+    {ID_INDOPACITY, L"How see-through the dot is. 1 = solid, 0.3 = faint."},
+    {ID_SVRMODE, L"How SteamVR games are recorded." HELP_BR
+                 L"• Per game (best quality): only the games ticked in the SteamVR games window, from the game's own eye images. "
+                 L"Head smoothing, symmetric view and VR180 / VR360 work."
+                 HELP_LI L"Quick mode: no setup. Records SteamVR's own mirror picture: lower resolution, SteamVR menus visible, flat only, no dot. "
+                 L"Ticked games still record per game."
+                 HELP_LI L"Off: SteamVR games are not recorded." HELP_BR
+                 L"The same setting as the drop-down at the top of the SteamVR games window."},
+    {ID_INDPREVIEW, L"Where the dot is in your view. The circle is your field of view; the centre is straight ahead."},
+    {ID_LAYOUTPREVIEW, L"A drawing of the files the tray makes, with their sizes in pixels." HELP_BR
+                       L"• Left: the recording (example from a Quest 3: 8192x4630, both eyes side by side). Eye crop removes the hatched part."
+                       HELP_LI L"Right: the 3D copy for YouTube, with the left (L) and right (R) eye placed as set in Output layout."
+                       HELP_LI L"With 'Record directly in the YouTube layout': left is the headset view, right is the recording itself." HELP_BR
+                       L"It follows Resolution, Codec, Output layout, Eye crop, YouTube output and Projection. VR180 / VR360 are copied unchanged."},
+    {ID_YTMODE, L"Which files the tray makes after each recording, for YouTube." HELP_BR
+                L"• 3D MKV: the recording with the 3D tags YouTube reads, in the Output layout. YouTube plays it in 4K quality."
+                HELP_LI L"8K 3D MKV (sharper, slower): <name>_YT8K.mkv, 60 fps, made on the GPU in about twice the clip length. "
+                L"YouTube keeps its 8K quality and a much higher bitrate, so 3D looks much sharper in the headset. Flat 3D only."
+                HELP_LI L"With 'Record directly in the YouTube layout' the recording already is that file: its 3D MKV is a quick copy." HELP_BR
+                L"Upload the .mkv file named in the notification. Files are never overwritten: a new one gets \" (2)\" in its name. "
+                L"Crop and AV1 add tags to the name (_4x3, _full, _AV1)."},
+    {ID_RECORDYT, L"Records straight into the YouTube layout, so nothing is re-encoded afterwards." HELP_BR
+                  L"• Each frame is written in the Output layout, with Eye crop applied, 4320 px on the short side (Quest 3 at 16:9: 7680x4320)."
+                  HELP_LI L"The tray only copies it into the 3D MKV (seconds). Upload that MKV."
+                  HELP_LI L"Output layout and Eye crop cannot be changed later. No separate 8K file is made; a 2D video still can be."
+                  HELP_LI L"Frames wider than 4096 px need HEVC or AV1. Use a 60 fps frame rate limit (YouTube plays at most 60 fps)." HELP_BR
+                  L"Flat recordings only; VR180 and VR360 ignore it."},
+    {ID_LAYOUT3D, L"How the two eyes are placed in the 3D files (the 3D MKV and the 8K 3D MKV)." HELP_BR
+                  L"• Top/bottom, half height (YouTube): left eye on top, each eye squeezed to half height. Re-encoded."
+                  HELP_LI L"Side by side, half width: each eye squeezed to half width. Re-encoded."
+                  HELP_LI L"Side by side, full: the recording as it is. A fast copy, but YouTube shows it stretched: for headset players and 3D TVs."
+                  HELP_LI L"Top/bottom, full: each eye at its own shape, left eye on top. Re-encoded." HELP_BR
+                  L"The recording itself stays side by side, unless 'Record directly in the YouTube layout' is ticked. Greyed for VR180 / VR360."},
+    {ID_EYECROP, L"Cuts the top and bottom off each eye before the 3D files are made. Headset eyes are tall, and a tall video crashes the "
+                 L"YouTube player on Quest and stays at 2160p. Nothing is stretched." HELP_BR
+                 L"• 16:9 (recommended): wide view. The 8K file is 7680x4320: plays on Quest, gets YouTube's 8K quality."
+                 HELP_LI L"4:3: taller view, 5760x4320. YouTube probably treats it as 4K, so it looks softer."
+                 HELP_LI L"4:3, padded to 16:9: the taller view with black bars left and right. 7680x4320, gets 8K quality."
+                 HELP_LI L"None: the full, tall eye. The Quest YouTube player may crash, and YouTube stays at 2160p." HELP_BR
+                 L"An eye already wider than the shape is not cut. Cropped files get a tag (_4x3, _4x3pad, _full), so two versions can sit side by side."},
+    {ID_KEEPMP4, L"Keeps the original MP4 next to the MKV files." HELP_BR
+                 L"Cleared: the MP4 is deleted once the 3D MKV is made and checked. It is always kept when no 3D MKV is made, and while "
+                 L"another conversion of it still waits."},
+    {ID_POSTWHEN, L"When the tray converts a finished recording. Converting uses the CPU and GPU and can lower the game's frame rate." HELP_BR
+                  L"• Immediately: as soon as the recording is saved."
+                  HELP_LI L"When the VR session ends: once no game is in VR. If VR starts again, the conversion pauses and continues later."
+                  HELP_LI L"When the game exits (default): once the game that made the recording has closed."
+                  HELP_LI L"When I say: never on its own. Recordings wait in the Conversions list; click Start or Start all." HELP_BR
+                  L"'Convert a recording...' always starts at once; 'Add to queue...' always waits for Start."},
+    {ID_CONVERTPICK, L"Converts MP4 files you pick, right after the one that is running now." HELP_BR
+                     L"It uses the Export settings shown in this window now, even if they are not saved, and ignores the Convert setting. "
+                     L"Pick several files with Ctrl or Shift; they convert one after another."},
+    {ID_ADDQUEUE, L"Adds MP4 files you pick to the Conversions list. They wait there until you click Start or Start all." HELP_BR
+                  L"They use the Export settings shown in this window now (saved or not). To make several versions of one recording "
+                  L"(for example 16:9 and 4:3, or HEVC and AV1), change the settings and add the same file again. Each version gets its own name."},
+    {ID_QSTATUS, L"The conversion running now: the file, what it makes, the step (MKV, 2D or 8K), progress and time left." HELP_BR
+                 L"If it waits for the Convert setting (for example while the game still runs), it says why."},
+    {ID_QPROGRESS, L"Progress of the running step. Yellow while paused. (Needs ffprobe, which comes with ffmpeg.)"},
+    {ID_QPAUSE, L"Pauses the running conversion without losing progress. Resume continues it." HELP_BR
+                L"If the conversion waits for the Convert setting, the button reads Run now and starts it at once."},
+    {ID_QCANCEL, L"Stops the running conversion and deletes its unfinished file. The MP4 is kept, so you can convert it later. "
+                 L"Waiting conversions carry on."},
+    {ID_QLIST, L"Conversions waiting, in the order they run: file, format and state." HELP_BR
+               L"• waiting for you: added with Add to queue (or restored after a restart). Waits for Start."
+               HELP_LI L"waiting: converts when ...: starts when the Convert setting allows."
+               HELP_LI L"(current settings): an automatic recording. It uses the saved settings at the moment it starts." HELP_BR
+               L"Select several with Ctrl or Shift. The list is kept when the tray app closes."},
     {ID_QSTART, L"Starts the selected conversions, one after another, whatever the Convert setting says."},
     {ID_QSTARTALL, L"Starts every waiting conversion, one after another in list order, whatever the Convert setting says."},
-    {ID_QREMOVE, L"Removes the selected conversions from the list. The MP4 is not deleted; convert it later with 'Convert a recording...'."},
-    {ID_POSTFLAT, L"Also creates a regular 2D video from the left eye (<name>_FLAT.mp4) for viewers without a headset. "
-                  L"The video is re-encoded with ffmpeg and takes a while."},
-    {ID_LOGLEVEL, L"Amount of detail written to logs\\eye_capture.log and logs\\tray.log. Off writes nothing. Information is the normal level. "
-                  L"Debug is intended for bug reports."},
-    {ID_AUTOSTART, L"Starts this tray app when you sign in to Windows, so that it is already running before a VR game starts "
-                   L"(the layer only records while the tray is running). Off by default. Writes one 'Run' entry for the current Windows "
-                   L"account, nothing else (the on / off switch in Task Manager > Startup apps is Windows' own and is never changed "
-                   L"by this program); turning it off removes the entry. Saved as start_with_windows in config.ini: while it is ticked "
-                   L"and the entry is missing or points at another folder (removed by a cleaner, the folder moved), the tray puts it "
-                   L"back at its next start -- but never one you switched off in Task Manager. Clear this option before deleting the folder."},
-    {ID_OPENINI, L"Opens config.ini in a text editor. The file lists every setting, with comments."},
-    {ID_DEFAULTS, L"Resets every field to its built-in default. Nothing is saved until Save is clicked."},
-    {ID_OPENSTEAMVR, L"Opens the SteamVR games window: tick the SteamVR (OpenVR) games to record, choose Per game or Quick mode. "
-                     L"OpenXR games need nothing here."},
-    {ID_SAVE, L"Writes the changed values to config.ini. The window stays open. The next recording uses them."},
+    {ID_QREMOVE, L"Removes the selected conversions from the list. The MP4 stays; convert it later with 'Convert a recording...'."},
+    {ID_POSTFLAT, L"Also makes a normal 2D video from the left eye (<name>_FLAT.mp4), for people without a headset. It takes a while."},
+    {ID_LOGLEVEL, L"How much the app writes to its log files (logs\\eye_capture.log and logs\\tray.log)." HELP_BR
+                  L"• Information: normal."
+                  HELP_LI L"Debug: more detail, for bug reports."
+                  HELP_LI L"Off: nothing."},
+    {ID_AUTOSTART, L"Starts this tray app when you sign in to Windows, so it is ready before you start a VR game." HELP_BR
+                   L"• Off by default. It writes one 'Run' entry for your Windows account; turning it off removes it."
+                   HELP_LI L"If the entry goes missing (a cleaner tool, a moved folder), the app puts it back at its next start."
+                   HELP_LI L"The switch in Task Manager > Startup apps belongs to Windows: this app never changes it." HELP_BR
+                   L"Clear this before you delete the app's folder."},
+    {ID_OPENINI, L"Opens config.ini in a text editor. It lists every setting, with comments."},
+    {ID_DEFAULTS, L"Puts every field back to its default. Nothing is saved until you click Save."},
+    {ID_OPENSTEAMVR, L"Opens the SteamVR games window: tick the SteamVR games to record, or choose Quick mode. OpenXR games need nothing there."},
+    {ID_SAVE, L"Saves the changes to config.ini. The window stays open. The next recording uses them."},
     {ID_MINIMIZE, L"Minimizes the window to the taskbar."},
-    {ID_CANCEL, L"Closes the window. When there are unsaved changes, it asks first. The tray app keeps running."},
-    {ID_ABOUTLINK, L"The project page on GitHub: downloads, the latest version, the manual and bug reports. The tool is free for noncommercial use "
-                   L"(PolyForm Noncommercial License 1.0.0, Copyright (c) 2026 JRDevo)."},
+    {ID_CANCEL, L"Closes the window. If you have unsaved changes, it asks first. The tray app keeps running."},
+    {ID_ABOUTLINK, L"The project page on GitHub: downloads, the latest version, the manual and bug reports." HELP_BR
+                   L"Free for noncommercial use (PolyForm Noncommercial License 1.0.0). Copyright (c) 2026 JRDevo."},
 };
+#undef HELP_BR
+#undef HELP_LI
 
 const wchar_t* HelpText(int id) {
     for (const Help& h : kHelp) if (h.id == id) return h.text;
