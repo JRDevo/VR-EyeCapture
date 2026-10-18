@@ -1631,8 +1631,9 @@ int MessageBox(HWND owner, const std::wstring& text, const std::wstring& title, 
     std::vector<Btn> btns;
     switch (flags & MB_TYPEMASK) {
     case MB_OKCANCEL: btns = {{IDOK, L"OK"}, {IDCANCEL, L"Cancel"}}; break;
-    case MB_YESNO: btns = {{IDYES, L"&Yes"}, {IDNO, L"&No"}}; break;
-    case MB_YESNOCANCEL: btns = {{IDYES, L"&Yes"}, {IDNO, L"&No"}, {IDCANCEL, L"Cancel"}}; break;
+    // no "&" mnemonics: glass buttons draw their text with DT_NOPREFIX, so it would show
+    case MB_YESNO: btns = {{IDYES, L"Yes"}, {IDNO, L"No"}}; break;
+    case MB_YESNOCANCEL: btns = {{IDYES, L"Yes"}, {IDNO, L"No"}, {IDCANCEL, L"Cancel"}}; break;
     default: btns = {{IDOK, L"OK"}}; break;
     }
     for (const Btn& b : btns) if (b.id == IDCANCEL) d.hasCancel = true;
