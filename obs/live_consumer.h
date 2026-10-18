@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 // live_consumer -- the consumer side of the live share (src/live_share_proto.h), without libobs: the OBS source plugin
 // (obs/plugin.cpp) and tests/live_share_test.cpp both use it, so the test exercises the plugin's exact open / copy code.
 //

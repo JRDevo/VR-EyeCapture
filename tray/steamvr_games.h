@@ -178,18 +178,36 @@ std::vector<FoundGame> DiscoverSteamGames(const std::vector<std::wstring>& libra
                                           const volatile bool* cancel = nullptr, bool* budgetHit = nullptr,
                                           unsigned totalBudgetMs = 90000);
 
-// ---- automatic repair of the games the user enabled (tray start, SteamVR games window)
+// ---- repair of the games the user enabled: the tray only DETECTS at start (FindRepairs, read-only, one balloon); a game
+// folder is changed only on the user's click (the SteamVR games window's Repair / Re-enable: RepairEnabledGames / EnableLocation).
 // CheckFileAccess(path) == InUse (a running game has it mapped as an image, or another handle denies sharing). A missing
 // file or an access-denied folder is not "in use".
 bool FileInUse(const std::wstring& path);
+enum class RepairWhy {
+    None,
+    GameUpdated,     // ProxyMissing: a game update / "verify files" put Valve's DLL back while our real copy / sidecar stayed
+    ProxyOutdated,   // Enabled with a proxy older than ourVersion (a newer VR EyeCapture)
+    Moved,           // Enabled, but the sidecar's home is not this install folder (or no longer exists): VR EyeCapture moved
+};
+const char* RepairWhyName(RepairWhy w);   // "game updated" / "older recorder version" / "VR EyeCapture moved" / "none"
+// What one folder needs. home = this install folder ("" = the Moved check is skipped); compared as full paths, ignoring case
+// and a trailing slash. Moved wins over ProxyOutdated (the same repair fixes both).
+RepairWhy RepairNeeded(const Location& L, const std::wstring& home);
+struct RepairNeed {
+    RepairWhy why = RepairWhy::None;
+    std::wstring game, dir;
+};
+// Read-only: every existing folder of every game in `games` (never any other folder) whose RepairNeeded != None.
+std::vector<RepairNeed> FindRepairs(const std::vector<GameEntry>& games, const std::wstring& home, const std::string& ourVersion);
 struct RepairItem {
-    enum class What { Repaired, Updated, SkippedInUse, Failed } what = What::Failed;
+    enum class What { Repaired, Updated, Moved, SkippedInUse, Failed } what = What::Failed;
     std::wstring game, dir, message;
 };
-// For every folder of every game in `games` (never any other folder): ProxyMissing (a game update / verify put Valve's DLL
-// back while our openvr_api_real.dll / sidecar stayed) -> EnableLocation = Repaired; Enabled with a proxy older than
-// ourVersion -> EnableLocation = Updated. A folder whose openvr_api.dll / openvr_api_real.dll is in use (FileInUse: the game
-// runs) is skipped (SkippedInUse; tried again next time). Folders in any other state are not touched and not reported.
+// Acts on what FindRepairs reports -- call it only on the user's click: GameUpdated -> EnableLocation = Repaired (the updated
+// Valve DLL becomes openvr_api_real.dll); ProxyOutdated -> Updated; Moved -> Moved (proxy and sidecar rewritten with home =
+// `home`). A folder whose openvr_api.dll / openvr_api_real.dll is in use (FileInUse: the game runs) is skipped
+// (SkippedInUse, nothing changed). Folders that need nothing are not touched and not reported. The export / access checks of
+// EnableLocation apply (a refusal = Failed with its message).
 std::vector<RepairItem> RepairEnabledGames(const std::vector<GameEntry>& games, const std::wstring& proxySource,
                                            const std::wstring& home, const std::string& ourVersion);
 

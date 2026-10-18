@@ -8,6 +8,7 @@
 #pragma once
 #include <windows.h>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 
 #define EYECAP_SHM_NAME   L"Local\\OpenXR-EyeCapture-Status"
@@ -15,6 +16,12 @@
 // Held open by the GUI tray app for as long as it runs (CLI modes do not hold it). The layer only arms itself for a
 // session when this exists (config require_tray, default 1); otherwise it stays dormant = pure pass-through.
 #define EYECAP_TRAY_ALIVE_NAME L"Local\\OpenXR-EyeCapture-TrayAlive"
+// Per-process recorder markers: named mutexes (never owned, never signalled) kept open for the life of the process. The
+// OpenXR layer creates EYECAP_LAYER_MARKER_PREFIX<pid> when it initialises in a process; the SteamVR proxy creates
+// EYECAP_PROXY_MARKER_PREFIX<pid> when it claims a process at VR init (one proxy per process). EyeCaptureMirror (SteamVR
+// quick mode) checks them for SteamVR's scene application (EyeCapMarkerExists) instead of reading another process.
+#define EYECAP_LAYER_MARKER_PREFIX L"Local\\OpenXR-EyeCapture-Layer-"
+#define EYECAP_PROXY_MARKER_PREFIX L"Local\\OpenXR-EyeCapture-Proxy-"
 
 enum : uint32_t { EYECAP_MAGIC = 0x50414345u /* 'ECAP' */, EYECAP_VERSION = 1 };
 
@@ -95,6 +102,16 @@ inline void EyeCapCopy(wchar_t* dst, size_t cap, const wchar_t* src) {
 // Layer side: is the GUI tray app running? (Access denied = the object exists but belongs to a more privileged tray.)
 inline bool EyeCapTrayRunning() {
     HANDLE h = OpenMutexW(SYNCHRONIZE, FALSE, EYECAP_TRAY_ALIVE_NAME);
+    if (h) { CloseHandle(h); return true; }
+    return GetLastError() == ERROR_ACCESS_DENIED;
+}
+
+// Does process `pid` hold the marker `prefix`<pid> (EYECAP_LAYER_MARKER_PREFIX / EYECAP_PROXY_MARKER_PREFIX)? Only the object
+// namespace is asked (OpenMutexW); nothing is read from the process. Access denied = it exists (a more privileged process).
+inline bool EyeCapMarkerExists(const wchar_t* prefix, DWORD pid) {
+    wchar_t name[128];
+    if (!pid || swprintf_s(name, L"%ls%lu", prefix, (unsigned long)pid) < 0) return false;
+    HANDLE h = OpenMutexW(SYNCHRONIZE, FALSE, name);
     if (h) { CloseHandle(h); return true; }
     return GetLastError() == ERROR_ACCESS_DENIED;
 }

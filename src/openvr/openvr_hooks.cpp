@@ -1,6 +1,7 @@
 // openvr_hooks -- see openvr_hooks.h. No logging here (the tray and the unit test link this file too).
 #include "openvr_hooks.h"
 #include <windows.h>
+#include <cctype>
 #include <cmath>
 #include <cstring>
 #include <fstream>
@@ -372,4 +373,181 @@ const char* TextureTypeName(vr::ETextureType t) {
     case vr::TextureType_Metal: return "Metal";
     default: return "unknown";
     }
+}
+
+// ------------------------------------------------------------------------------------------------ SteamVR's openvr_api.dll
+
+namespace {
+
+// A minimal JSON reader: enough to walk the top-level object of openvrpaths.vrpath and skip every value it does not need.
+struct Json {
+    const std::string& s;
+    size_t i = 0;
+    std::string err;
+    explicit Json(const std::string& t) : s(t) {}
+    void Ws() { while (i < s.size() && (s[i] == ' ' || s[i] == '\t' || s[i] == '\r' || s[i] == '\n')) ++i; }
+    bool Fail(const char* what) { if (err.empty()) err = std::string(what) + " at byte " + std::to_string(i); return false; }
+    static int Hex(char c) { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1; }
+    bool Str(std::wstring& out) {   // at '"'
+        out.clear();
+        if (i >= s.size() || s[i] != '"') return Fail("expected a string");
+        ++i;
+        std::string run;   // plain UTF-8 bytes since the last escape: decoded into `out` before each escape and at the end
+        auto flush = [&] { if (!run.empty()) { out += Utf8ToWide(run); run.clear(); } };
+        while (i < s.size() && s[i] != '"') {
+            const char c = s[i++];
+            if ((unsigned char)c < 0x20) return Fail("control character in a string");
+            if (c != '\\') { run += c; continue; }
+            if (i >= s.size()) return Fail("unterminated escape");
+            flush();
+            const char e = s[i++];
+            switch (e) {
+            case '"': out += L'"'; break;
+            case '\\': out += L'\\'; break;
+            case '/': out += L'/'; break;
+            case 'b': out += L'\b'; break;
+            case 'f': out += L'\f'; break;
+            case 'n': out += L'\n'; break;
+            case 'r': out += L'\r'; break;
+            case 't': out += L'\t'; break;
+            case 'u': {   // one UTF-16 unit; a surrogate pair (two \u escapes) lands as that pair in the wide string
+                if (i + 4 > s.size()) return Fail("short \\u escape");
+                unsigned v = 0;
+                for (int k = 0; k < 4; ++k) {
+                    const int h = Hex(s[i + k]);
+                    if (h < 0) return Fail("bad \\u escape");
+                    v = v * 16 + (unsigned)h;
+                }
+                i += 4;
+                out += (wchar_t)v;
+                break;
+            }
+            default: return Fail("bad escape");
+            }
+        }
+        if (i >= s.size()) return Fail("unterminated string");
+        ++i;
+        flush();
+        return true;
+    }
+    bool Skip(int depth = 0) {   // any value
+        if (depth > 64) return Fail("nested too deep");
+        Ws();
+        if (i >= s.size()) return Fail("unexpected end");
+        const char c = s[i];
+        if (c == '"') { std::wstring t; return Str(t); }
+        if (c == '{' || c == '[') {
+            const char close = c == '{' ? '}' : ']';
+            ++i;
+            Ws();
+            if (i < s.size() && s[i] == close) { ++i; return true; }
+            for (;;) {
+                if (c == '{') {
+                    Ws();
+                    std::wstring k;
+                    if (!Str(k)) return false;
+                    Ws();
+                    if (i >= s.size() || s[i] != ':') return Fail("expected ':'");
+                    ++i;
+                }
+                if (!Skip(depth + 1)) return false;
+                Ws();
+                if (i < s.size() && s[i] == ',') { ++i; continue; }
+                if (i < s.size() && s[i] == close) { ++i; return true; }
+                return Fail("expected ',' or a closing bracket");
+            }
+        }
+        const size_t st = i;
+        while (i < s.size() && (isalnum((unsigned char)s[i]) || s[i] == '-' || s[i] == '+' || s[i] == '.')) ++i;
+        if (i == st) return Fail("unexpected character");
+        const std::string lit = s.substr(st, i - st);
+        if (lit == "true" || lit == "false" || lit == "null" || lit[0] == '-' || isdigit((unsigned char)lit[0])) return true;
+        return Fail("bad literal");
+    }
+};
+
+} // namespace
+
+bool ParseOpenvrPathsRuntimes(const std::string& utf8In, std::vector<std::wstring>& out, std::string* error) {
+    out.clear();
+    std::string text = utf8In;
+    if (text.size() >= 3 && (unsigned char)text[0] == 0xEF && (unsigned char)text[1] == 0xBB && (unsigned char)text[2] == 0xBF) text.erase(0, 3);
+    Json j(text);
+    auto fail = [&](const std::string& why) { if (error) *error = why; out.clear(); return false; };
+    j.Ws();
+    if (j.i >= text.size() || text[j.i] != '{') return fail("not a JSON object");
+    ++j.i;
+    bool found = false;
+    j.Ws();
+    if (j.i < text.size() && text[j.i] == '}') return fail("no \"runtime\" member");
+    for (;;) {
+        j.Ws();
+        std::wstring key;
+        if (!j.Str(key)) return fail(j.err);
+        j.Ws();
+        if (j.i >= text.size() || text[j.i] != ':') return fail("expected ':' at byte " + std::to_string(j.i));
+        ++j.i;
+        j.Ws();
+        if (key == L"runtime" && !found) {
+            if (j.i >= text.size() || text[j.i] != '[') return fail("\"runtime\" is not an array");
+            ++j.i;
+            j.Ws();
+            if (j.i < text.size() && text[j.i] == ']') ++j.i;
+            else {
+                for (;;) {
+                    j.Ws();
+                    std::wstring v;
+                    if (j.i >= text.size() || text[j.i] != '"') return fail("\"runtime\" holds a non-string");
+                    if (!j.Str(v)) return fail(j.err);
+                    for (auto& c : v) if (c == L'/') c = L'\\';
+                    v = StripSlash(Trim(v));
+                    if (!v.empty()) out.push_back(v);
+                    j.Ws();
+                    if (j.i < text.size() && text[j.i] == ',') { ++j.i; continue; }
+                    if (j.i < text.size() && text[j.i] == ']') { ++j.i; break; }
+                    return fail("bad \"runtime\" array at byte " + std::to_string(j.i));
+                }
+            }
+            found = true;
+        } else if (!j.Skip()) {
+            return fail(j.err);
+        }
+        j.Ws();
+        if (j.i < text.size() && text[j.i] == ',') { ++j.i; continue; }
+        if (j.i < text.size() && text[j.i] == '}') { ++j.i; break; }
+        return fail("expected ',' or '}' at byte " + std::to_string(j.i));
+    }
+    j.Ws();
+    if (j.i != text.size()) return fail("text after the JSON object");
+    if (!found) return fail("no \"runtime\" member");
+    if (error) error->clear();
+    return true;
+}
+
+std::wstring DefaultOpenvrPathsFile() {
+    wchar_t buf[MAX_PATH] = L"";
+    const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", buf, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return std::wstring();
+    return StripSlash(buf) + L"\\openvr\\openvrpaths.vrpath";
+}
+
+std::wstring FindSteamVrOpenvrApi(const std::wstring& vrpathFile, std::wstring* why) {
+    auto no = [&](const std::wstring& w) { if (why) *why = w; return std::wstring(); };
+    if (vrpathFile.empty()) return no(L"%LOCALAPPDATA% is not set, so openvrpaths.vrpath cannot be found");
+    std::ifstream f(vrpathFile, std::ios::binary);
+    if (!f) return no(vrpathFile + L" not found (SteamVR not installed, or never started)");
+    std::stringstream ss;
+    ss << f.rdbuf();
+    std::vector<std::wstring> runtimes;
+    std::string err;
+    if (!ParseOpenvrPathsRuntimes(ss.str(), runtimes, &err)) return no(vrpathFile + L" is not usable: " + Utf8ToWide(err));
+    if (runtimes.empty()) return no(vrpathFile + L" lists no SteamVR runtime folder");
+    std::wstring tried;
+    for (const std::wstring& r : runtimes) {
+        const std::wstring dll = r + L"\\bin\\win64\\openvr_api.dll";
+        const DWORD a = GetFileAttributesW(dll.c_str());
+        if (a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY)) { if (why) why->clear(); return dll; }
+        tried += (tried.empty() ? L"" : L", ") + dll;
+    }
+    return no(L"no openvr_api.dll in the SteamVR runtime folder(s) listed in " + vrpathFile + L" (looked for " + tried + L")");
 }

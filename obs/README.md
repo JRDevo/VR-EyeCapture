@@ -74,3 +74,12 @@ against the layer and the mock runtime and checks the pixels, the frame rate thr
 re-projection (symmetric size, head motion, the switch to raw eyes), Half size, overlays in the live frame, a recording
 at the same time and the teardown. The OBS-side drawing (`obs/plugin.cpp`: texture, crop, zoom, sRGB) is only checked in
 OBS itself.
+
+## License
+
+The plugin (everything in this `obs/` folder) is licensed under the **GNU General Public License, version 2 or later**
+(SPDX `GPL-2.0-or-later`), because it is built against OBS Studio's libobs (GPL): see [`COPYING.md`](COPYING.md) and
+<https://www.gnu.org/licenses/old-licenses/gpl-2.0.txt>. The plugin zip (`VR-EyeCapture-OBS-v<version>.zip`) contains that
+notice as `COPYING.md`; the source is this folder. The rest of VR EyeCapture stays under the PolyForm Noncommercial License
+1.0.0 (`LICENSE.md` in the repository root). The libobs headers (OBS Studio 31.0.0) are fetched at build time; OBS Studio
+itself is not redistributed.

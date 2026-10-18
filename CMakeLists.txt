@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(openxr_eye_capture VERSION 0.4.0 LANGUAGES C CXX)
+project(openxr_eye_capture VERSION 0.5.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -108,18 +108,14 @@ target_compile_options(openvr_proxy PRIVATE $<$<COMPILE_LANGUAGE:CXX>:${EYE_WARN
 target_link_libraries(openvr_proxy PRIVATE eye_capture_core advapi32)
 eye_add_version_info(openvr_proxy DLL "VR EyeCapture SteamVR recorder (OpenVR proxy)" "openvr_api.dll")
 
-# --- SteamVR quick mode: EyeCaptureMirror.exe (src/openvr/mirror_main.cpp) records SteamVR's mirror texture through Valve's own
-# openvr_api.dll v2.15.6 (third_party/openvr/bin/win64, BSD-3), copied to <bin>/valve/ (the bin folder's openvr_api.dll is
-# our proxy). The tray starts it while steamvr_mode = quick and vrserver.exe runs.
+# --- SteamVR quick mode: EyeCaptureMirror.exe (src/openvr/mirror_main.cpp) records SteamVR's mirror texture through SteamVR's
+# OWN openvr_api.dll (<runtime>\bin\win64 from %LOCALAPPDATA%\openvr\openvrpaths.vrpath; nothing of Valve's is shipped).
+# The tray starts it while steamvr_mode = quick and vrserver.exe runs.
 add_executable(EyeCaptureMirror WIN32 src/openvr/mirror_main.cpp src/openvr/openvr_hooks.cpp)
 target_compile_options(EyeCaptureMirror PRIVATE ${EYE_WARN_FLAGS})
-target_link_libraries(EyeCaptureMirror PRIVATE eye_capture_core advapi32 psapi)
+target_link_libraries(EyeCaptureMirror PRIVATE eye_capture_core advapi32)
 eye_add_version_info(EyeCaptureMirror APP "VR EyeCapture SteamVR mirror recorder" "EyeCaptureMirror.exe")
 target_link_options(EyeCaptureMirror PRIVATE "/MANIFESTUAC:level='asInvoker' uiAccess='false'")
-add_custom_command(TARGET EyeCaptureMirror POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:EyeCaptureMirror>/valve
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_CURRENT_SOURCE_DIR}/third_party/openvr/bin/win64/openvr_api.dll
-            $<TARGET_FILE_DIR:EyeCaptureMirror>/valve/openvr_api.dll)
 
 # --- tray control app (required: the layer is dormant without it; it also registers the layer, tray/install.cpp) ---
 # tray/steamvr_ui.cpp + tray/steamvr_games.cpp: the "SteamVR games" window (enable / disable the per-game proxy);
@@ -210,8 +206,8 @@ if (EYE_BUILD_TESTS)
     add_executable(steamvr_install_test tests/steamvr_install_test.cpp tray/steamvr_games.cpp src/openvr/openvr_hooks.cpp)
     target_compile_options(steamvr_install_test PRIVATE ${EYE_WARN_FLAGS})
     target_compile_definitions(steamvr_install_test PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
-        EYE_CAPTURE_VERSION="${PROJECT_VERSION}" EYE_TEST_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures"
-        EYE_VALVE_DLL="${CMAKE_CURRENT_SOURCE_DIR}/third_party/openvr/bin/win64/openvr_api.dll")
+        EYE_CAPTURE_VERSION="${PROJECT_VERSION}" EYE_TEST_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures")
+    # (the "real Valve DLL" of its fake game trees is SteamVR's own copy on the test PC, found at run time; skipped without it)
     target_include_directories(steamvr_install_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tray ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(steamvr_install_test PRIVATE advapi32 version)
     add_dependencies(steamvr_install_test openvr_proxy mock_openvr oc_shim_test)
@@ -222,7 +218,8 @@ if (EYE_BUILD_TESTS)
     # fov, bounds, colour space, home discovery (CPU only).
     add_executable(openvr_hook_test tests/openvr_hook_test.cpp src/openvr/openvr_hooks.cpp)
     target_compile_options(openvr_hook_test PRIVATE ${EYE_WARN_FLAGS})
-    target_compile_definitions(openvr_hook_test PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_compile_definitions(openvr_hook_test PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
+        EYE_TEST_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures")   # tests/fixtures/openvr/openvrpaths*.vrpath
     target_include_directories(openvr_hook_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(openvr_hook_test PRIVATE advapi32)
 

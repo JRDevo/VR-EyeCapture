@@ -631,12 +631,13 @@ static_assert(kCompositorVersionCount == 10, "FnHooksFor covers 10 compositor ve
 
 // One proxy per process records (control.cpp is a process singleton): the first one that inits claims the process with a
 // named object; a second copy (a game with two openvr_api.dll folders loaded, e.g. a launcher + the game) stays a pure
-// forwarder and logs which module has the claim. Under g_lock.
+// forwarder and logs which module has the claim. Under g_lock. The named object is also the marker EyeCaptureMirror (quick
+// mode) looks for: a process this proxy records is left to it (EYECAP_PROXY_MARKER_PREFIX, src/shared_status.h).
 bool ClaimProcess() {
     static bool claimed = false;
     if (claimed) return true;
     if (g.secondProxy) return false;
-    const std::wstring name = L"Local\\OpenXR-EyeCapture-Proxy-" + std::to_wstring(GetCurrentProcessId());
+    const std::wstring name = EYECAP_PROXY_MARKER_PREFIX + std::to_wstring(GetCurrentProcessId());
     HANDLE h = CreateMutexW(nullptr, FALSE, name.c_str());   // kept open (leaked) while the process lives
     if (h && GetLastError() != ERROR_ALREADY_EXISTS) {
         claimed = true;

@@ -7,6 +7,7 @@
 #include <windows.h>
 #include <cstdio>
 #include <cstring>
+#include <cwctype>
 #include <string>
 #include <vector>
 #include "steamvr_games.h"
@@ -95,11 +96,26 @@ int main() {
     const std::string ver = EYE_CAPTURE_VERSION;
     if (!Exists(mock) || !Exists(proxy)) { printf("FAIL: build mock_openvr and openvr_proxy first (%s)\n", N(bin).c_str()); return 1; }
     const std::string mockBytes = ReadBytes(mock);
-    // the game's "Valve" openvr_api.dll in the fake trees: Valve's own v2.15.6 (third_party, never loaded except to lock it
-    // like a running game). The mock is NOT used there: it has test exports (MockOpenVrCounts ...) the proxy lacks.
-    const std::wstring valve = Widen8(EYE_VALVE_DLL);
+    // the game's "Valve" openvr_api.dll in the fake trees: a real Valve DLL -- SteamVR's own copy on this PC (<runtime>\bin\win64
+    // from %LOCALAPPDATA%\openvr\openvrpaths.vrpath, FindSteamVrOpenvrApi), or XR_EYE_CAPTURE_TEST_VALVE_DLL. VR EyeCapture ships
+    // and keeps no Valve binary, so without SteamVR this test is SKIPPED (exit 0). The DLL is only read and its bytes written into
+    // the %TEMP% trees, never loaded. The mock is NOT used there: it has test exports (MockOpenVrCounts ...) the proxy lacks.
+    std::wstring valve;
+    {
+        wchar_t ov[MAX_PATH] = L"";
+        const DWORD n = GetEnvironmentVariableW(L"XR_EYE_CAPTURE_TEST_VALVE_DLL", ov, MAX_PATH);
+        std::wstring why;
+        if (n > 0 && n < MAX_PATH) valve = ov;
+        else valve = FindSteamVrOpenvrApi(DefaultOpenvrPathsFile(), &why);
+        if (valve.empty()) {
+            printf("SKIP: steamvr_install_test needs a real Valve openvr_api.dll; SteamVR's copy was not found (%s). Install SteamVR "
+                   "or set XR_EYE_CAPTURE_TEST_VALVE_DLL.\n", N(why).c_str());
+            return 0;
+        }
+        printf("  Valve DLL for the fake game trees: %s\n", N(valve).c_str());
+    }
     const std::string gameBytes = ReadBytes(valve);
-    if (gameBytes.empty()) { printf("FAIL: %s not found\n", EYE_VALVE_DLL); return 1; }
+    if (gameBytes.empty()) { printf("FAIL: cannot read %s\n", N(valve).c_str()); return 1; }
 
     // ---- InspectDll
     {
@@ -120,7 +136,7 @@ int main() {
         Check(none.kind == DllKind::Missing, "missing file");
         const DllInfo v = InspectDll(valve);
         Check(v.kind == DllKind::Valve && v.machine == Machine::X64 && MissingExports(v, p).empty(),
-              "Valve's openvr_api.dll v2.15.6: Valve x64, every export covered by the proxy (" + std::to_string(v.exports.size()) + " exports)");
+              "Valve's openvr_api.dll (SteamVR's copy): Valve x64, every export covered by the proxy (" + std::to_string(v.exports.size()) + " exports)");
         const std::vector<std::string> miss = MissingExports(m, p);
         Check(miss.size() == 2 && MissingExportsText(miss).find(L"MockOpenVrCounts") != std::wstring::npos,
               "the mock has 2 exports the proxy lacks: " + N(MissingExportsText(miss)));
@@ -494,6 +510,50 @@ int main() {
                   ReadBytes(vrOneDll + L"\\openvr_api_real.dll") == gameBytes + "V2",
               "outdated proxy updated, the real DLL untouched");
         Check(RepairEnabledGames(games, proxy, home, ver).empty(), "nothing left to do");
+
+        // FindRepairs (what the tray runs at start): read-only, reports what RepairEnabledGames would act on
+        Check(FindRepairs(games, home, ver).empty(), "FindRepairs: nothing while enabled and up to date");
+        WriteBytes(vrOneDll + L"\\openvr_api.dll", gameBytes + "V3");   // another game update
+        {
+            const std::vector<RepairNeed> f = FindRepairs(games, home, ver);
+            Check(f.size() == 1 && f[0].why == RepairWhy::GameUpdated && f[0].game == L"VR One" && f[0].dir == vrOneDll &&
+                      ReadBytes(vrOneDll + L"\\openvr_api.dll") == gameBytes + "V3" && !Exists(vrOneDll + L"\\openvr_api.dll.eyecapture-new") &&
+                      InspectLocation(vrOneDll, ver).state == LocState::ProxyMissing,
+                  "FindRepairs: the update is reported (game updated) and nothing is changed");
+            Check(InspectLocation(lib2Game, ver).state == LocState::ProxyMissing && FindRepairs(games, home, ver).size() == 1,
+                  "FindRepairs: a game the user did not enable is not reported");
+        }
+        Check(RepairEnabledGames(games, proxy, home, ver).size() == 1 && InspectLocation(vrOneDll, ver).state == LocState::Enabled,
+              "repaired on the click");
+
+        // VR EyeCapture moved: the sidecar's home is a folder that no longer exists / another existing folder
+        const std::wstring side = vrOneDll + L"\\" EYECAP_PROXY_SIDECAR;
+        WriteBytes(side, "home = " + N(root) + "\\old install\r\ngame = VR One\r\n");
+        {
+            const Location L = InspectLocation(vrOneDll, ver);
+            const std::vector<RepairNeed> f = FindRepairs(games, home, ver);
+            Check(L.state == LocState::Enabled && RepairNeeded(L, home) == RepairWhy::Moved && RepairNeeded(L, L"") == RepairWhy::None &&
+                      f.size() == 1 && f[0].why == RepairWhy::Moved && std::string(RepairWhyName(f[0].why)) == "VR EyeCapture moved",
+                  "sidecar home gone: Needs repair (VR EyeCapture moved); the check is skipped without a home");
+        }
+        MkDirs(root + L"\\other install");
+        WriteBytes(side, "home = " + N(root) + "\\other install\r\ngame = VR One\r\n");
+        Check(RepairNeeded(InspectLocation(vrOneDll, ver), home) == RepairWhy::Moved, "sidecar home = another existing folder: Moved");
+        {
+            std::wstring upper = home;
+            for (auto& c : upper) c = (wchar_t)towupper(c);
+            WriteBytes(side, "home = " + N(upper) + "\\\r\ngame = VR One\r\n");
+            Check(RepairNeeded(InspectLocation(vrOneDll, ver), home) == RepairWhy::None, "same folder with another case / a trailing slash: not moved");
+        }
+        WriteBytes(side, "home = " + N(root) + "\\old install\r\ngame = VR One\r\n");
+        {
+            const std::vector<RepairItem> it = RepairEnabledGames(games, proxy, home, ver);
+            ProxySidecar sc;
+            Check(it.size() == 1 && it[0].what == RepairItem::What::Moved && ReadProxySidecar(side, sc) && sc.home == home &&
+                      ReadBytes(vrOneDll + L"\\openvr_api.dll") == proxyBytes && ReadBytes(vrOneDll + L"\\openvr_api_real.dll") == gameBytes + "V3",
+                  "moved: repaired on the click -- sidecar home = this install, proxy and real DLL kept");
+            Check(FindRepairs(games, home, ver).empty(), "moved: nothing left to repair");
+        }
     }
 
     DeleteTree(root);

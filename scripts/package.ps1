@@ -4,14 +4,15 @@
     Produces dist\VR-EyeCapture-v<version>.zip containing:
         eye_capture.dll, XR_APILAYER_JRDEVO_eye_capture.json, EyeCaptureTray.exe, config.ini,
         steamvr\openvr_api.dll (the SteamVR proxy -- never loose in the root: the tray's "SteamVR games" copies it into a
-        game folder), EyeCaptureMirror.exe + valve\openvr_api.dll (Valve's own, v2.15.6, BSD-3: valve\LICENSE.txt) for
-        the SteamVR quick mode,
+        game folder), EyeCaptureMirror.exe for the SteamVR quick mode (it loads SteamVR's own openvr_api.dll from the
+        user's SteamVR install; no Valve binary is shipped),
         scripts\make_mkv.ps1, scripts\make_thumbnail.ps1 (+ scripts\thumbnail_overlay.png), README.md, THIRD_PARTY.md
     Users only unzip and run EyeCaptureTray.exe: it registers the layer itself (one UAC prompt; tray/install.cpp) and
     unregisters it from its tray menu. scripts\install.ps1 / uninstall.ps1 are developer scripts and stay out of the zip.
 
     Also produces dist\VR-EyeCapture-OBS-v<version>.zip (a separate release asset, only for OBS users):
-        obs-eyecapture.dll, README.md (obs\README.md), LICENSE.md
+        obs-eyecapture.dll, README.md (obs\README.md), COPYING.md (obs\COPYING.md: the plugin is GPL-2.0-or-later),
+        LICENSE.md (the PolyForm Noncommercial license of the rest of the project, which COPYING.md refers to)
     The OBS plugin is never in the main zip.
 
     The version comes from project(... VERSION x.y.z) in CMakeLists.txt.
@@ -54,7 +55,7 @@ $stage = Join-Path $distDir $stageName
 $zip = Join-Path $distDir "$stageName.zip"
 if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
 if (Test-Path $zip) { Remove-Item -Force $zip }
-New-Item -ItemType Directory -Force -Path (Join-Path $stage 'scripts'), (Join-Path $stage 'steamvr'), (Join-Path $stage 'valve') | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $stage 'scripts'), (Join-Path $stage 'steamvr') | Out-Null
 
 $files = @(
     @{ src = (Join-Path $rel 'eye_capture.dll'); name = 'eye_capture.dll' },
@@ -62,8 +63,6 @@ $files = @(
     @{ src = (Join-Path $rel 'EyeCaptureTray.exe'); name = 'EyeCaptureTray.exe' },
     @{ src = (Join-Path $rel 'openvr_api.dll'); name = 'steamvr\openvr_api.dll' },
     @{ src = (Join-Path $rel 'EyeCaptureMirror.exe'); name = 'EyeCaptureMirror.exe' },
-    @{ src = (Join-Path $root 'third_party\openvr\bin\win64\openvr_api.dll'); name = 'valve\openvr_api.dll' },
-    @{ src = (Join-Path $root 'third_party\openvr\LICENSE'); name = 'valve\LICENSE.txt' },
     @{ src = (Join-Path $root 'config.ini'); name = 'config.ini' },
     @{ src = (Join-Path $root 'README.md'); name = 'README.md' },
     @{ src = (Join-Path $root 'THIRD_PARTY.md'); name = 'THIRD_PARTY.md' },
@@ -100,6 +99,7 @@ New-Item -ItemType Directory -Force -Path $obsStage | Out-Null
 $obsFiles = @(
     @{ src = (Join-Path $rel 'obs-eyecapture.dll'); name = 'obs-eyecapture.dll' },
     @{ src = (Join-Path $root 'obs\README.md'); name = 'README.md' },
+    @{ src = (Join-Path $root 'obs\COPYING.md'); name = 'COPYING.md' },   # GPL-2.0-or-later notice of the plugin
     @{ src = (Join-Path $root 'LICENSE.md'); name = 'LICENSE.md' }
 )
 foreach ($f in $obsFiles) {

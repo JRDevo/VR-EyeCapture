@@ -141,7 +141,7 @@ int MigrateAppDataConfig(std::wstring* from, std::wstring* to) {
 
 void LoadConfig(const std::wstring& dllDir, Config& c) {
     c = Config();
-    ParseHotkey(L"Ctrl+Shift+F10", c.hotkey);
+    ParseHotkey(kDefaultHotkey, c.hotkey);
     c.outputDir = dllDir + L"\\captures";
 
     const std::wstring path = ConfigPath(dllDir);
@@ -157,7 +157,7 @@ void LoadConfig(const std::wstring& dllDir, Config& c) {
 
 bool ParseConfigFile(const std::wstring& path, Config& out, std::vector<std::wstring>& problems) {
     out = Config();
-    ParseHotkey(L"Ctrl+Shift+F10", out.hotkey);
+    ParseHotkey(kDefaultHotkey, out.hotkey);
     problems.clear();
     if (!FileExists(path)) { problems.push_back(L"cannot read " + path); return false; }
     out.loadedFrom = path;

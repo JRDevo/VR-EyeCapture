@@ -2,9 +2,12 @@
 // with no per-game setup. The tray starts it while steamvr_mode = quick and vrserver.exe runs, and stops it (the named
 // event Local\OpenXR-EyeCapture-MirrorQuit) when SteamVR exits or the mode changes.
 //
-//   * Loads Valve's own openvr_api.dll explicitly: XR_EYE_CAPTURE_MIRROR_OPENVR_DLL (tests: the mock), else
-//     <exe dir>\valve\openvr_api.dll (shipped, Valve-signed v2.15.6; build\Release\openvr_api.dll is OUR proxy, hence the
-//     subfolder). A DLL that exports EyeCaptureProxyVersion is refused.
+//   * Loads SteamVR's OWN openvr_api.dll by full path (VR EyeCapture ships none): XR_EYE_CAPTURE_MIRROR_OPENVR_DLL (tests:
+//     the mock), else <runtime>\bin\win64\openvr_api.dll of the first existing runtime in %LOCALAPPDATA%\openvr\
+//     openvrpaths.vrpath (FindSteamVrOpenvrApi; tests: XR_EYE_CAPTURE_TEST_OPENVRPATHS = another .vrpath file). Not found:
+//     one log line and exit code 4 (kExitNoSteamVr; the tray shows "Quick mode needs SteamVR installed" once and does not
+//     restart the mirror until steamvr_mode or the SteamVR state changes). A DLL that exports EyeCaptureProxyVersion is refused.
+//   * Exit codes: 0 done, 1 failed, 3 another EyeCaptureMirror runs (single-instance mutex), 4 SteamVR's DLL not found.
 //   * VR_InitInternal2(VRApplication_Background): no scene, never starts SteamVR (VRInitError_Init_NoServerForBackgroundApp
 //     while vrserver is not running: retried every 2 s).
 //   * Interfaces, asked by exact version (logged at start): "IVRSystem_022" (C++; GetDXGIOutputInfo slot 7, the display
@@ -18,14 +21,14 @@
 //     smoothing / symmetric_fov do not apply, and VR180 / VR360 are refused (logged; recorded flat).
 //   * Hotkey, tray commands, require_tray, beeps and the status block through ControlStart, like the proxy
 //     (api "SteamVR mirror"). It is "capable" (owns the tray status) only while no other live process owns it and the scene
-//     application has neither the VR EyeCapture proxy (openvr_api_real.dll) nor the OpenXR layer (eye_capture.dll) loaded:
-//     a game recorded per game always wins (the mirror finalizes a running recording and stays idle).
+//     application holds neither the VR EyeCapture proxy's marker (Local\OpenXR-EyeCapture-Proxy-<pid>) nor the OpenXR
+//     layer's (Local\OpenXR-EyeCapture-Layer-<pid>): a game recorded per game always wins (the mirror finalizes a running
+//     recording and stays idle). Only named objects are checked (OpenMutexW); the game process is never opened or read.
 //   * Exits on VREvent_Quit, on the quit event, or when the tray app is gone (require_tray), finalizing a recording.
 // Logs to <home>\logs\eye_capture.log (home = --home <dir>, else the exe's folder).
 #include <windows.h>
 #include <d3d11.h>
 #include <dxgi1_2.h>
-#include <psapi.h>
 #include <shlobj.h>
 #include <atomic>
 #include <memory>
@@ -43,12 +46,11 @@
 #include "recorder.h"
 #include "shared_status.h"
 
-#pragma comment(lib, "psapi.lib")
-
 namespace {
 
 const wchar_t kQuitEventName[] = L"Local\\OpenXR-EyeCapture-MirrorQuit";
 const wchar_t kSingleName[] = L"Local\\OpenXR-EyeCapture-Mirror";
+const int kExitNoSteamVr = 4;   // SteamVR's openvr_api.dll not found (tray/tray.cpp kMirrorExitNoSteamVr)
 const char kSystemVersion[] = "IVRSystem_022";
 const char kCompositorFnTable[] = "FnTable:IVRCompositor_022";
 
@@ -364,25 +366,8 @@ void Tick() {
     for (int k = 0; k < 2; ++k) if (g.km[k]) g.km[k]->ReleaseSync(0);
 }
 
-bool ProcessHasModule(DWORD pid, const wchar_t* name) {
-    HANDLE p = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid);
-    if (!p) return false;
-    HMODULE mods[1024];
-    DWORD need = 0;
-    bool found = false;
-    if (EnumProcessModulesEx(p, mods, sizeof(mods), &need, LIST_MODULES_64BIT)) {
-        const DWORD n = need / sizeof(HMODULE) < 1024 ? need / sizeof(HMODULE) : 1024;
-        for (DWORD i = 0; i < n && !found; ++i) {
-            wchar_t b[MAX_PATH] = L"";
-            if (GetModuleBaseNameW(p, mods[i], b, MAX_PATH) && _wcsicmp(b, name) == 0) found = true;
-        }
-    }
-    CloseHandle(p);
-    return found;
-}
-
-// Once a second: does a per-game recorder have priority? (another live owner of the status block, or the scene app has
-// the proxy / the OpenXR layer loaded)
+// Once a second: does a per-game recorder have priority? (another live owner of the status block, or the scene app holds
+// the proxy's / the OpenXR layer's per-process marker -- a named mutex, src/shared_status.h; nothing is read from the game)
 void CheckYield(EyeCapShared* shm) {
     std::string why;
     if (shm) {
@@ -393,8 +378,8 @@ void CheckYield(EyeCapShared* shm) {
     if (why.empty() && g.ovr.comp) {
         const DWORD scene = ((vr::PFN_FnGetCurrentSceneFocusProcess)g.ovr.comp[vr::kFn022_GetCurrentSceneFocusProcess])();
         if (scene && scene != GetCurrentProcessId()) {
-            if (ProcessHasModule(scene, EYECAP_PROXY_REAL_DLL)) why = "the per-game SteamVR recorder in pid " + std::to_string(scene);
-            else if (ProcessHasModule(scene, L"eye_capture.dll")) why = "the OpenXR layer in pid " + std::to_string(scene);
+            if (EyeCapMarkerExists(EYECAP_PROXY_MARKER_PREFIX, scene)) why = "the per-game SteamVR recorder in pid " + std::to_string(scene);
+            else if (EyeCapMarkerExists(EYECAP_LAYER_MARKER_PREFIX, scene)) why = "the OpenXR layer in pid " + std::to_string(scene);
         }
     }
     std::lock_guard<std::mutex> lk(g_lock);
@@ -459,8 +444,21 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR cmdLine, int) {
     }
     ClampQuickMode(g.cfg, true);
     std::wstring dllPath = EnvW(L"XR_EYE_CAPTURE_MIRROR_OPENVR_DLL");
-    if (!dllPath.empty()) LOGI("XR_EYE_CAPTURE_MIRROR_OPENVR_DLL=%s (test override)", N(dllPath).c_str());
-    else dllPath = ExeDir() + L"\\valve\\openvr_api.dll";
+    if (!dllPath.empty()) {
+        LOGI("XR_EYE_CAPTURE_MIRROR_OPENVR_DLL=%s (test override)", N(dllPath).c_str());
+    } else {   // SteamVR's own copy: <runtime>\bin\win64\openvr_api.dll from %LOCALAPPDATA%\openvr\openvrpaths.vrpath
+        std::wstring vrpath = EnvW(L"XR_EYE_CAPTURE_TEST_OPENVRPATHS");   // tests: another openvrpaths.vrpath
+        if (!vrpath.empty()) LOGI("XR_EYE_CAPTURE_TEST_OPENVRPATHS=%s (test override)", N(vrpath).c_str());
+        else vrpath = DefaultOpenvrPathsFile();
+        std::wstring why;
+        dllPath = FindSteamVrOpenvrApi(vrpath, &why);
+        if (dllPath.empty()) {
+            LOGE("mirror: SteamVR's openvr_api.dll not found -- %s. Quick mode needs SteamVR installed (exit code %d)", N(why).c_str(),
+                 kExitNoSteamVr);
+            return kExitNoSteamVr;
+        }
+        LOGI("mirror: SteamVR's openvr_api.dll found through %s", N(vrpath).c_str());
+    }
     if (!LoadOpenvr(dllPath)) return 1;
 
     HANDLE quit = CreateEventW(nullptr, TRUE, FALSE, kQuitEventName);

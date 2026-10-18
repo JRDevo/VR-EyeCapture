@@ -11,16 +11,20 @@
 //       drives the REAL window of a scratch tray (EYECAP_TRAY_TEST_SHM set): posts the "open settings" message, sets
 //       controls with SendMessage, clicks Save. First with a bad value (the window must stay open, the tray logs the
 //       message it would show), then good values (the window closes).
-//   settings_test svr <tray-pid> <list|enable|enableall|toggle|click|disable|reenable|rescan> [row=<game name>] [answers=Yes,No,OK]
+//   settings_test svr <tray-pid> <list|enable|enableall|disableall|toggle|click|disable|reenable|repair|rescan|unregister>
+//                     [row=<game name>] [answers=Yes,No,OK] [via=balloon]
 //       drives the REAL "SteamVR games" window of a scratch tray (tray/steamvr_ui.h; tests/run_steamvr_ui.ps1): posts
-//       WM_APP+9, waits until the Steam scan is done, selects the row of that game, does the action (enable = "Add a game by
-//       exe...", toggle = the check box through ID_SVR_TOGGLE, click = a real mouse click into the row's check box), then
+//       WM_APP+9 (via=balloon: a click on the tray's last balloon instead, WM_APP+1 with NIN_BALLOONUSERCLICK -- the window must
+//       open from it), waits until the Steam scan is done, selects the row of that game, does the action (enable = "Add a game
+//       by exe...", toggle = the check box through ID_SVR_TOGGLE, click = a real mouse click into the row's check box), then
 //       answers every message box the window shows with the next answer (printed "BOX: <text>" / "ANSWER: <button>"; no
 //       answers left: OK, else No), and prints the rows ("ROW: game | state | folder"), the status line, the details text
-//       and the button states before closing it.
+//       and the button states before closing it. unregister: posts WM_APP+11 (the tray menu's "Unregister from VR games...";
+//       its question boxes are answered by the tray's EYECAP_TRAY_TEST_ASK file) and waits 3 s, no window.
 // Exit code 0 = all checks passed.
 #include <windows.h>
 #include <commctrl.h>
+#include <shellapi.h>   // NIN_BALLOONUSERCLICK
 #include <cstdio>
 #include <fstream>
 #include <sstream>
@@ -138,13 +142,23 @@ int TestSave(const std::wstring& path) {
     }
     {
         Config bad = c;
-        ParseHotkey(L"Ctrl+Shift+F10", bad.hotkey);
+        ParseHotkey(kDefaultHotkey, bad.hotkey);
         bad.hotkey.text = L"Ctrl+Banana";
         settings::SaveResult r;
         const bool ok = settings::SaveSettingsToFile(path, bad, r);
         printf("  hotkey = Ctrl+Banana -> ok=%d, problems:\n", ok);
         for (const auto& p : r.problems) printf("      %s\n", N(p).c_str());
         Check(!ok && !r.problems.empty() && ReadAll(path) == original, "hotkey Ctrl+Banana is refused and the file is unchanged");
+    }
+    // the built-in hotkey default (= the shipped config.ini, Restore Defaults): ScrollLock
+    {
+        const std::wstring p0 = path + L".nohotkey-test.ini";
+        { std::ofstream f(p0, std::ios::binary); f << "[capture]\r\ncodec = hevc\r\n"; }
+        Config d;
+        std::vector<std::wstring> pr;
+        ParseConfigFile(p0, d, pr);
+        Check(pr.empty() && d.hotkey.text == L"ScrollLock" && d.hotkey.bindings.size() == 1, "no hotkey line -> the default ScrollLock");
+        DeleteFileW(p0.c_str());
     }
     // 2. nothing changed: no write at all
     {
@@ -176,7 +190,7 @@ int TestSave(const std::wstring& path) {
         const std::wstring p2 = path + L".append-test.ini";
         { std::ofstream f(p2, std::ios::binary); f << "; tiny config\r\n[capture]\r\ncodec = hevc\r\n"; }
         Config n;
-        ParseHotkey(L"Ctrl+Shift+F10", n.hotkey);
+        ParseHotkey(kDefaultHotkey, n.hotkey);
         n.indicator.size = 0.05f;      // [indicator] does not exist
         n.bitrateMbps = 33;            // [capture] exists
         settings::SaveResult r;
@@ -193,7 +207,7 @@ int TestSave(const std::wstring& path) {
         const std::wstring p3 = path + L".indicator-test.ini";
         { std::ofstream f(p3, std::ios::binary); f << "[indicator]\r\nvr_indicator = 1\r\n[debug]\r\nlog_level = info\r\n"; }
         Config n;
-        ParseHotkey(L"Ctrl+Shift+F10", n.hotkey);
+        ParseHotkey(kDefaultHotkey, n.hotkey);
         n.indicator.x = -0.3f; n.indicator.y = 0.05f; n.indicator.z = -1.5f;
         n.indicator.size = 0.0005f;
         n.logLevel = LogLevel::None;
@@ -225,7 +239,7 @@ int TestSave(const std::wstring& path) {
         const char* names[] = {"sbs_half", "sbs_full", "tb_full", "tb_half"};
         for (int i = 0; i < 4; ++i) {
             Config n;
-            ParseHotkey(L"Ctrl+Shift+F10", n.hotkey);
+            ParseHotkey(kDefaultHotkey, n.hotkey);
             n.postYt8k = true;
             n.layout3d = all[i];
             settings::SaveResult r;
@@ -258,7 +272,7 @@ int TestSave(const std::wstring& path) {
         const char* names[] = {"now", "session_end", "game_exit", "manual"};
         for (int i = 0; i < 4; ++i) {
             Config n;
-            ParseHotkey(L"Ctrl+Shift+F10", n.hotkey);
+            ParseHotkey(kDefaultHotkey, n.hotkey);
             n.postWhen = all[i];
             settings::SaveResult r;
             const bool ok = settings::SaveSettingsToFile(p5, n, r);
@@ -283,7 +297,7 @@ int TestSave(const std::wstring& path) {
         // a file without the key: saving the default adds nothing, saving "now" appends it to [post_processing]
         { std::ofstream f(p5, std::ios::binary); f << "[post_processing]\r\npost_mkv = 1\r\n"; }
         Config dflt;
-        ParseHotkey(L"Ctrl+Shift+F10", dflt.hotkey);
+        ParseHotkey(kDefaultHotkey, dflt.hotkey);
         dflt.postMkv = true;
         settings::SaveResult r1;
         const bool ok1 = settings::SaveSettingsToFile(p5, dflt, r1);
@@ -305,7 +319,7 @@ int TestSave(const std::wstring& path) {
         const char* names[] = {"4:3", "none", "4:3pad", "16:9"};
         for (int i = 0; i < 4; ++i) {
             Config n;
-            ParseHotkey(L"Ctrl+Shift+F10", n.hotkey);
+            ParseHotkey(kDefaultHotkey, n.hotkey);
             n.eyeCrop = all[i];
             settings::SaveResult r;
             const bool ok = settings::SaveSettingsToFile(p6, n, r);
@@ -346,7 +360,7 @@ int TestSave(const std::wstring& path) {
         const std::wstring p7 = path + L".overlays-test.ini";
         { std::ofstream f(p7, std::ios::binary); f << "[capture]\r\nswap_eyes = 0\r\n\r\n[debug]\r\nlog_level = info\r\n"; }
         Config n;
-        ParseHotkey(L"Ctrl+Shift+F10", n.hotkey);
+        ParseHotkey(kDefaultHotkey, n.hotkey);
         settings::SaveResult r1;
         const bool ok1 = settings::SaveSettingsToFile(p7, n, r1);
         Check(ok1 && ReadAll(p7) == "[capture]\r\nswap_eyes = 0\r\n\r\n[debug]\r\nlog_level = info\r\n",
@@ -388,7 +402,7 @@ int TestSave(const std::wstring& path) {
         const unsigned all[] = {3840, 2560, 1920, 3000, 0};
         for (unsigned w : all) {
             Config n;
-            ParseHotkey(L"Ctrl+Shift+F10", n.hotkey);
+            ParseHotkey(kDefaultHotkey, n.hotkey);
             n.maxWidth = w;
             settings::SaveResult r;
             const bool ok = settings::SaveSettingsToFile(p8, n, r);
@@ -451,7 +465,7 @@ int TestSave(const std::wstring& path) {
         const std::wstring p9 = path + L".yt8k-test.ini";
         { std::ofstream f(p9, std::ios::binary); f << "[post_processing]\r\npost_yt8k = 1\r\n"; }
         Config n0;
-        ParseHotkey(L"Ctrl+Shift+F10", n0.hotkey);
+        ParseHotkey(kDefaultHotkey, n0.hotkey);
         n0.postYt8k = true;
         settings::SaveResult r0;
         Check(settings::SaveSettingsToFile(p9, n0, r0) && ReadAll(p9) == "[post_processing]\r\npost_yt8k = 1\r\n",
@@ -486,7 +500,7 @@ int TestSave(const std::wstring& path) {
         const std::wstring pa = path + L".yt8kcodec-test.ini";
         { std::ofstream f(pa, std::ios::binary); f << "[post_processing]\r\npost_yt8k = 1\r\n"; }
         Config n0;
-        ParseHotkey(L"Ctrl+Shift+F10", n0.hotkey);
+        ParseHotkey(kDefaultHotkey, n0.hotkey);
         n0.postYt8k = true;
         settings::SaveResult r0;
         Check(settings::SaveSettingsToFile(pa, n0, r0) && ReadAll(pa) == "[post_processing]\r\npost_yt8k = 1\r\n",
@@ -526,7 +540,7 @@ int TestSave(const std::wstring& path) {
         { std::ofstream f(pc, std::ios::binary); f << "[capture]\r\ncodec = hevc\r\n"; }
         for (VideoCodec v : {VideoCodec::Av1, VideoCodec::H264, VideoCodec::Av1}) {
             Config n;
-            ParseHotkey(L"Ctrl+Shift+F10", n.hotkey);
+            ParseHotkey(kDefaultHotkey, n.hotkey);
             n.codec = v;
             settings::SaveResult r;
             const bool ok = settings::SaveSettingsToFile(pc, n, r);
@@ -549,7 +563,7 @@ int TestSave(const std::wstring& path) {
             const std::wstring pr4 = path + L".recordyt-test.ini";
             { std::ofstream f(pr4, std::ios::binary); f << "[capture]\r\nswap_eyes = 0\r\n\r\n[debug]\r\nlog_level = info\r\n"; }
             Config n;
-            ParseHotkey(L"Ctrl+Shift+F10", n.hotkey);
+            ParseHotkey(kDefaultHotkey, n.hotkey);
             settings::SaveResult r1;
             Check(settings::SaveSettingsToFile(pr4, n, r1) && ReadAll(pr4) == "[capture]\r\nswap_eyes = 0\r\n\r\n[debug]\r\nlog_level = info\r\n",
                   "missing record_for_youtube + default 0: the file is left alone");
@@ -587,7 +601,7 @@ int TestSave(const std::wstring& path) {
         const std::string base = "[capture]\r\nswap_eyes = 0\r\n\r\n[debug]\r\nlog_level = info\r\n";
         { std::ofstream f(pn, std::ios::binary); f << base; }
         Config n;
-        ParseHotkey(L"Ctrl+Shift+F10", n.hotkey);
+        ParseHotkey(kDefaultHotkey, n.hotkey);
         settings::SaveResult r0;
         Check(settings::SaveSettingsToFile(pn, n, r0) && r0.changed.empty() && ReadAll(pn) == base,
               "missing beeps / rate_control / qp / quality_vs_speed / constant_frame_rate + defaults: the file is left alone");
@@ -1302,9 +1316,11 @@ void DumpSvr(HWND d) {
     wchar_t det[8192] = L"";
     SendMessageW(GetDlgItem(d, steamvr_ui::ID_SVR_DETAILS), WM_GETTEXT, 8192, (LPARAM)det);   // (GetDlgItemText reads nothing cross-process here)
     printf("DETAILS: %s\n", OneLine(det).c_str());
-    printf("BUTTONS: enableall=%d ", IsWindowEnabled(GetDlgItem(d, steamvr_ui::ID_SVR_ENABLEALL)) ? 1 : 0);
-    printf("enable=%d disable=%d reenable=%d\n", IsWindowEnabled(GetDlgItem(d, steamvr_ui::ID_SVR_ENABLE)) ? 1 : 0,
-           IsWindowEnabled(GetDlgItem(d, steamvr_ui::ID_SVR_DISABLE)) ? 1 : 0, IsWindowEnabled(GetDlgItem(d, steamvr_ui::ID_SVR_REENABLE)) ? 1 : 0);
+    printf("BUTTONS: enableall=%d disableall=%d ", IsWindowEnabled(GetDlgItem(d, steamvr_ui::ID_SVR_ENABLEALL)) ? 1 : 0,
+           IsWindowEnabled(GetDlgItem(d, steamvr_ui::ID_SVR_DISABLEALL)) ? 1 : 0);
+    printf("enable=%d disable=%d reenable=%d repair=%d\n", IsWindowEnabled(GetDlgItem(d, steamvr_ui::ID_SVR_ENABLE)) ? 1 : 0,
+           IsWindowEnabled(GetDlgItem(d, steamvr_ui::ID_SVR_DISABLE)) ? 1 : 0, IsWindowEnabled(GetDlgItem(d, steamvr_ui::ID_SVR_REENABLE)) ? 1 : 0,
+           IsWindowEnabled(GetDlgItem(d, steamvr_ui::ID_SVR_REPAIR)) ? 1 : 0);
 }
 int TestSvr(DWORD pid, int argc, wchar_t** argv) {
     g_fail = 0;
@@ -1314,10 +1330,12 @@ int TestSvr(DWORD pid, int argc, wchar_t** argv) {
     const std::wstring action = argv[3];
     std::wstring rowName;
     int modeSel = -1;
+    bool viaBalloon = false;
     std::vector<std::wstring> answers;
     for (int i = 4; i < argc; ++i) {
         const std::wstring a = argv[i];
         if (a.compare(0, 4, L"row=") == 0) rowName = a.substr(4);
+        else if (a == L"via=balloon") viaBalloon = true;
         else if (a.compare(0, 5, L"mode=") == 0) modeSel = _wtoi(a.c_str() + 5);
         else if (a.compare(0, 8, L"answers=") == 0) {
             std::wstring rest = a.substr(8);
@@ -1329,10 +1347,17 @@ int TestSvr(DWORD pid, int argc, wchar_t** argv) {
             }
         }
     }
-    PostMessageW(tw, WM_APP + 9, 0, 0);
+    if (action == L"unregister") {   // the tray menu's "Unregister from VR games..." (WM_APP+11); no window
+        PostMessageW(tw, WM_APP + 11, 0, 0);
+        Sleep(3000);
+        printf("POSTED: WM_APP+11\n");
+        return g_fail;
+    }
+    if (viaBalloon) PostMessageW(tw, WM_APP + 1, 1, NIN_BALLOONUSERCLICK);   // WM_TRAY: a click on the last balloon
+    else PostMessageW(tw, WM_APP + 9, 0, 0);
     HWND d = nullptr;
     for (int i = 0; i < 100 && !d; ++i) { d = FindTop(pid, steamvr_ui::kWindowClass, steamvr_ui::kWindowTitle); if (!d) Sleep(50); }
-    Check(d != nullptr, "SteamVR games window opened");
+    Check(d != nullptr, viaBalloon ? "SteamVR games window opened by the balloon click" : "SteamVR games window opened");
     if (!d) return 1;
     auto waitScan = [&] {
         for (int i = 0; i < 300; ++i) {
@@ -1365,6 +1390,8 @@ int TestSvr(DWORD pid, int argc, wchar_t** argv) {
     else if (action == L"enableall") button = steamvr_ui::ID_SVR_ENABLEALL;
     else if (action == L"disable") button = steamvr_ui::ID_SVR_DISABLE;
     else if (action == L"reenable") button = steamvr_ui::ID_SVR_REENABLE;
+    else if (action == L"repair") button = steamvr_ui::ID_SVR_REPAIR;
+    else if (action == L"disableall") button = steamvr_ui::ID_SVR_DISABLEALL;
     else if (action == L"rescan") button = steamvr_ui::ID_SVR_RESCAN;
     else if (action == L"toggle") {
         PostMessageW(d, WM_COMMAND, MAKEWPARAM(steamvr_ui::ID_SVR_TOGGLE, 0), 0);

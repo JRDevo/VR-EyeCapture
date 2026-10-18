@@ -95,6 +95,7 @@ Extra VRAM for last_seen: 181 MB at 4356x2178, about 640 MB at 8192x4096. GPU pa
   Open config.ini and Restore defaults were not clicked by hand. Fixed 590x640 layout, 100 % DPI only.
 - The dormant e2e case (tray must be closed). `dome_forward = reset_on_hotkey` is accepted but not implemented.
 - "Restore defaults" uses the built-in defaults (head_smoothing 0, hotkey Ctrl+Shift+F10), not the shipped config.ini values.
+  (Since 0.5.0 the built-in hotkey is ScrollLock, the same as the shipped config.ini.)
 
 ## Installed files
 

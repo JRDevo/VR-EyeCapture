@@ -45,7 +45,7 @@ games with Direct3D 11.
   and no game files are touched.
 - **Direct3D 11 and 12 games** — any OpenXR game that renders with either.
 - **SteamVR (OpenVR) games** — tray menu **SteamVR games...** enables recording per game (Direct3D 11).
-- **One hotkey** — default `Ctrl+Shift+F10`, or the tray icon, starts and stops a recording; beeps in the headset confirm
+- **One hotkey** — default `ScrollLock`, or the tray icon, starts and stops a recording; beeps in the headset confirm
   (`beeps = 0` turns them off, e.g. when they end up in the recorded audio).
   It can be any key, a mouse side button, an Xbox controller button or a wheel / joystick button (or several of them).
 - **Tray app with a main window** — every option has a help text, no `config.ini` editing needed.
@@ -225,7 +225,9 @@ OpenXR is a trademark of The Khronos Group.
    Moved the folder? Start the tray from the new folder and it offers to re-register from there.
 3. Optional: tick **Start with Windows** in the app window → Advanced so the tray app always runs (it must run before the
    game, see "How it works"). This writes one Run entry for your Windows account (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`,
-   value `VR EyeCapture`; an entry from before the rename, `OpenXR-EyeCapture`, is renamed at the next start).
+   value `VR EyeCapture`). An entry from before the rename (`OpenXR-EyeCapture`) is not renamed or changed at start any
+   more: it keeps starting the tray app; if it points to another folder the tray says so once (one notification). Only
+   your own click replaces it: untick and tick **Start with Windows** again and the old entry becomes the new one.
 4. SteamVR (OpenVR) games need one more step: tray menu → **SteamVR games...** → tick the games
    ([SteamVR games](#steamvr-games-virtual-desktop--steamvr)).
 
@@ -233,9 +235,12 @@ Updating from OpenXR-EyeCapture (v0.4 or older): unzip the new version over the 
 start the tray from there (it offers to re-register). Your settings in `%APPDATA%\OpenXR-EyeCapture\config.ini` are
 copied to `%APPDATA%\VR EyeCapture\config.ini` at the first start (the old file is left alone).
 
-Uninstall: untick **Start with Windows** in the app window first (or delete that Run value), **Disable** every game in
-**SteamVR games...**, then right-click the tray icon → **Unregister from VR games...** (one UAC prompt), exit the tray app and delete
-the folder (recordings in `captures\` stay until you delete them).
+Uninstall: untick **Start with Windows** in the app window first (or delete that Run value), then right-click the tray
+icon → **Unregister from VR games...** (one UAC prompt). If SteamVR games are enabled it also asks *"Also put the original
+openvr_api.dll back in N SteamVR game(s)?"*: **Yes** disables them all (the same as **Disable all** in **SteamVR
+games...**; close those games and SteamVR first). Exit the tray app and delete the folder (recordings in `captures\` stay
+until you delete them). When the last SteamVR game is disabled, the tray also deletes the
+`HKCU\Software\OpenXR-EyeCapture` value `Home` it wrote when you enabled one.
 
 Command-line forms (from an administrator prompt): `EyeCaptureTray.exe --register` / `--unregister` (exit code 0 = done,
 5 = no administrator rights); `EyeCaptureTray.exe --status` prints `registered=yes|no|stale` and `autostart=yes|no` among the status fields.
@@ -272,8 +277,8 @@ any per-user HKCU copy, which would make some loaders load the layer twice) and 
 
 
 1. Start `EyeCaptureTray.exe`, then the game in VR as usual (ETS2 / ATS: launch option `-openxr`).
-2. Press **Ctrl+Shift+F10** → one beep (880 Hz) in the headset: recording.
-3. Press **Ctrl+Shift+F10** again → two beeps: stopped, the MP4 is finalized.
+2. Press **ScrollLock** (the default hotkey) → one beep (880 Hz) in the headset: recording.
+3. Press **ScrollLock** again → two beeps: stopped, the MP4 is finalized.
    One long low beep = it could not start (see the log).
    The beeps play on the Windows default playback device. If that is the device being recorded (the usual setup), they
    are in the recording too: set `beeps = 0` (app window: Recording -> Beeps) to switch them off.
@@ -455,7 +460,7 @@ projections are labelled "experimental" in the window.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `hotkey` | `Ctrl+Shift+F10` | Start / stop. One or more, separated by commas; any of them works. **Keys**: `Ctrl`, `Shift`, `Alt` + `F1`..`F24`, `A`..`Z`, `0`..`9`, `Numpad0`..`9`, `Home`, `End`, `Insert`, `Delete`, `PageUp`, `PageDown`, `Pause`, `ScrollLock`, `CapsLock`, media keys (`MediaPlayPause`, `VolumeUp` ...), punctuation (`Semicolon`, `Comma` ...), any other key as `Key0xNN`; modifiers must match exactly. **Mouse**: `MouseMiddle`, `MouseX1`, `MouseX2`. Keys and mouse buttons are read when the game starts. **Xbox controller**: `Pad:A`, `Pad:Back+Start` (hold both), `Pad2:LB` (2nd pad only). **Wheel / joystick**: `Joy:*:Button3` (any device), `Joy:T300RS:Button5+Button6` (device name contains `T300RS`), `POVUp` / `POVDown` / `POVLeft` / `POVRight` for the hat. Controller and wheel buttons are read by the tray and apply at once. `EyeCaptureTray.exe --inputs` lists your devices and prints the name of each button you press. `none` = tray only. Example: `ScrollLock, Pad:Back+Start`. |
+| `hotkey` | `ScrollLock` | Start / stop. One or more, separated by commas; any of them works. **Keys**: `Ctrl`, `Shift`, `Alt` + `F1`..`F24`, `A`..`Z`, `0`..`9`, `Numpad0`..`9`, `Home`, `End`, `Insert`, `Delete`, `PageUp`, `PageDown`, `Pause`, `ScrollLock`, `CapsLock`, media keys (`MediaPlayPause`, `VolumeUp` ...), punctuation (`Semicolon`, `Comma` ...), any other key as `Key0xNN`; modifiers must match exactly. **Mouse**: `MouseMiddle`, `MouseX1`, `MouseX2`. Keys and mouse buttons are read when the game starts. **Xbox controller**: `Pad:A`, `Pad:Back+Start` (hold both), `Pad2:LB` (2nd pad only). **Wheel / joystick**: `Joy:*:Button3` (any device), `Joy:T300RS:Button5+Button6` (device name contains `T300RS`), `POVUp` / `POVDown` / `POVLeft` / `POVRight` for the hat. Controller and wheel buttons are read by the tray and apply at once. `EyeCaptureTray.exe --inputs` lists your devices and prints the name of each button you press. `none` = tray only. Example: `ScrollLock, Pad:Back+Start`. |
 | `output_dir` | *(empty)* = `captures` next to the DLL | Where MP4s go; the converted files (MKV, 8K, flat) go next to them, on the same drive. Nothing large is written to C: (or `%TEMP%`) unless this folder is on C:. **Low-space guard**: a recording does not start with less than 10 GB free on that drive, a conversion not with less than 10 GB + the estimated size of the files it makes (from the recording's length and the bitrates: an 8K copy of a 30-minute recording at 150 Mbit/s is about 31 GB) (log line + balloon "Recording not started" / "Not enough disk space ... needs about N GB"), and a recording is stopped and saved when the drive drops below 2 GB free (balloon "Recording stopped: disk almost full"). |
 | `codec` | `hevc` | `hevc`, `h264` or `av1` (H.264 is limited to 4096 px wide; wider frames are scaled down). `av1` = hardware AV1 through the GPU's Media Foundation AV1 encoder (NVIDIA RTX 40 / 50): about the HEVC quality at 2/3 of the bitrate, up to 8192 px; above 1 Gpixel/s (8K at 72 / 90 fps) the encoder runs at its faster quality setting (`CODECAPI_AVEncCommonQualityVsSpeed` 25) because its default speed cannot keep up (measured on an RTX 5090: ~51 fps at 8192x4348). No AV1 encoder: the recording is HEVC (logged `AV1 unavailable -- fell back to HEVC`). The tray converts AV1 recordings like any other (the MKV remux copies the AV1 stream). |
 | `bitrate_mbps` | `0` = 120 (HEVC) / 80 (H.264) / 80 (AV1) | Video bitrate in Mbit/s (max 1000). 1 Mbit/s = about 0.45 GB per hour: 120 = 54 GB/h, 150 = 68, 200 = 90, 250 = 113, 300 = 135. Suggested: 250 at 60 fps or more, 120 at 30 fps. app window: "Bitrate" (Default / 150 / 200 / 250 / 300; other values show as Custom and are kept). |
@@ -760,8 +765,11 @@ The plugin is a separate download. It is not in the main zip, so you only get it
 
 </summary>
 
-**New.** VR EyeCapture can also record games that use SteamVR's own API (OpenVR) instead of OpenXR — for example Unity
-or Unreal games that only run through SteamVR.
+**New in 0.5.0.** VR EyeCapture can also record games that use SteamVR's own API (OpenVR) instead of OpenXR — for example
+Unity or Unreal games that only run through SteamVR. **Tested on a real headset with Crisis VRigade 2** (a Unity game,
+SteamVR compositor interface `IVRCompositor_026`, both eyes submitted as one texture array, 72 Hz) on a Quest 3 through
+Virtual Desktop + SteamVR, per-game mode. Other games use other engine versions and interface versions; they are covered
+by the test suite (a simulated SteamVR and a fake game), not yet by a real game each — reports welcome.
 
 1. Right-click the tray icon → **SteamVR games...**. The window finds the SteamVR games in your Steam library by itself
    (every Steam library folder, a few seconds: "Scanning the Steam library...").
@@ -771,17 +779,21 @@ or Unreal games that only run through SteamVR.
    icon and the MKV conversion work as for OpenXR games.
 
 A game that is not in Steam: **Add a game by exe...** and pick its `.exe`. Untick a game (or **Disable**) to put its own
-`openvr_api.dll` back. Each game shows its state: **On**, **Off**, **Needs repair** (a game update while the game was
-running; it is repaired at the next tray start, or click **Re-enable**), **OpenComposite installed**, **32-bit, not
-supported**. The list and the last scan are kept in `steamvr_games.ini` next to the tray app; the files in the game folder
-are what counts.
+`openvr_api.dll` back; **Disable all** does that for every enabled game (one confirmation). Each game shows its state:
+**On**, **Off**, **Needs repair** (game updated / VR EyeCapture moved / older recorder version: click **Repair**, see
+below), **OpenComposite installed**, **32-bit, not supported**. The list and the last scan are kept in `steamvr_games.ini`
+next to the tray app; the files in the game folder are what counts. Enabling a game also writes one per-user registry
+value, `HKCU\Software\OpenXR-EyeCapture` → `Home` = the VR EyeCapture folder (no administrator rights; a fallback for
+the recorder when a game folder lacks its small settings file); it is deleted again when you disable the last game.
 
 **How it works.** Such a game ships Valve's `openvr_api.dll` in its own folder (Unity: `<Game>_Data\Plugins\x86_64\`,
 Unreal: `Engine\Binaries\ThirdParty\OpenVR\...\Win64\`). "Enable" in the tray puts the VR EyeCapture copy there and
 renames Valve's file in place to `openvr_api_real.dll`; a small `eye_capture_proxy.ini` next to them tells it where the
-app is installed. The game then talks to SteamVR exactly as before — every call is passed on unchanged — and VR
-EyeCapture copies the two eye images the game hands to SteamVR, the same way it does for OpenXR games. "Disable" puts
-Valve's file back. Nothing is installed globally, nothing is injected, and other games are not touched.
+app is installed. The game then talks to SteamVR as before: every call is passed through to Valve's DLL unchanged,
+except two methods of SteamVR's compositor, `Submit` and `WaitGetPoses`, which are routed through the recorder inside the
+game process (it copies the two eye images the game hands to SteamVR and notes the head pose, then calls SteamVR's own
+method with the same arguments and returns its result) — the same way it records OpenXR games. "Disable" puts Valve's
+file back. Nothing is installed globally, nothing is injected, and other games are not touched.
 
 **What you get.** The same recordings as with OpenXR games: hotkey, tray icon, beeps, `config.ini` settings (codec,
 bitrate, `symmetric_fov`, head smoothing, the VR180 / VR360 dome), audio, the MKV for YouTube, and the OBS live view.
@@ -798,15 +810,20 @@ almost every game).
 records SteamVR's own mirror picture of whatever is running — no game has to be ticked. The trade-offs: a lower resolution
 than the game renders, SteamVR's menus, dashboard and boundary are in the picture, and it is flat side-by-side only (no
 VR180 / VR360 dome; `projection` is ignored, and head smoothing / `symmetric_fov` do not apply). A game ticked in the list
-still records the per-game way (the better one wins automatically). Quick mode uses Valve's own `openvr_api.dll`, shipped
-in the zip as `valve\openvr_api.dll`. **Per game** (the default) records only the ticked games; **Off** records no SteamVR
-game. Not yet tried with a real SteamVR install — reports welcome.
+still records the per-game way (the better one wins automatically). Quick mode uses SteamVR's own `openvr_api.dll` from your
+SteamVR installation (found through `%LOCALAPPDATA%\openvr\openvrpaths.vrpath`; VR EyeCapture ships no Valve file). Without
+SteamVR installed the tray says *"Quick mode needs SteamVR installed (openvr_api.dll not found in the SteamVR folder)"* once
+and does not try again until you change the mode or SteamVR restarts. **Per game** (the default) records only the ticked
+games; **Off** records no SteamVR game. Quick mode itself has not been tried with a real headset yet — reports welcome.
 
 **After a game update.** Steam's "Verify integrity of game files" and game updates put Valve's `openvr_api.dll` back. The
-tray app notices it at its next start (and whenever the SteamVR games window opens) and puts the recorder back by itself,
-only for the games you ticked, with one notification "SteamVR recording repaired for <game> after a game update" (also in
-`logs\tray.log`). A game that is running at that moment is left alone and repaired at the next start. A newer VR
-EyeCapture version updates the recorder in your games the same way.
+tray app notices it at its next start, only for the games you ticked, and shows one notification: *"SteamVR recording: N
+game(s) need a repair after an update. Click to repair."* Nothing in the game folders is changed until you click: the
+notification opens the SteamVR games window, where those games show **Needs repair**, and **Repair** (or **Re-enable**
+for one game) puts the recorder back. A game that is running at that moment is skipped (close it and click **Repair**
+again). The same applies when a newer VR EyeCapture version brings a newer recorder ("older recorder version") and when
+you moved the VR EyeCapture folder ("VR EyeCapture moved": the games' settings files and the `Home` value still point to
+the old folder; Repair points them to the new one). Everything is logged in `logs\tray.log`.
 
 **OpenComposite.** OpenComposite and SteamVR recording are alternatives for the same game. With OpenComposite (its
 `openvr_api.dll` then talks OpenXR) the game goes through the OpenXR route, which VR EyeCapture records once it is
@@ -851,6 +868,9 @@ the frame layout it detected (`TWO_SWAPCHAINS`, `TEXTURE_ARRAY`, `ONE_SWAPCHAIN_
   Set `beeps = 0` (app window: Recording -> Beeps).
 - **DaVinci Resolve / an editor shows stutter or out-of-sync audio**: set `constant_frame_rate = 1` for the next recording
   (the default keeps the game's real frame times, a variable frame rate).
+- **Recording does not start / stops by itself**: check the free space on the `output_dir` drive. A recording refuses to
+  start below 10 GB free and is stopped and saved cleanly below 2 GB free (balloons "Recording not started" / "Recording
+  stopped: disk almost full").
 - **Disable without uninstalling**: set the environment variable `DISABLE_XR_APILAYER_JRDEVO_eye_capture=1`.
 
 </details>
@@ -883,7 +903,8 @@ thread or GPU queue.
 
 
 - **ETS2 / ATS DLAA + DLSS injector**: works alongside; this layer never hooks Present or the game's D3D calls. The
-  default hotkey is Ctrl+**Shift**+F10 because plain Ctrl+F10 is the injector's snapshot key. Its VR panel and fps box
+  default hotkey is `ScrollLock` because Ctrl+F10 and Shift+F11 are the injector's keys (and Alt combinations open the
+  game's window menu). Its VR panel and fps box
   are OpenXR quad layers that the injector adds in front of every OpenXR layer, so this recorder sees them and, with
   `record_overlays = 1` (default), records them where you see them. Set `record_overlays = 0` for a clean video.
 - **Virtual Desktop's own OpenXR layer** and other implicit layers coexist (each registers its own entry).
@@ -915,11 +936,13 @@ separate OBS plugin zip (build notes for the plugin: [`obs/README.md`](obs/READM
 If something goes wrong, [open an issue](../../issues/new/choose) on this GitHub page and attach the files below.
 Without the logs I usually can't tell what happened.
 
-**Files to attach** — from the tool's folder (next to `eye_capture.dll`):
+**Files to attach** — the logs are in the tool's folder (next to `eye_capture.dll`):
 
 - **`logs\eye_capture.log`** — **required, always.**
 - **`logs\tray.log`** — **required.**
-- **`config.ini`** — **required** (your settings).
+- **`config.ini`** — **required** (your settings). Usually `%APPDATA%\VR EyeCapture\config.ini` (paste that into the
+  Explorer address bar); without that file, the one next to `eye_capture.dll`. The first lines of `logs\eye_capture.log`
+  name the one in use (`config ...`).
 
 **Write in the issue:**
 
@@ -937,7 +960,9 @@ Without the logs I usually can't tell what happened.
 
 ## License and credits
 
-**This tool** — [PolyForm Noncommercial License 1.0.0](LICENSE.md), Copyright (c) 2026 JRDevo.
+**This tool** — [PolyForm Noncommercial License 1.0.0](LICENSE.md), Copyright (c) 2026 JRDevo. The OBS Studio plugin
+(the `obs/` folder, the separate OBS zip) is licensed under the GNU GPL, version 2 or later ([`obs/COPYING.md`](obs/COPYING.md)),
+because it is built against OBS Studio's libobs.
 
 - Free to use, copy, change and share for **noncommercial** purposes.
 - **No commercial use** (no selling, no paid bundles) without written permission.
@@ -954,6 +979,8 @@ no paid versions. Made with love.
 | Part | License | Shipped with this tool? |
 |------|---------|-------------------------|
 | OpenXR SDK headers (Khronos) | Apache-2.0 | Compiled into `eye_capture.dll` (headers only; the OpenXR loader is not shipped) |
+| `third_party/openvr/openvr.h` — a hand-written subset derived from Valve's OpenVR header | BSD-3-Clause | Compiled into the SteamVR proxy `steamvr\openvr_api.dll` and `EyeCaptureMirror.exe` (types and layouts only, no Valve code) |
+| OBS Studio libobs headers (OBS Project) | GPL-2.0-or-later | Fetched at build time, headers only, for the OBS plugin (itself GPL-2.0-or-later); OBS Studio is not redistributed |
 | Windows SDK components (Direct3D 11 / 12, DXGI, Media Foundation, WASAPI) | Part of Windows | Used through the operating system, not redistributed |
 | ffmpeg | — | **Not shipped.** You install it yourself (`winget install Gyan.FFmpeg.Essentials`) and the tray app calls it |
 

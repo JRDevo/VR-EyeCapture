@@ -1,13 +1,14 @@
 # SteamVR (OpenVR) recording — design
 
-Status: design accepted 2026-10-17 (written by the Fable design pass, reviewed by the lead session). v1 in progress: part A (the proxy, `src\openvr\`) and part B (the tray window `tray\steamvr_ui.{h,cpp}` over the library `tray\steamvr_games.{h,cpp}`) are built and pass their mock tests; not yet tried with a real SteamVR game.
+Status: design accepted 2026-10-17 (written by the Fable design pass, reviewed by the lead session). v1 in progress: part A (the proxy, `src\openvr\`) and part B (the tray window `tray\steamvr_ui.{h,cpp}` over the library `tray\steamvr_games.{h,cpp}`) are built and pass their mock tests; shipped in v0.5.0. Tested on a real headset with Crisis VRigade 2 (Unity, `IVRCompositor_026`, texture-array Submit, 72 Hz; Quest 3 via Virtual Desktop + SteamVR, per-game mode); quick mode not yet tried on a real headset.
+Changed 2026-10-18 (user): the repair after game updates is "detect + ask with one click" (§4), no longer automatic.
 
 ## Decisions on the open questions (lead, 2026-10-17)
 1. **No mirror-texture spike.** `IVRCompositor::GetMirrorTextureD3D11` gives the compositor's output (SteamVR UI and
    chaperone in it, no per-frame render pose, the compositor's pacing). The proxy records the game's own eye images.
 2. **v1 ships without the in-headset dot.** Beeps + tray icon tell the state. The `IVROverlay` dot is phase 2.
 3. ~~v1 enable flow = pick the game exe; Steam library auto-listing is phase 2.~~ Changed 2026-10-17 (user): Steam library
-   auto-discovery and the automatic repair after game updates are **v1** (see §4); "Add a game by exe..." stays for
+   auto-discovery and the repair after game updates are **v1** (see §4; since 2026-10-18 detect + one click, not automatic); "Add a game by exe..." stays for
    non-Steam games.
 4. New user-visible strings use the new name **VR EyeCapture** (docs/RENAME_PLAN.md). Internal IDs keep the old
    spelling (`Local\OpenXR-EyeCapture-*`, `HKCU\Software\OpenXR-EyeCapture\...`), as the rename plan says.
@@ -130,20 +131,32 @@ recording. `src\openvr\openvr_indicator.{h,cpp}`, ~200 lines.
   opens and on Rescan; the result is cached as `[found]` sections in `steamvr_games.ini` (the user's choices are the
   `[game]` sections; one lock around every read-modify-write). Tests: `EYECAP_TRAY_TEST_STEAM_DIR` (test-mode tray only;
   without it a test-mode tray sees no Steam at all), fixtures in `tests\fixtures\steam`.
-- **Automatic repair (v1):** at tray start (posted after the icon exists) and when the window opens,
-  `RepairEnabledGames` walks ONLY the `[game]` entries: a folder in state ProxyMissing (Valve's DLL back, our
-  `openvr_api_real.dll` / sidecar still there) is enabled again (the updated Valve DLL becomes the real one); an Enabled
-  folder whose proxy is older than the tray's (`VersionLess` on the `EYECAP_PROXY_VERSION=` marker) is refreshed. A folder
-  whose `openvr_api.dll` / `openvr_api_real.dll` cannot be opened for writing (`FileInUse`: the running game has it mapped)
-  is skipped and retried next time. Every result is logged in `tray.log`; one balloon "SteamVR recording repaired for
-  <game> after a game update".
+- **Repair after updates (v1; detect + ask with one click since 2026-10-18 -- an automatic write into other apps' folders at
+  start is what behaviour-based AV flags):** at tray start (posted after the icon exists) and when the window opens,
+  `FindRepairs` walks ONLY the `[game]` entries, READ-ONLY: a folder in state ProxyMissing (Valve's DLL back, our
+  `openvr_api_real.dll` / sidecar still there) = "game updated"; an Enabled folder whose sidecar `home` is not this install
+  folder or no longer exists = "VR EyeCapture moved"; an Enabled folder whose proxy is older than the tray's (`VersionLess`
+  on the `EYECAP_PROXY_VERSION=` marker) = "older recorder version". Every hit is logged in `tray.log`; at start one balloon
+  "SteamVR recording: N game(s) need a repair after an update. Click to repair." (the names are in `tray.log` and the window) whose click (NIN_BALLOONUSERCLICK)
+  opens the SteamVR games window: those rows show "Needs repair (<reason>)", and **Repair** (all of them) or **Re-enable**
+  (one game) runs `RepairEnabledGames` / the Enable flow: the updated Valve DLL becomes the real one, the proxy is
+  refreshed, the sidecar is rewritten with the new home and `HKCU\...\Home` refreshed (`EnsureHomeKey`). A folder whose
+  `openvr_api.dll` / `openvr_api_real.dll` cannot be opened for writing (`FileInUse`: the running game has it mapped) is
+  skipped (close the game, click Repair again); the export check of `EnableLocation` applies. Nothing is written to a game
+  folder without the click.
+- **Uninstall (v1):** **Disable all** in the window (one confirmation listing the enabled games); the tray's Unregister flow
+  asks "Also put the original openvr_api.dll back in N SteamVR game(s)?" (Yes = the same). When the last enabled game is
+  disabled the tray deletes the `HKCU\Software\OpenXR-EyeCapture` value `Home` (only when it names this folder or a
+  folder that no longer exists).
 
 - **Quick mode (v1, added 2026-10-17 at the user's request; decision 1 above stays true for per-game recording):**
   `steamvr_mode = per_game | quick | off` (`[steamvr]`, default per_game; off = the proxy is a pure forwarder too). Quick =
   `EyeCaptureMirror.exe` (`src\openvr\mirror_main.cpp`, links `eye_capture_core`), started by the tray while
   `vrserver.exe` runs (stopped through the event `Local\OpenXR-EyeCapture-MirrorQuit` when SteamVR exits or the mode
-  changes). It loads Valve's own `openvr_api.dll` v2.15.6 (`third_party\openvr\bin\win64`, shipped as `valve\openvr_api.dll`;
-  tests: `XR_EYE_CAPTURE_MIRROR_OPENVR_DLL`), `VR_InitInternal2(VRApplication_Background)` (retried every 2 s while there is
+  changes). It loads SteamVR's OWN `openvr_api.dll` (`<runtime>\bin\win64\` of the first existing entry of "runtime" in
+  `%LOCALAPPDATA%\openvr\openvrpaths.vrpath`; changed 2026-10-18: no Valve binary is shipped any more; not found = exit code 4,
+  one balloon "Quick mode needs SteamVR installed", no restart until the mode or SteamVR changes; tests:
+  `XR_EYE_CAPTURE_MIRROR_OPENVR_DLL`, `XR_EYE_CAPTURE_TEST_OPENVRPATHS`), `VR_InitInternal2(VRApplication_Background)` (retried every 2 s while there is
   no server), asks EXACTLY `IVRSystem_022` (GetDXGIOutputInfo slot 7 -> its own D3D11 device on that adapter, the display
   frequency, PollNextEvent slot 29 -> exits on `VREvent_Quit`) and `FnTable:IVRCompositor_022` (openvr_capi.h's table of
   that version: GetCurrentSceneFocusProcess 22, GetMirrorTextureD3D11 33, ReleaseMirrorTextureD3D11 34; 41 entries -- the
@@ -152,8 +165,12 @@ recording. `src\openvr\openvr_indicator.{h,cpp}`, ~200 lines.
   high-resolution waitable timer at the display frequency, the normal `Recorder::SubmitFrame` (flat SBS, `hasPose = false`;
   dome / head smoothing / symmetric_fov forced off, logged), live share, `ControlStart` with api "SteamVR mirror".
   Per game wins: the mirror is not "capable" while another live process owns the status block or the scene application
-  (GetCurrentSceneFocusProcess) has `openvr_api_real.dll` (our proxy) or `eye_capture.dll` loaded; a running mirror
-  recording is finalized then. The choice is in the SteamVR games window (not the Settings window, which has no free row on
+  (GetCurrentSceneFocusProcess) holds our proxy's marker `Local\OpenXR-EyeCapture-Proxy-<pid>` (created when the proxy
+  claims the process at VR init) or the OpenXR layer's `Local\OpenXR-EyeCapture-Layer-<pid>` (created in the layer's
+  `InitProcess`); checked with `OpenMutexW` only -- the mirror never opens or reads the game process (it used
+  `PROCESS_VM_READ` + `EnumProcessModulesEx` before 2026-10-18). A running mirror recording is finalized then. Mirror exit
+  code 3 = another instance holds `Local\OpenXR-EyeCapture-Mirror`: the tray retries after 10 s and does not count it toward
+  its 3-failures back-off; while `steamvr_mode` is not quick and no mirror runs, the tray does no process snapshot at all. The choice is in the SteamVR games window (not the Settings window, which has no free row on
   a 1080p screen). Not tested against a real SteamVR: the slot numbers come from openvr_capi.h knowledge, the mock follows them.
 
 ## 5. Testing without a headset
@@ -185,6 +202,12 @@ tray enable/disable, Steam library discovery, automatic repair after game update
 `tests\fixtures\steam`), `scripts\package.ps1`, docs. ≈ 4k lines.
 D3D12/Vulkan/OpenGL textures: detected, logged once as unsupported, forwarded.
 **Phase 2:** IVROverlay indicator, depth submit structs, flipped-V bounds, D3D12. (Steam library auto-discovery moved to v1.)
+**Planned, deliberately postponed until the real-headset test of v0.5.0** (from the 2026-10-18 audit):
+- Change the interception method: instead of patching the runtime's `IVRCompositor` vtable in place (§1), hand the game a
+  wrapper / a copied vtable for the C++ interface (as the FnTable path already does), so the runtime's own object is never
+  written to. Waits for real SteamVR data on which games use which interface form.
+- Move the keyboard / mouse hotkey polling out of the game process (proxy and layer `control.cpp` poll it today) into the
+  tray, which already polls the controller / wheel bindings and sends `ECC_TOGGLE`; then no hotkey code runs inside the game.
 **Phase 3:** OpenVR overlays into the recording, Vulkan, (32-bit not planned).
 
 ## 7. Pitfalls and their handling

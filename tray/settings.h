@@ -24,7 +24,7 @@ struct SaveResult {
     std::vector<std::wstring> changed;    // "bitrate_mbps 0->20", "hotkey (added) Ctrl+Alt+R", ...
 };
 
-// The keys the window edits, taken from a Config (an empty hotkey means the default Ctrl+Shift+F10).
+// The keys the window edits, taken from a Config (an empty hotkey means the default, kDefaultHotkey = ScrollLock).
 KeyValues FromConfig(const Config& c);
 // Rewrites `path` in place (creates it if missing). Returns false when validation fails or the file cannot be written.
 bool SaveKeyValuesToFile(const std::wstring& path, const KeyValues& kv, SaveResult& r);

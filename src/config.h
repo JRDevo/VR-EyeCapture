@@ -56,8 +56,11 @@ struct SteamVrSettings {
 const char* SteamVrPoseSourceKey(SteamVrPoseSource s);
 const char* SteamVrModeKey(SteamVrMode m);   // "per_game" / "quick" / "off"
 
+// The built-in hotkey (also what the shipped config.ini sets). Not Ctrl+F10 / Shift+F11: the ETS2 / ATS DLAA injector uses those.
+constexpr const wchar_t kDefaultHotkey[] = L"ScrollLock";
+
 struct Config {
-    Hotkey       hotkey;                 // default Ctrl+Shift+F10
+    Hotkey       hotkey;                 // default kDefaultHotkey (ScrollLock)
     std::wstring outputDir;              // default <dll folder>\captures
     VideoCodec   codec = VideoCodec::Hevc;   // codec = hevc | h264 | av1 (av1: hardware only, falls back to HEVC)
     unsigned     bitrateMbps = 0;        // 0 = codec default (120 HEVC / 80 H.264 / 80 AV1)

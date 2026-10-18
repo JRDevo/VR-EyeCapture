@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <vector>
 #include "openvr/openvr_hooks.h"
 #include "openvr/openvr_versions.h"
 
@@ -384,6 +385,84 @@ int main() {
         Check(!DiscoverProxyHome(proxyDir, ph), "test key removed -> no home");
         RemoveDirectoryW(proxyDir.c_str());
         RemoveDirectoryW(home.c_str());
+    }
+
+    // ---- SteamVR's openvr_api.dll for quick mode: %LOCALAPPDATA%\openvr\openvrpaths.vrpath ("runtime": [ ... ])
+    {
+        auto readAll = [](const std::wstring& p) {
+            std::string b;
+            HANDLE h = CreateFileW(p.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+            if (h == INVALID_HANDLE_VALUE) return b;
+            char buf[4096];
+            DWORD got = 0;
+            while (ReadFile(h, buf, sizeof(buf), &got, nullptr) && got) b.append(buf, got);
+            CloseHandle(h);
+            return b;
+        };
+        auto writeAll = [](const std::wstring& p, const std::string& b) {
+            HANDLE h = CreateFileW(p.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
+            DWORD w = 0;
+            if (h != INVALID_HANDLE_VALUE) { WriteFile(h, b.data(), (DWORD)b.size(), &w, nullptr); CloseHandle(h); }
+        };
+        std::string fx(EYE_TEST_FIXTURES);
+        for (auto& c : fx) if (c == '/') c = '\\';
+        const std::wstring fixtures(fx.begin(), fx.end());
+        std::vector<std::wstring> rt;
+        std::string err;
+        // the real-world shape: other members (arrays, null, a nested object that also has "runtime"), escapes, '/' paths
+        const std::string good = readAll(fixtures + L"\\openvr\\openvrpaths.vrpath");
+        Check(!good.empty() && ParseOpenvrPathsRuntimes(good, rt, &err) && rt.size() == 3 &&
+                  rt[0] == L"D:\\SteamLibrary\\steamapps\\common\\SteamVR" &&
+                  rt[1] == L"C:\\Program Files (x86)\\Steam\\steamapps\\common\\SteamVR" && rt[2] == L"E:\\Caf\u00e9 VR",
+              "vrpath fixture: 3 runtimes in order, escapes decoded, '/' -> '\\', trailing slash dropped, nested \"runtime\" ignored");
+        const std::string bad = readAll(fixtures + L"\\openvr\\openvrpaths_bad.vrpath");
+        Check(!bad.empty() && !ParseOpenvrPathsRuntimes(bad, rt, &err) && rt.empty() && !err.empty(), "vrpath fixture with bad JSON: refused");
+        printf("  bad JSON -> %s\n", err.c_str());
+        Check(ParseOpenvrPathsRuntimes("\xEF\xBB\xBF{\"runtime\":[]}", rt, &err) && rt.empty(), "BOM + empty runtime array: ok, no runtime");
+        Check(ParseOpenvrPathsRuntimes("{\"runtime\":[\"C:\\\\Sp\\u00e4ce \\ud83d\\ude00 \xC3\xA9/VR/\"]}", rt, &err) && rt.size() == 1 &&
+                  rt[0] == L"C:\\Sp\u00e4ce \xD83D\xDE00 \u00e9\\VR",
+              "\\u escapes (incl. a surrogate pair) + raw UTF-8 decoded, '/' -> '\\', trailing slash dropped");
+        Check(!ParseOpenvrPathsRuntimes("{\"config\":[\"x\"]}", rt, &err) && err == "no \"runtime\" member", "no runtime member");
+        Check(!ParseOpenvrPathsRuntimes("{\"runtime\":\"C:\\\\SteamVR\"}", rt, &err) && err == "\"runtime\" is not an array", "runtime not an array");
+        Check(!ParseOpenvrPathsRuntimes("{\"runtime\":[1]}", rt, &err), "runtime holds a number: refused");
+        Check(!ParseOpenvrPathsRuntimes("[\"C:\\\\SteamVR\"]", rt, &err) && err == "not a JSON object", "top level array: refused");
+        Check(!ParseOpenvrPathsRuntimes("", rt, &err) && !ParseOpenvrPathsRuntimes("{\"runtime\":[\"a\"]} x", rt, &err), "empty / trailing text: refused");
+
+        // FindSteamVrOpenvrApi: the first runtime that has bin\win64\openvr_api.dll
+        wchar_t tmp[MAX_PATH];
+        GetTempPathW(MAX_PATH, tmp);
+        const std::wstring root = std::wstring(tmp) + L"eyecap_vrpath_" + std::to_wstring(GetCurrentProcessId());
+        const std::wstring rtA = root + L"\\Missing SteamVR", rtB = root + L"\\SteamVR B", rtC = root + L"\\SteamVR C";
+        CreateDirectoryW(root.c_str(), nullptr);
+        for (const std::wstring& d : {rtB, rtC}) {
+            CreateDirectoryW(d.c_str(), nullptr);
+            CreateDirectoryW((d + L"\\bin").c_str(), nullptr);
+            CreateDirectoryW((d + L"\\bin\\win64").c_str(), nullptr);
+            writeAll(d + L"\\bin\\win64\\openvr_api.dll", "MZ");
+        }
+        auto esc = [](const std::wstring& w) { std::string s; for (wchar_t c : w) { if (c == L'\\') s += "\\\\"; else s += (char)c; } return s; };
+        const std::wstring vp = root + L"\\openvrpaths.vrpath";
+        writeAll(vp, "{\"runtime\":[\"" + esc(rtA) + "\",\"" + esc(rtB) + "\",\"" + esc(rtC) + "\"],\"version\":1}");
+        std::wstring why;
+        Check(FindSteamVrOpenvrApi(vp, &why) == rtB + L"\\bin\\win64\\openvr_api.dll" && why.empty(), "first EXISTING runtime wins (B, not the missing A)");
+        writeAll(vp, "{\"runtime\":[\"" + esc(rtA) + "\"]}");
+        Check(FindSteamVrOpenvrApi(vp, &why).empty() && why.find(L"no openvr_api.dll in the SteamVR runtime folder") != std::wstring::npos,
+              "only a missing runtime: not found, says where it looked");
+        writeAll(vp, "{\"runtime\":[ \"" + esc(rtA));
+        Check(FindSteamVrOpenvrApi(vp, &why).empty() && why.find(L"is not usable") != std::wstring::npos, "bad JSON file: not found, says why");
+        Check(FindSteamVrOpenvrApi(root + L"\\none.vrpath", &why).empty() && why.find(L"not found (SteamVR not installed") != std::wstring::npos,
+              "missing vrpath file: not found, says SteamVR is not installed");
+        Check(FindSteamVrOpenvrApi(L"", &why).empty() && !why.empty(), "no LOCALAPPDATA: not found");
+        const std::wstring def = DefaultOpenvrPathsFile();
+        Check(def.size() > 26 && def.substr(def.size() - 26) == L"\\openvr\\openvrpaths.vrpath", "default = %LOCALAPPDATA%\\openvr\\openvrpaths.vrpath");
+        for (const std::wstring& d : {rtB, rtC}) {
+            DeleteFileW((d + L"\\bin\\win64\\openvr_api.dll").c_str());
+            RemoveDirectoryW((d + L"\\bin\\win64").c_str());
+            RemoveDirectoryW((d + L"\\bin").c_str());
+            RemoveDirectoryW(d.c_str());
+        }
+        DeleteFileW(vp.c_str());
+        RemoveDirectoryW(root.c_str());
     }
 
     printf("openvr_hook_test: %d passed, %d failed -> %s\n", g_pass, g_fail, g_fail ? "FAIL" : "PASS");

@@ -290,7 +290,7 @@ KeyValues FromConfig(const Config& c) {
     KeyValues kv;
     auto B = [](bool b) { return std::wstring(b ? L"1" : L"0"); };
     std::wstring hk = c.hotkey.text;
-    if (hk.empty()) hk = L"Ctrl+Shift+F10";
+    if (hk.empty()) hk = kDefaultHotkey;
     kv.emplace_back(L"hotkey", hk);
     kv.emplace_back(L"output_dir", c.outputDir);
     kv.emplace_back(L"codec", FromUtf8(VideoCodecKey(c.codec)));
@@ -385,7 +385,7 @@ bool SaveKeyValuesToFile(const std::wstring& path, const KeyValues& kv, SaveResu
 
     // ---- rewrite / append
     Config defCfg;
-    ParseHotkey(L"Ctrl+Shift+F10", defCfg.hotkey);
+    ParseHotkey(kDefaultHotkey, defCfg.hotkey);
     const KeyValues defaults = FromConfig(defCfg);
     auto defaultOf = [&](const std::wstring& key) {
         for (const auto& e : defaults) if (e.first == key) return e.second;
@@ -1459,7 +1459,7 @@ void LoadFromFile() {
     Config c;
     std::vector<std::wstring> problems;
     ParseConfigFile(g_path, c, problems);
-    if (c.hotkey.text.empty()) ParseHotkey(L"Ctrl+Shift+F10", c.hotkey);
+    if (c.hotkey.text.empty()) ParseHotkey(kDefaultHotkey, c.hotkey);
     SetControls(FromConfig(c));
     SendMessageW(Ctl(ID_AUTOSTART), BM_SETCHECK, AutostartChecked() ? BST_CHECKED : BST_UNCHECKED, 0);
     if (!problems.empty()) {
@@ -1842,7 +1842,7 @@ void CommandHandler(int id, int code) {
     case ID_OPENINI: ShellExecuteW(nullptr, L"open", g_path.c_str(), nullptr, nullptr, SW_SHOWNORMAL); break;
     case ID_DEFAULTS: {
         Config d;
-        ParseHotkey(L"Ctrl+Shift+F10", d.hotkey);
+        ParseHotkey(kDefaultHotkey, d.hotkey);
         SetControls(FromConfig(d));
         SendMessageW(Ctl(ID_AUTOSTART), BM_SETCHECK, BST_UNCHECKED, 0);   // default: off
         break;

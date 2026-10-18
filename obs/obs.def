@@ -1,3 +1,4 @@
+; SPDX-License-Identifier: GPL-2.0-or-later
 ; Exports of obs.dll that obs-eyecapture.dll uses. The build turns this into the import library obs.lib
 ; (lib /def:obs.def /machine:x64), so no OBS binaries are needed to build the plugin. Checked against the installed
 ; OBS 32.2.2 with dumpbin /exports obs.dll.

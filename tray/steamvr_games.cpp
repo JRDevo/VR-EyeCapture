@@ -957,6 +957,56 @@ bool RefuseInUse(const Location& L, ActionResult& r) {
     return false;
 }
 
+const char* RepairWhyName(RepairWhy w) {
+    switch (w) {
+    case RepairWhy::GameUpdated: return "game updated";
+    case RepairWhy::ProxyOutdated: return "older recorder version";
+    case RepairWhy::Moved: return "VR EyeCapture moved";
+    default: return "none";
+    }
+}
+
+namespace {
+// Full path, no trailing slash, for comparing folders ("" stays "").
+std::wstring FullDir(const std::wstring& p) {
+    if (p.empty()) return p;
+    wchar_t buf[MAX_PATH * 2];
+    const DWORD n = GetFullPathNameW(p.c_str(), (DWORD)(sizeof(buf) / sizeof(buf[0])), buf, nullptr);
+    std::wstring r = (n > 0 && n < sizeof(buf) / sizeof(buf[0])) ? std::wstring(buf, n) : p;
+    while (r.size() > 3 && (r.back() == L'\\' || r.back() == L'/')) r.pop_back();
+    return r;
+}
+} // namespace
+
+RepairWhy RepairNeeded(const Location& L, const std::wstring& home) {
+    if (L.state == LocState::ProxyMissing) return RepairWhy::GameUpdated;
+    if (L.state != LocState::Enabled) return RepairWhy::None;
+    if (!home.empty() && L.hasSidecar) {
+        const DWORD a = L.sidecarHome.empty() ? INVALID_FILE_ATTRIBUTES : GetFileAttributesW(L.sidecarHome.c_str());
+        const bool homeGone = a == INVALID_FILE_ATTRIBUTES || !(a & FILE_ATTRIBUTE_DIRECTORY);
+        if (homeGone || _wcsicmp(FullDir(L.sidecarHome).c_str(), FullDir(home).c_str()) != 0) return RepairWhy::Moved;
+    }
+    if (L.proxyOutdated) return RepairWhy::ProxyOutdated;
+    return RepairWhy::None;
+}
+
+std::vector<RepairNeed> FindRepairs(const std::vector<GameEntry>& games, const std::wstring& home, const std::string& ourVersion) {
+    std::vector<RepairNeed> out;
+    for (const GameEntry& g : games) {
+        for (const std::wstring& d : g.dlls) {
+            if (GetFileAttributesW(d.c_str()) == INVALID_FILE_ATTRIBUTES) continue;
+            const RepairWhy w = RepairNeeded(InspectLocation(d, ourVersion), home);
+            if (w == RepairWhy::None) continue;
+            RepairNeed n;
+            n.why = w;
+            n.game = g.name;
+            n.dir = d;
+            out.push_back(n);
+        }
+    }
+    return out;
+}
+
 std::vector<RepairItem> RepairEnabledGames(const std::vector<GameEntry>& games, const std::wstring& proxySource,
                                            const std::wstring& home, const std::string& ourVersion) {
     std::vector<RepairItem> out;
@@ -964,20 +1014,21 @@ std::vector<RepairItem> RepairEnabledGames(const std::vector<GameEntry>& games, 
         for (const std::wstring& d : g.dlls) {
             if (GetFileAttributesW(d.c_str()) == INVALID_FILE_ATTRIBUTES) continue;
             const Location L = InspectLocation(d, ourVersion);
-            const bool repair = L.state == LocState::ProxyMissing;
-            const bool update = L.state == LocState::Enabled && L.proxyOutdated;
-            if (!repair && !update) continue;
+            const RepairWhy why = RepairNeeded(L, home);
+            if (why == RepairWhy::None) continue;
             RepairItem it;
             it.game = g.name;
             it.dir = d;
             if (FileInUse(Join(d, kDll)) || FileInUse(Join(d, EYECAP_PROXY_REAL_DLL))) {
                 it.what = RepairItem::What::SkippedInUse;
-                it.message = L"in use (the game is running) -- tried again next time";
+                it.message = L"in use (the game is running) -- close it and repair again; nothing was changed";
                 out.push_back(it);
                 continue;
             }
             const ActionResult r = EnableLocation(L, proxySource, home, g.name);
-            it.what = !r.ok ? RepairItem::What::Failed : repair ? RepairItem::What::Repaired : RepairItem::What::Updated;
+            it.what = !r.ok ? RepairItem::What::Failed
+                    : why == RepairWhy::GameUpdated ? RepairItem::What::Repaired
+                    : why == RepairWhy::Moved ? RepairItem::What::Moved : RepairItem::What::Updated;
             it.message = r.message;
             out.push_back(it);
         }

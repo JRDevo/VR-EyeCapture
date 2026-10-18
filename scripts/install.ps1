@@ -53,8 +53,8 @@ if (-not $CurrentUser) {
 # --- stage files next to config.ini (repo layout) ---
 $build = Join-Path $root 'build\Release'
 if (-not $NoCopy -and (Test-Path (Join-Path $build 'eye_capture.dll'))) {
-    foreach ($f in @('eye_capture.dll', $jsonName, 'EyeCaptureTray.exe', 'EyeCaptureMirror.exe', 'valve\openvr_api.dll')) {
-        if ($f -like 'valve\*') { New-Item -ItemType Directory -Force (Join-Path $root 'valve') | Out-Null }
+    # (quick mode loads SteamVR's own openvr_api.dll: nothing of Valve's is staged)
+    foreach ($f in @('eye_capture.dll', $jsonName, 'EyeCaptureTray.exe', 'EyeCaptureMirror.exe')) {
         $src = Join-Path $build $f
         if (-not (Test-Path $src)) { continue }
         try { Copy-Item -LiteralPath $src -Destination (Join-Path $root $f) -Force }
@@ -99,7 +99,7 @@ Write-Host ''
 if ($LASTEXITCODE -ne 0) { Fail 'registry verification failed' }
 Write-Host ''
 Write-Host "Installed: $json ($hive)" -ForegroundColor Green
-Write-Host 'Start any OpenXR game; press the hotkey from config.ini (default Ctrl+Shift+F10) to start / stop recording.'
+Write-Host 'Start any OpenXR game; press the hotkey from config.ini (default ScrollLock) to start / stop recording.'
 Write-Host "Required: run $(Join-Path $root 'EyeCaptureTray.exe') BEFORE the game (require_tray = 1: without the tray the layer stays dormant)."
 if ($Elevated) { Start-Sleep -Seconds 2 }
 exit 0

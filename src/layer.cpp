@@ -187,6 +187,11 @@ void InitProcess() {
     }
     LOGI("require_tray %s: %s", g_cfg.requireTray ? "1" : "0",
          g_cfg.requireTray ? "sessions are armed only while EyeCaptureTray.exe is running" : "sessions are always armed");
+    // Marker for EyeCaptureMirror (SteamVR quick mode): this process has the OpenXR layer, so the mirror leaves its picture to
+    // us. A named mutex, never owned, kept open (leaked) for the life of the process (src/shared_status.h).
+    const std::wstring marker = EYECAP_LAYER_MARKER_PREFIX + std::to_wstring(GetCurrentProcessId());
+    if (!CreateMutexW(nullptr, FALSE, marker.c_str()))
+        LOGW("cannot create the layer marker %s (error %lu)", elog::Narrow(marker).c_str(), GetLastError());
     g_liveShm = env.liveShmOverride;
     if (g_liveShm.empty()) g_liveShm = EYECAP_LIVE_SHM_NAME;
     else LOGI("XR_EYE_CAPTURE_TEST_LIVE_SHM=%s: live share block name (test override)", elog::Narrow(g_liveShm).c_str());

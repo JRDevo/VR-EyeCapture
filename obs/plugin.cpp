@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 // plugin -- obs-eyecapture.dll: the OBS Studio source "VR EyeCapture" (id eyecapture_source; the id never changes: saved
 // scenes reference it). Shows the live eye images of a running VR game recorded by VR EyeCapture (src/live_share.h), through the
 // consumer side in obs/live_consumer.cpp (protocol: src/live_share_proto.h). Build / install: obs/README.md.

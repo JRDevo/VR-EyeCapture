@@ -5,6 +5,7 @@
 #include <dxgiformat.h>
 #include <cstdint>
 #include <string>
+#include <vector>
 #include "../../third_party/openvr/openvr.h"
 #include "openvr_versions.h"
 
@@ -41,6 +42,20 @@ struct ProxyHome {
 // Sidecar next to the proxy first, then the registry value (key from XR_EYE_CAPTURE_TEST_HOME_KEY when set, else
 // EYECAP_HOME_REG_KEY). A home must be an existing folder. false = none (the proxy is then a pure forwarder).
 bool DiscoverProxyHome(const std::wstring& proxyDir, ProxyHome& out);
+
+// ------------------------------------------------------------------------------------------------ SteamVR's openvr_api.dll
+
+// Quick mode (EyeCaptureMirror) loads SteamVR's OWN openvr_api.dll -- VR EyeCapture ships none. SteamVR writes
+// %LOCALAPPDATA%\openvr\openvrpaths.vrpath, a JSON object whose "runtime" member is an array of runtime folders (the first
+// one is the active SteamVR); the DLL is <runtime>\bin\win64\openvr_api.dll.
+// The "runtime" strings of the top-level JSON object (JSON escapes decoded, '/' turned into '\', no trailing slash).
+// false = not a JSON object, no "runtime" member, or not an array of strings (*error says which; out is then empty).
+bool ParseOpenvrPathsRuntimes(const std::string& utf8, std::vector<std::wstring>& out, std::string* error = nullptr);
+// %LOCALAPPDATA%\openvr\openvrpaths.vrpath ("" when LOCALAPPDATA is not set).
+std::wstring DefaultOpenvrPathsFile();
+// Reads `vrpathFile`, takes the first runtime whose bin\win64\openvr_api.dll exists and returns that DLL's full path.
+// "" + *why (one line: file missing / unreadable / bad JSON / no runtime / no DLL in any of them) otherwise.
+std::wstring FindSteamVrOpenvrApi(const std::wstring& vrpathFile, std::wstring* why);
 
 // ------------------------------------------------------------------------------------------------ patching
 

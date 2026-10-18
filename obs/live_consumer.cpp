@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 // live_consumer -- see live_consumer.h; protocol in src/live_share_proto.h.
 #include "live_consumer.h"
 #include <sddl.h>

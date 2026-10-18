@@ -117,9 +117,20 @@ these terms.
 
 Required Notice: Copyright (c) 2026 JRDevo
 
-The PolyForm Noncommercial License above covers the original source of this
-project (the loader, the hooks, the motion-vector / jitter / DLAA / DLSS-upscale
-logic, the build scripts and the documentation). It does NOT cover the
-third-party components this project builds against. See THIRD_PARTY.md for
-MinHook and the NVIDIA DLSS / NGX SDK, whose own license terms apply to those
-parts.
+What this license covers in VR EyeCapture:
+
+- The PolyForm Noncommercial License 1.0.0 above covers the original source of
+  this project: the OpenXR API layer (`eye_capture.dll`: the recorder, encoder,
+  re-projection, dome, overlay, indicator and live-share code in `src/`), the
+  SteamVR per-game proxy (`openvr_api.dll` from `src/openvr/`) and the SteamVR
+  quick-mode mirror recorder (`EyeCaptureMirror.exe`), the tray app
+  (`EyeCaptureTray.exe`, `tray/`), the tests, the scripts (`scripts/`), the
+  build files, `config.ini` and the documentation.
+- The OBS Studio plugin in the `obs/` folder (`obs-eyecapture.dll`) is NOT under
+  this license: it is licensed under the GNU General Public License, version 2
+  or (at your option) any later version (SPDX: GPL-2.0-or-later), because it is
+  built against OBS Studio's libobs, which is GPL. See `obs/COPYING.md`.
+- Third-party components (the OpenXR SDK headers, the subset of Valve's OpenVR
+  header in `third_party/openvr/`, the libobs headers) are NOT covered by this
+  license; their own terms apply. See THIRD_PARTY.md. VR EyeCapture ships no
+  Valve or OBS binary.

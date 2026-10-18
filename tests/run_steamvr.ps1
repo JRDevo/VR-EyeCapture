@@ -29,11 +29,21 @@
     hands out pattern mirror textures and whose IVRSystem_022 sends VREvent_Quit after MOCK_OPENVR_QUIT_AFTER_MS):
       two textures / one texture for both eyes: Background init + interface versions logged, 2880x1600 SBS at 90 fps, a valid
         MP4 (verify_mp4: pattern, left half = left eye), VREvent_Quit ends it, 2 mirror gets = 2 releases;
+      no DLL override: SteamVR's own openvr_api.dll through an openvrpaths.vrpath (XR_EYE_CAPTURE_TEST_OPENVRPATHS; first
+        existing runtime wins) -> records; no vrpath file -> exit code 4 + one log line ("Quick mode needs SteamVR installed");
       projection = vr180 refused (logged, recorded flat); steamvr_mode = per_game: exits at once; no SteamVR server: waits,
         the tray's quit event ends it; another live owner of a private status block (status_sim): idle, no MP4; the scene
-        app is a game with the proxy loaded (openvr_e2e, MOCK_OPENVR_SCENE_PID): idle, no MP4 (per game wins);
+        app is a game recorded through the proxy (openvr_e2e, MOCK_OPENVR_SCENE_PID; its marker Local\OpenXR-EyeCapture-Proxy-<pid>):
+        idle, no MP4 (per game wins);
+      the scene app is an OpenXR game with the build layer (layer_e2e): its marker Local\OpenXR-EyeCapture-Layer-<pid> exists,
+        the mirror is idle, no MP4; the scene app has no marker (this PowerShell): the mirror records. (The mirror only opens
+        the named markers; it never reads another process.)
       tray: a scratch tray (steamvr_mode = quick, EYECAP_TRAY_TEST_VRSERVER = a renamed status_sim) starts the mirror while
-        that "vrserver" runs and stops it (quit event, MP4 finalized) when it exits.
+        that "vrserver" runs and stops it (quit event, MP4 finalized) when it exits; a mirror that fails at once 3 times in a
+        minute is not restarted (one balloon) until SteamVR changes; exit code 4 (no SteamVR openvr_api.dll) = one start,
+        one balloon "Quick mode needs SteamVR installed", no relaunch until SteamVR changes; exit code 3 (another EyeCaptureMirror holds the
+        single-instance mutex, held here by the script) is not a failure: tried again every 10 s, no back-off, and the mirror
+        starts once the mutex is gone.
     Skips (exit 0 with a message) while amtrucks / eurotrucks2 / obs64 / Crisis VRigade 2 / vrserver / vrcompositor runs.
 #>
 param([string]$Only = '')
@@ -63,7 +73,7 @@ $saved = @{}
 foreach ($n in 'APPDATA', 'XR_EYE_CAPTURE_TEST_HOME_KEY', 'XR_EYE_CAPTURE_REQUIRE_TRAY', 'XR_EYE_CAPTURE_TRAY_IPC', 'XR_EYE_CAPTURE_AUTORECORD',
                'XR_EYE_CAPTURE_CONFIG', 'MOCK_OPENVR_SYSTEM', 'XR_EYE_CAPTURE_OUTPUT_DIR', 'XR_EYE_CAPTURE_MIRROR_OPENVR_DLL',
                'XR_EYE_CAPTURE_TEST_SHM', 'EYECAP_TRAY_TEST_SHM', 'EYECAP_TRAY_TEST_VRSERVER', 'MOCK_OPENVR_QUIT_AFTER_MS',
-               'MOCK_OPENVR_MIRROR_COMBINED', 'MOCK_OPENVR_NO_SERVER', 'MOCK_OPENVR_SCENE_PID', 'MOCK_OPENVR_MIRROR_KEYEDMUTEX') { $saved[$n] = [Environment]::GetEnvironmentVariable($n) }
+               'MOCK_OPENVR_MIRROR_COMBINED', 'MOCK_OPENVR_NO_SERVER', 'MOCK_OPENVR_SCENE_PID', 'MOCK_OPENVR_MIRROR_KEYEDMUTEX', 'XR_EYE_CAPTURE_TEST_OPENVRPATHS') { $saved[$n] = [Environment]::GetEnvironmentVariable($n) }
 $env:APPDATA = $appdata
 $env:XR_EYE_CAPTURE_TEST_HOME_KEY = $testKey
 $env:XR_EYE_CAPTURE_REQUIRE_TRAY = '0'
@@ -360,6 +370,29 @@ if (Want 'mirror_dome_refused') {
     Need ($r.mp4 -and $r.mp4 -match '_SBS\.mp4$') 'recorded flat (_SBS.mp4)' ([ref]$f)
     Record 'mirror_dome_refused' $f
 }
+if (Want 'mirror_steamvr_dll') {
+    # no DLL override: SteamVR's own openvr_api.dll is found through an openvrpaths.vrpath (XR_EYE_CAPTURE_TEST_OPENVRPATHS)
+    # whose first runtime is missing and whose second has bin\win64\openvr_api.dll (here: the mock)
+    $vrRoot = Join-Path $b 'vrpath'
+    $rtOk = Join-Path $vrRoot 'SteamVR'
+    New-Item -ItemType Directory -Force (Join-Path $rtOk 'bin\win64') | Out-Null
+    Copy-Item $mockDll (Join-Path $rtOk 'bin\win64\openvr_api.dll')
+    $vp = Join-Path $vrRoot 'openvrpaths.vrpath'
+    $json = '{ "config" : [ "x" ], "runtime" : [ "' + ((Join-Path $vrRoot 'Gone') -replace '\\', '\\') + '", "' + ($rtOk -replace '\\', '\\') + '" ], "version" : 1 }'
+    [System.IO.File]::WriteAllText($vp, $json, (New-Object System.Text.UTF8Encoding $false))
+    $r = RunMirror 'mirror_steamvr_dll' $quickCfg @{ XR_EYE_CAPTURE_MIRROR_OPENVR_DLL = ''; XR_EYE_CAPTURE_TEST_OPENVRPATHS = $vp; MOCK_OPENVR_QUIT_AFTER_MS = '6000' }
+    $f = @()
+    Need ($r.log -match [regex]::Escape("mirror: openvr_api.dll = $rtOk\bin\win64\openvr_api.dll")) 'loaded <runtime>\bin\win64\openvr_api.dll of the first EXISTING runtime' ([ref]$f)
+    Need ($r.done -and $r.code -eq 0 -and $null -ne $r.mp4) 'recorded through it (exit 0, MP4)' ([ref]$f)
+    Record 'mirror_steamvr_dll' $f
+}
+if (Want 'mirror_no_steamvr') {
+    $r = RunMirror 'mirror_no_steamvr' $quickCfg @{ XR_EYE_CAPTURE_MIRROR_OPENVR_DLL = ''; XR_EYE_CAPTURE_TEST_OPENVRPATHS = (Join-Path $b 'no_such.vrpath') } 15
+    $f = @()
+    Need ($r.done -and $r.code -eq 4) "no SteamVR: exit code 4 (got $($r.code))" ([ref]$f)
+    Need ($r.log -match "mirror: SteamVR's openvr_api\.dll not found -- .*no_such\.vrpath not found \(SteamVR not installed, or never started\)\. Quick mode needs SteamVR installed") 'one clear log line' ([ref]$f)
+    Record 'mirror_no_steamvr' $f
+}
 if (Want 'mirror_per_game_mode') {
     $r = RunMirror 'mirror_per_game_mode' $rawCfg @{} 10
     $f = @()
@@ -389,7 +422,7 @@ if (Want 'mirror_yields_to_owner') {
     Record 'mirror_yields_to_owner' $f
 }
 if (Want 'mirror_yields_to_proxy_game') {
-    # a game recorded through the proxy is the SteamVR scene app (MOCK_OPENVR_SCENE_PID): its openvr_api_real.dll is seen
+    # a game recorded through the proxy is the SteamVR scene app (MOCK_OPENVR_SCENE_PID): its proxy marker (named mutex) is seen
     $env:XR_EYE_CAPTURE_CONFIG = $rawCfg
     $env:XR_EYE_CAPTURE_OUTPUT_DIR = Join-Path $outRoot 'mirror_proxy_game_game'
     $gameP = Start-Process $exe -ArgumentList '--game-dir', "`"$game`"", '--out-dir', "`"$env:XR_EYE_CAPTURE_OUTPUT_DIR`"", '--layout', 'two', '--seconds', '12' -PassThru -WindowStyle Hidden
@@ -400,6 +433,43 @@ if (Want 'mirror_yields_to_proxy_game') {
     Need ($r.log -match "mirror: idle -- the per-game SteamVR recorder in pid $($gameP.Id) records this game") 'idle while the scene app has the proxy loaded' ([ref]$f)
     Need ($null -eq $r.mp4) 'no mirror MP4' ([ref]$f)
     Record 'mirror_yields_to_proxy_game' $f
+}
+if (Want 'mirror_yields_to_openxr_game') {
+    # an OpenXR game with the layer (layer_e2e + the BUILD layer as an explicit layer, the registered one disabled for it) is the
+    # scene app: the layer's marker Local\OpenXR-EyeCapture-Layer-<pid> is seen (no process memory is read)
+    $layerExe = Join-Path $bin 'layer_e2e.exe'
+    $lp = Join-Path $b 'layer_manifest'
+    New-Item -ItemType Directory -Force $lp | Out-Null
+    $m = Get-Content (Join-Path $bin 'XR_APILAYER_JRDEVO_eye_capture.json') -Raw | ConvertFrom-Json
+    $m.api_layer.library_path = (Join-Path $bin 'eye_capture.dll')
+    $m | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $lp 'XR_APILAYER_JRDEVO_eye_capture.json') -Encoding ascii
+    $lenv = @{ DISABLE_XR_APILAYER_JRDEVO_eye_capture = '1'; XR_API_LAYER_PATH = $lp; XR_ENABLE_API_LAYERS = 'XR_APILAYER_JRDEVO_eye_capture' }
+    foreach ($k in $lenv.Keys) { [Environment]::SetEnvironmentVariable($k, $lenv[$k]) }
+    $env:XR_EYE_CAPTURE_CONFIG = $rawCfg
+    $xrP = Start-Process $layerExe -ArgumentList '--api', 'd3d11', '--layout', 'two', '--seconds', '12', '--record', '0', '--out-dir', "`"$(Join-Path $outRoot 'mirror_openxr_game_game')`"" -PassThru -WindowStyle Hidden
+    foreach ($k in $lenv.Keys) { [Environment]::SetEnvironmentVariable($k, $null) }
+    $marker = $false
+    for ($i = 0; $i -lt 40 -and -not $marker; $i++) {
+        Start-Sleep -Milliseconds 250
+        $mx = $null
+        $marker = [System.Threading.Mutex]::TryOpenExisting("Local\OpenXR-EyeCapture-Layer-$($xrP.Id)", [ref]$mx)
+        if ($mx) { $mx.Dispose() }
+    }
+    $r = RunMirror 'mirror_yields_to_openxr_game' $quickCfg @{ MOCK_OPENVR_QUIT_AFTER_MS = '6000'; MOCK_OPENVR_SCENE_PID = "$($xrP.Id)" }
+    if (-not $xrP.WaitForExit(20000)) { Stop-Process -Id $xrP.Id -Force }
+    $f = @()
+    Need $marker "the layer created Local\OpenXR-EyeCapture-Layer-$($xrP.Id)" ([ref]$f)
+    Need ($r.log -match "mirror: idle -- the OpenXR layer in pid $($xrP.Id) records this game") 'idle while the scene app has the OpenXR layer' ([ref]$f)
+    Need ($null -eq $r.mp4) 'no mirror MP4' ([ref]$f)
+    Record 'mirror_yields_to_openxr_game' $f
+}
+if (Want 'mirror_scene_without_marker') {
+    # the scene app is a process without either marker (this PowerShell): the mirror records
+    $r = RunMirror 'mirror_scene_without_marker' $quickCfg @{ MOCK_OPENVR_QUIT_AFTER_MS = '7000'; MOCK_OPENVR_SCENE_PID = "$PID" }
+    $f = @()
+    Need ($r.log -notmatch 'mirror: idle --') 'not idle' ([ref]$f)
+    Need ($null -ne $r.mp4 -and $r.log -match 'recording summary: ') 'the mirror recorded (MP4)' ([ref]$f)
+    Record 'mirror_scene_without_marker' $f
 }
 if (Want 'mirror_tray') {
     # the tray starts EyeCaptureMirror while "vrserver" (here: EYECAP_TRAY_TEST_VRSERVER = a copy of status_sim) runs, and stops it
@@ -470,6 +540,85 @@ if (Want 'mirror_tray_backoff') {
     Need ($starts1 -eq 3 -and $tl -match 'failed 3 times within a minute -- not started again' -and ([regex]::Matches($tl, 'balloon \[SteamVR quick mode\] The SteamVR mirror recorder keeps failing')).Count -eq 1) 'three failed starts, then no more (one balloon)' ([ref]$f)
     Need ($tl -match 'the SteamVR state changed -- EyeCaptureMirror may start again') 'unblocked when SteamVR stopped' ([ref]$f)
     Record 'mirror_tray_backoff' $f
+}
+if (Want 'mirror_tray_no_steamvr') {
+    # the mirror finds no SteamVR openvr_api.dll (exit code 4): ONE start, one balloon "Quick mode needs SteamVR installed",
+    # no restarts (not the 3-failures loop) until the SteamVR state changes
+    $tt = Join-Path $b 'tray'
+    if (-not (Test-Path (Join-Path $tt 'EyeCaptureTray.exe'))) {
+        New-Item -ItemType Directory -Force $tt | Out-Null
+        Copy-Item (Join-Path $bin 'EyeCaptureTray.exe'), $mirrorExe $tt
+        Copy-Item (Join-Path $bin 'status_sim.exe') (Join-Path $tt 'fakevrserver.exe')
+        [System.IO.File]::WriteAllText((Join-Path $tt 'config.ini'), "[capture]`r`naudio_enabled = 0`r`n[steamvr]`r`nsteamvr_mode = quick`r`n[debug]`r`nlog_level = info`r`n", (New-Object System.Text.UTF8Encoding $false))
+    }
+    if (Test-Path (Join-Path $tt 'logs\tray.log')) { Remove-Item (Join-Path $tt 'logs\tray.log') }
+    $env:XR_EYE_CAPTURE_CONFIG = $quickCfg
+    $env:XR_EYE_CAPTURE_MIRROR_OPENVR_DLL = $null
+    $env:XR_EYE_CAPTURE_TEST_OPENVRPATHS = Join-Path $b 'no_such.vrpath'
+    $env:EYECAP_TRAY_TEST_SHM = "eyecap-mirror-nosvr-$PID"
+    $env:EYECAP_TRAY_TEST_VRSERVER = 'fakevrserver.exe'
+    $tray = Start-Process (Join-Path $tt 'EyeCaptureTray.exe') -PassThru
+    $vr = Start-Process (Join-Path $tt 'fakevrserver.exe') -ArgumentList "Local\EyeCapture-FakeVr4-$PID", '60', 'x.mp4' -PassThru -WindowStyle Hidden
+    Start-Sleep -Seconds 12
+    $tl1 = Get-Content (Join-Path $tt 'logs\tray.log') -Raw -Encoding UTF8
+    Stop-Process -Id $vr.Id
+    Start-Sleep -Seconds 3
+    $tl = Get-Content (Join-Path $tt 'logs\tray.log') -Raw -Encoding UTF8
+    Stop-Process -Id $tray.Id -ErrorAction SilentlyContinue
+    Remove-Item -Path "HKCU:\$testKey" -Recurse -Force -ErrorAction SilentlyContinue
+    if (-not (Get-ChildItem 'HKCU:\Software\OpenXR-EyeCapture-Test' -ErrorAction SilentlyContinue)) { Remove-Item 'HKCU:\Software\OpenXR-EyeCapture-Test' -ErrorAction SilentlyContinue }
+    foreach ($v in 'EYECAP_TRAY_TEST_SHM', 'EYECAP_TRAY_TEST_VRSERVER', 'XR_EYE_CAPTURE_TEST_OPENVRPATHS') { [Environment]::SetEnvironmentVariable($v, $null) }
+    ($tl -split "`r?`n") | Where-Object { $_ -match 'quick mode' } | ForEach-Object { Write-Host "  $_" }
+    $f = @()
+    Need (([regex]::Matches($tl1, 'started .*EyeCaptureMirror\.exe')).Count -eq 1) 'one start only (no relaunch loop)' ([ref]$f)
+    Need ($tl1 -match 'EyeCaptureMirror found no SteamVR openvr_api\.dll \(code 4\)' -and ([regex]::Matches($tl1, 'balloon \[SteamVR quick mode\] Quick mode needs SteamVR installed \(openvr_api\.dll not found in the SteamVR folder\)\.')).Count -eq 1) 'one balloon "Quick mode needs SteamVR installed"' ([ref]$f)
+    Need ($tl1 -notmatch 'failed 3 times within a minute') 'not the 3-failures back-off' ([ref]$f)
+    Need ($tl -match 'the SteamVR state changed -- EyeCaptureMirror may start again') 'unblocked when SteamVR changed' ([ref]$f)
+    Record 'mirror_tray_no_steamvr' $f
+}
+if (Want 'mirror_tray_busy') {
+    # another EyeCaptureMirror "runs" (this script holds its single-instance mutex): every start exits with code 3, which is
+    # NOT a failure -- no back-off, no balloon, tried again after 10 s; once the mutex is gone the mirror starts and keeps running
+    $tt = Join-Path $b 'tray'
+    if (-not (Test-Path (Join-Path $tt 'EyeCaptureTray.exe'))) {
+        New-Item -ItemType Directory -Force $tt | Out-Null
+        Copy-Item (Join-Path $bin 'EyeCaptureTray.exe'), $mirrorExe $tt
+        Copy-Item (Join-Path $bin 'status_sim.exe') (Join-Path $tt 'fakevrserver.exe')
+        [System.IO.File]::WriteAllText((Join-Path $tt 'config.ini'), "[capture]`r`naudio_enabled = 0`r`n[steamvr]`r`nsteamvr_mode = quick`r`n[debug]`r`nlog_level = info`r`n", (New-Object System.Text.UTF8Encoding $false))
+    }
+    if (Test-Path (Join-Path $tt 'logs\tray.log')) { Remove-Item (Join-Path $tt 'logs\tray.log') }
+    $busyMutex = New-Object System.Threading.Mutex($false, 'Local\OpenXR-EyeCapture-Mirror')
+    $env:XR_EYE_CAPTURE_CONFIG = $quickCfg
+    $env:XR_EYE_CAPTURE_OUTPUT_DIR = Join-Path $outRoot 'mirror_tray_busy'
+    $env:XR_EYE_CAPTURE_MIRROR_OPENVR_DLL = $mockDll
+    $env:EYECAP_TRAY_TEST_SHM = "eyecap-mirror-busy-$PID"
+    $env:EYECAP_TRAY_TEST_VRSERVER = 'fakevrserver.exe'
+    $tray = Start-Process (Join-Path $tt 'EyeCaptureTray.exe') -PassThru
+    $vr = Start-Process (Join-Path $tt 'fakevrserver.exe') -ArgumentList "Local\EyeCapture-FakeVr3-$PID", '90', 'x.mp4' -PassThru -WindowStyle Hidden
+    Start-Sleep -Seconds 16
+    $tl1 = Get-Content (Join-Path $tt 'logs\tray.log') -Raw -Encoding UTF8
+    $busyMutex.Dispose()
+    $running = $false
+    for ($i = 0; $i -lt 30 -and -not $running; $i++) { Start-Sleep -Milliseconds 500; $running = [bool](Get-Process EyeCaptureMirror -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$tt*" }) }
+    Start-Sleep -Seconds 3
+    $stillRunning = [bool](Get-Process EyeCaptureMirror -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$tt*" })
+    Stop-Process -Id $vr.Id
+    $stopped = $false
+    for ($i = 0; $i -lt 40 -and -not $stopped; $i++) { Start-Sleep -Milliseconds 500; $stopped = -not (Get-Process EyeCaptureMirror -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$tt*" }) }
+    $tl = Get-Content (Join-Path $tt 'logs\tray.log') -Raw -Encoding UTF8
+    Stop-Process -Id $tray.Id -ErrorAction SilentlyContinue
+    Remove-Item -Path "HKCU:\$testKey" -Recurse -Force -ErrorAction SilentlyContinue
+    if (-not (Get-ChildItem 'HKCU:\Software\OpenXR-EyeCapture-Test' -ErrorAction SilentlyContinue)) { Remove-Item 'HKCU:\Software\OpenXR-EyeCapture-Test' -ErrorAction SilentlyContinue }
+    foreach ($v in 'EYECAP_TRAY_TEST_SHM', 'EYECAP_TRAY_TEST_VRSERVER', 'XR_EYE_CAPTURE_MIRROR_OPENVR_DLL', 'XR_EYE_CAPTURE_OUTPUT_DIR') { [Environment]::SetEnvironmentVariable($v, $null) }
+    ($tl -split "`r?`n") | Where-Object { $_ -match 'quick mode' } | ForEach-Object { Write-Host "  $_" }
+    $busy = ([regex]::Matches($tl1, 'EyeCaptureMirror exited \(code 3: another EyeCaptureMirror already runs\) -- tried again in 10 s')).Count
+    $starts = ([regex]::Matches($tl1, 'started .*EyeCaptureMirror\.exe')).Count
+    $f = @()
+    Need ($busy -ge 1 -and $starts -ge 2 -and $starts -le 3 -and ($starts - $busy) -le 1) "exit code 3 = tried again after 10 s, not every 2 s ($busy busy exits, $starts starts in 16 s)" ([ref]$f)
+    Need ($tl -notmatch 'failed 3 times within a minute' -and $tl -notmatch 'keeps failing') 'exit code 3 never counts toward the back-off (no block, no balloon)' ([ref]$f)
+    Need ($running -and $stillRunning) 'once the other instance is gone the mirror starts and keeps running' ([ref]$f)
+    Need $stopped 'stopped when "vrserver" exited' ([ref]$f)
+    Record 'mirror_tray_busy' $f
 }
 
 foreach ($n in $saved.Keys) { [Environment]::SetEnvironmentVariable($n, $saved[$n]) }

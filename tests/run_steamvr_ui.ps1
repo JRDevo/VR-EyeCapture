@@ -1,15 +1,18 @@
 <#
-    run_steamvr_ui.ps1 -- the tray's "SteamVR games" window and the automatic repair (tray/steamvr_ui.cpp) on a fake Steam
-    install. CPU only: no GPU, no SteamVR, no real Steam or game folder, no real registry key.
+    run_steamvr_ui.ps1 -- the tray's "SteamVR games" window, the repair check + one-click Repair, Disable all and the
+    Unregister question (tray/steamvr_ui.cpp, tray/tray.cpp) on a fake Steam install. CPU only: no GPU, no SteamVR, no real
+    Steam or game folder, no real registry key.
       powershell -ExecutionPolicy Bypass -File tests\run_steamvr_ui.ps1
     1. steamvr_install_test.exe: the library behind the window (vdf / acf parsing on tests\fixtures\steam, discovery, scan,
        enable / disable / OpenComposite / repair / ini).
     2. A scratch tray (copy of EyeCaptureTray.exe in build\tt_svr, EYECAP_TRAY_TEST_SHM, scratch APPDATA) with the proxy in
        build\tt_svr\steamvr\openvr_api.dll (the zip layout). EYECAP_TRAY_TEST_STEAM_DIR = a fake Steam install
        (build\tt_svr\steam + a second library build\tt_svr\lib2, libraryfolders.vdf + appmanifest_*.acf); the real Steam folder
-       is never read. XR_EYE_CAPTURE_TEST_HOME_KEY = a test HKCU key the tray must fill with its folder at start.
-       EYECAP_TRAY_TEST_PICK names a file whose first line is the "picked" exe. settings_test.exe svr opens the window
-       (WM_APP+9), waits for the background Steam scan, ticks / clicks / presses buttons and answers the REAL message boxes.
+       is never read. XR_EYE_CAPTURE_TEST_HOME_KEY = a test HKCU key (the tray fills it only when a game is enabled /
+       repaired, and deletes the Home value when the last game is disabled). EYECAP_TRAY_TEST_PICK names a file whose first
+       line is the "picked" exe; EYECAP_TRAY_TEST_ASK a file with the answers to the tray's own question boxes (Unregister).
+       settings_test.exe svr opens the window (WM_APP+9, or via=balloon: a click on the tray's balloon), waits for the
+       background Steam scan, ticks / clicks / presses buttons and answers the REAL message boxes.
        Games (mock_openvr.dll plays Valve's openvr_api.dll, oc_shim_test.dll OpenComposite's):
          Fake Unity  Plugins\x86_64 + a 32-bit Plugins\x86 copy    Second VR  64-bit next to the exe (library 2)
          AC Game     EasyAntiCheat folder                          OC Game    OpenComposite + .steamvr-backup (library 2)
@@ -19,10 +22,15 @@
        them ([found] in steamvr_games.ini); Flat Game by exe -> "no openvr_api.dll found"; tick Fake Unity (32-bit copy
        skipped, untouched) -> On; a real mouse click on AC Game's box -> anti-cheat warning, No -> unchanged; Enable all ->
        Second VR on, AC / OC / Old skipped; tick OC Game -> restore SteamVR's DLL first -> On; Exe Game by exe -> On.
-       Auto repair: game updates in Fake Unity and Second VR, Second VR's DLL held open ("running"); tray restart -> Fake Unity
-       repaired + balloon, Second VR skipped, AC Game (never enabled) untouched; handle closed -> opening the window repairs
-       Second VR; Exe Game updated while held open -> listed "Needs repair". Untick / Disable everything -> originals back;
-       Rescan after Old Game was uninstalled -> gone.
+       Repair: game updates in Fake Unity and Second VR, Second VR's DLL held open ("running"), Exe Game's sidecar and the
+       Home key point at an old install ("moved"); tray restart -> the three are only DETECTED (logged, one balloon "3 game(s)
+       need a repair ... Click to repair.", nothing written, AC Game untouched); the balloon click opens the window (rows
+       "Needs repair (game updated)" / "(VR EyeCapture moved)"; still nothing written); Repair -> Fake Unity + Exe Game
+       repaired (sidecar home + Home key = this folder), Second VR skipped (in use); handle closed -> Repair again -> On; Exe
+       Game updated while held open -> "Needs repair", not repaired by opening the window. Untick Fake Unity, Re-enable /
+       Disable Exe Game; Disable all answered No -> unchanged; Unregister (WM_APP+11, scripted Yes, Yes) -> asks about the 2
+       SteamVR games and disables them, the Home value is deleted; tick Second VR, Disable all Yes -> off, Home value deleted
+       again; Rescan after Old Game was uninstalled -> gone.
     Only the scratch tray is stopped.
 #>
 $ErrorActionPreference = 'Stop'
@@ -30,11 +38,29 @@ $root = Split-Path -Parent $PSScriptRoot
 $bin = Join-Path $root 'build\Release'
 $drv = Join-Path $bin 'settings_test.exe'
 $proxy = Join-Path $bin 'openvr_api.dll'; $mock = Join-Path $bin 'mock_openvr.dll'; $oc = Join-Path $bin 'oc_shim_test.dll'
-# the games' own openvr_api.dll: Valve's v2.15.6 (the mock has test exports the proxy lacks: Enable would refuse it)
-$valveDll = Join-Path $root 'third_party\openvr\bin\win64\openvr_api.dll'
 foreach ($f in @($drv, $proxy, $mock, $oc, (Join-Path $bin 'EyeCaptureTray.exe'), (Join-Path $bin 'steamvr_install_test.exe'))) {
     if (-not (Test-Path $f)) { throw "build first: $f" }
 }
+# the games' own openvr_api.dll: a real Valve DLL = SteamVR's own copy on this PC (<runtime>\bin\win64 of the first existing
+# "runtime" in %LOCALAPPDATA%\openvr\openvrpaths.vrpath; XR_EYE_CAPTURE_TEST_VALVE_DLL overrides). VR EyeCapture ships and
+# keeps no Valve binary: without SteamVR the test is SKIPPED. (The mock has test exports the proxy lacks: Enable would refuse it.)
+# Only copied into the scratch tree under build\tt_svr; SteamVR's folder is never written.
+$valveDll = $env:XR_EYE_CAPTURE_TEST_VALVE_DLL
+if (-not $valveDll) {
+    $vp = Join-Path $env:LOCALAPPDATA 'openvr\openvrpaths.vrpath'
+    try {
+        foreach ($rt in @((Get-Content -LiteralPath $vp -Raw -ErrorAction Stop | ConvertFrom-Json).runtime)) {
+            $c = Join-Path $rt 'bin\win64\openvr_api.dll'
+            if ($rt -and (Test-Path -LiteralPath $c -PathType Leaf)) { $valveDll = $c; break }
+        }
+    } catch { }
+}
+if (-not $valveDll -or -not (Test-Path -LiteralPath $valveDll -PathType Leaf)) {
+    Write-Host "SKIP run_steamvr_ui: needs a real Valve openvr_api.dll; SteamVR's copy was not found through $env:LOCALAPPDATA\openvr\openvrpaths.vrpath (install SteamVR or set XR_EYE_CAPTURE_TEST_VALVE_DLL)." -ForegroundColor Yellow
+    exit 0
+}
+Write-Host "Valve DLL for the fake games: $valveDll"
+$env:XR_EYE_CAPTURE_TEST_VALVE_DLL = $valveDll   # steamvr_install_test uses the same one
 $fail = 0
 function Step($name, $ok) { Write-Host ("{0}: {1}" -f $name, $(if ($ok) { 'PASS' } else { 'FAIL' })) -ForegroundColor $(if ($ok) { 'Green' } else { 'Red' }); if (-not $ok) { $script:fail++ } }
 function Hash($p) { if (Test-Path -LiteralPath $p) { (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash } else { '' } }
@@ -82,10 +108,11 @@ Acf $lib2 2001 'Second VR' 'Second VR'; Acf $lib2 2002 'OC Game' 'OC Game'; Acf 
 $x = Join-Path $t 'other\Exe Game'; Exe $x 'Exe Game'; Copy-Item $valveDll (Join-Path $x 'openvr_api.dll')
 
 $pick = Join-Path $t 'pick.txt'
+$askFile = Join-Path $t 'ask.txt'   # answers to the tray's own question boxes (Unregister); none = No
 $ini = Join-Path $t 'steamvr_games.ini'
 $homeKey = "Software\OpenXR-EyeCapture-Test\SvrHome$PID"
 $saved = @{}
-foreach ($n in 'APPDATA', 'EYECAP_TRAY_TEST_SHM', 'EYECAP_TRAY_TEST_PICK', 'XR_EYE_CAPTURE_TEST_HOME_KEY', 'EYECAP_TRAY_TEST_STEAM_DIR') { $saved[$n] = [Environment]::GetEnvironmentVariable($n) }
+foreach ($n in 'APPDATA', 'EYECAP_TRAY_TEST_SHM', 'EYECAP_TRAY_TEST_PICK', 'EYECAP_TRAY_TEST_ASK', 'XR_EYE_CAPTURE_TEST_HOME_KEY', 'EYECAP_TRAY_TEST_STEAM_DIR') { $saved[$n] = [Environment]::GetEnvironmentVariable($n) }
 $p = $null
 $hold = $null
 function Svr([string[]]$a) {
@@ -102,6 +129,7 @@ try {
     $env:APPDATA = Join-Path $t 'appdata'
     $env:EYECAP_TRAY_TEST_SHM = 'eyecap-svr-test'
     $env:EYECAP_TRAY_TEST_PICK = $pick
+    $env:EYECAP_TRAY_TEST_ASK = $askFile
     $env:XR_EYE_CAPTURE_TEST_HOME_KEY = $homeKey
     $env:EYECAP_TRAY_TEST_STEAM_DIR = $steam
     StartTray
@@ -112,7 +140,7 @@ try {
     $r = Svr @('list')
     Step 'scan: 5 SteamVR games in 2 libraries (Flat Game has no openvr_api.dll: not listed)' ($r.code -eq 0 -and $r.rows.Count -eq 5 -and $r.text -match 'STATUS: Steam library: 5 SteamVR game\(s\) in 2 libraries\.')
     Step 'scan: states Off / OpenComposite installed / 32-bit, not supported' ((Row $r 'Fake Unity') -match '\| Off \|' -and (Row $r 'AC Game') -match '\| Off \|' -and (Row $r 'Second VR') -match '\| Off \|' -and (Row $r 'OC Game') -match '\| OpenComposite installed \|' -and (Row $r 'Old Game') -match '\| 32-bit, not supported \|')
-    Step 'scan: sorted by name, Enable all available, Disable greyed' ($r.rows[0] -like 'ROW: AC Game |*' -and $r.rows[4] -like 'ROW: Second VR |*' -and $r.text -match 'BUTTONS: enableall=1 enable=1 disable=0 reenable=0')
+    Step 'scan: sorted by name, Enable all available, Disable / Disable all / Repair greyed' ($r.rows[0] -like 'ROW: AC Game |*' -and $r.rows[4] -like 'ROW: Second VR |*' -and $r.text -match 'BUTTONS: enableall=1 disableall=0 enable=1 disable=0 reenable=0 repair=0')
     $iniText = Get-Content $ini -Raw
     Step 'scan cached in steamvr_games.ini ([found] x5, no [game])' (([regex]::Matches($iniText, '(?m)^\[found\]')).Count -eq 5 -and $iniText -notmatch '(?m)^\[game\]' -and $iniText -match 'appid = 2002')
 
@@ -142,7 +170,7 @@ try {
     Write-Host '-- tick Fake Unity'
     $r = Svr @('toggle', 'row=Fake Unity', 'answers=Yes,OK')
     Step 'tick Fake Unity: confirmation lists the 64-bit folder and the 32-bit one (skipped)' ($r.text -match 'BOX: Enable SteamVR recording for Fake Unity\?.*Plugins\\x86_64\|\s+will be enabled' -and $r.text -match 'Plugins\\x86\|\s+32-bit -- not supported, skipped')
-    Step 'tick Fake Unity: result box names ScrollLock and the automatic repair' ($r.text -match 'BOX: SteamVR recording is enabled for Fake Unity\..*press ScrollLock to record.*repairs it at its next start')
+    Step 'tick Fake Unity: result box names ScrollLock and the one-click repair' ($r.text -match 'BOX: SteamVR recording is enabled for Fake Unity\..*press ScrollLock to record.*tells you at its next start; one click on Repair puts it back')
     Step 'tick Fake Unity: proxy in place, Valve''s DLL kept as openvr_api_real.dll, 32-bit copy untouched, row On' ((Hash (Join-Path $u64 'openvr_api.dll')) -eq $hProxy -and (Hash (Join-Path $u64 'openvr_api_real.dll')) -eq $hValve -and (Hash (Join-Path $u32 'openvr_api.dll')) -eq $h32 -and (Row $r 'Fake Unity') -match '\| On \|')
     $side = Get-Content (Join-Path $u64 'eye_capture_proxy.ini') -Raw -ErrorAction SilentlyContinue
     Step 'tick Fake Unity: sidecar home = the tray folder; [game] with appid 1001' ($side -match [regex]::Escape("home = $t") -and (Get-Content $ini -Raw) -match '(?ms)^\[game\]\r?\nname = Fake Unity\r?\nexe = \r?\nroot = .*?appid = 1001')
@@ -170,38 +198,61 @@ try {
     $r = Svr @('enable', 'answers=Yes,OK')
     Step 'Add a game by exe: Exe Game On (6 rows)' ((Hash (Join-Path $x 'openvr_api.dll')) -eq $hProxy -and (Row $r 'Exe Game') -match '\| On \|' -and $r.rows.Count -eq 6)
 
-    Write-Host '-- automatic repair at tray start'
+    Write-Host '-- repair check at tray start (detect only), the balloon click, Repair'
     Stop-Process -Id $p.Id; $p.WaitForExit(); Start-Sleep -Milliseconds 300
     Copy-Item -Force $valveDll (Join-Path $u64 'openvr_api.dll')      # game update: Valve's DLL over the proxy
     Copy-Item -Force $valveDll (Join-Path $s 'openvr_api.dll')
     $hold = [System.IO.File]::Open((Join-Path $s 'openvr_api.dll'), 'Open', 'Read', 'Read')   # Second VR "running"
+    # VR EyeCapture "moved": Exe Game's sidecar and the (test) Home key point at an old install folder
+    $oldHome = Join-Path $t 'old install'
+    [System.IO.File]::WriteAllText((Join-Path $x 'eye_capture_proxy.ini'), "home = $oldHome`r`ngame = Exe Game`r`n", $utf8)
+    Set-ItemProperty -Path "HKCU:\$homeKey" -Name Home -Value $oldHome
     Remove-Item (Join-Path $t 'logs\tray.log')
     StartTray
     Start-Sleep -Seconds 1
     $log = LogText
-    Step 'tray start: Fake Unity repaired (logged), proxy back, the updated Valve DLL is openvr_api_real.dll' ($log -match 'steamvr: repair \(tray start\): Fake Unity, .*x86_64: repaired after a game update' -and (Hash (Join-Path $u64 'openvr_api.dll')) -eq $hProxy -and (Hash (Join-Path $u64 'openvr_api_real.dll')) -eq $hValve)
-    Step 'tray start: one balloon "SteamVR recording repaired for Fake Unity after a game update"' ($log -match 'tray: balloon \[SteamVR games\] SteamVR recording repaired for Fake Unity after a game update' -and ([regex]::Matches($log, 'balloon \[SteamVR games\]')).Count -eq 1)
-    Step 'tray start: Second VR in use -> skipped (logged), unchanged' ($log -match 'steamvr: repair \(tray start\): Second VR, .*: skipped -- in use' -and (Hash (Join-Path $s 'openvr_api.dll')) -eq $hValve)
-    Step 'tray start: AC Game (never enabled) untouched' ((Hash (Join-Path $a 'openvr_api.dll')) -eq $hValve -and -not (Test-Path (Join-Path $a 'openvr_api_real.dll')) -and $log -notmatch 'repair \(tray start\): AC Game')
+    Step 'tray start: the three games are detected and logged (game updated x2, VR EyeCapture moved)' ($log -match 'steamvr: repair check \(tray start\): Fake Unity, .*x86_64: needs repair \(game updated\)' -and $log -match 'repair check \(tray start\): Second VR, .*: needs repair \(game updated\)' -and $log -match 'repair check \(tray start\): Exe Game, .*: needs repair \(VR EyeCapture moved\)' -and $log -match 'repair check \(tray start\): 4 enabled game\(s\) checked, 3 need a repair -- nothing changed')
+    Step 'tray start: ONE balloon "SteamVR recording: 3 game(s) need a repair after an update. Click to repair."' ($log -match 'tray: balloon \[SteamVR games\] SteamVR recording: 3 game\(s\) need a repair after an update\. Click to repair\.\r?\n' -and ([regex]::Matches($log, 'balloon \[SteamVR games\]')).Count -eq 1)
+    Step 'tray start: NOTHING written (Valve''s DLLs still in place, the old sidecar kept, Home key unchanged)' ((Hash (Join-Path $u64 'openvr_api.dll')) -eq $hValve -and (Hash (Join-Path $s 'openvr_api.dll')) -eq $hValve -and (Get-Content (Join-Path $x 'eye_capture_proxy.ini') -Raw) -match [regex]::Escape("home = $oldHome") -and (Get-ItemProperty -Path "HKCU:\$homeKey" -Name Home).Home -eq $oldHome -and $log -notmatch 'steamvr: repair \(')
+    Step 'tray start: AC Game (never enabled) untouched' ((Hash (Join-Path $a 'openvr_api.dll')) -eq $hValve -and -not (Test-Path (Join-Path $a 'openvr_api_real.dll')) -and $log -notmatch 'repair check \(tray start\): AC Game')
+    $r = Svr @('list', 'via=balloon')
+    Step 'balloon click: the SteamVR games window opens (logged)' ($r.code -eq 0 -and (LogText) -match 'tray: balloon clicked -- opening the SteamVR games window')
+    Step 'window: rows "Needs repair (game updated)" / "(VR EyeCapture moved)", status line, Repair enabled' ((Row $r 'Fake Unity') -match '\| Needs repair \(game updated\)' -and (Row $r 'Second VR') -match '\| Needs repair \(game updated\)' -and (Row $r 'Exe Game') -match '\| Needs repair \(VR EyeCapture moved\)' -and $r.text -match 'STATUS: .*3 game\(s\) need a repair \(Exe Game, Fake Unity and Second VR\): click Repair\.' -and $r.text -match 'BUTTONS: .*repair=1')
+    Step 'window opened: still nothing written' ((Hash (Join-Path $u64 'openvr_api.dll')) -eq $hValve -and (Get-Content (Join-Path $x 'eye_capture_proxy.ini') -Raw) -match [regex]::Escape("home = $oldHome"))
+    $r = Svr @('repair', 'answers=OK')
+    Step 'Repair: one result box -- 2 of 3 repaired, Second VR in use' ($r.text -match 'BOX: SteamVR recording repaired in 2 of 3 folder\(s\)\.\|\|Repaired:\|(?=.*Fake Unity -- )(?=.*Exe Game -- ).*\|\|In use \(the game is running\) -- close it and click Repair again:\|  Second VR -- ' -and ([regex]::Matches($r.text, 'BOX: ')).Count -eq 1)
+    Step 'Repair: Fake Unity proxy back, the updated Valve DLL is openvr_api_real.dll; row On' ((Hash (Join-Path $u64 'openvr_api.dll')) -eq $hProxy -and (Hash (Join-Path $u64 'openvr_api_real.dll')) -eq $hValve -and (Row $r 'Fake Unity') -match '\| On \|')
+    Step 'Repair: Exe Game sidecar home = this install again, the (test) Home key too; row On' ((Get-Content (Join-Path $x 'eye_capture_proxy.ini') -Raw) -match [regex]::Escape("home = $t`r") -and (Get-ItemProperty -Path "HKCU:\$homeKey" -Name Home).Home -eq $t -and (Row $r 'Exe Game') -match '\| On \|')
+    Step 'Repair: Second VR (in use) unchanged, still Needs repair' ((Hash (Join-Path $s 'openvr_api.dll')) -eq $hValve -and (Row $r 'Second VR') -match '\| Needs repair \(game updated\)' -and (LogText) -match 'repair \(Repair clicked\): Second VR, .*: skipped')
     $hold.Dispose(); $hold = $null
-    $r = Svr @('list')
-    Step 'window opened: Second VR repaired now (status line + log), On' ($r.text -match 'STATUS: .*SteamVR recording repaired for Second VR after a game update' -and (Hash (Join-Path $s 'openvr_api.dll')) -eq $hProxy -and (Row $r 'Second VR') -match '\| On \|' -and (LogText) -match 'repair \(window opened\): Second VR')
+    $r = Svr @('repair', 'answers=OK')
+    Step 'Repair again after the game closed: Second VR On, Repair greyed' ((Hash (Join-Path $s 'openvr_api.dll')) -eq $hProxy -and (Row $r 'Second VR') -match '\| On \|' -and $r.text -match 'BUTTONS: .*repair=0' -and $r.text -match 'BOX: SteamVR recording repaired in 1 of 1 folder')
     Copy-Item -Force $valveDll (Join-Path $x 'openvr_api.dll')
     $hold = [System.IO.File]::Open((Join-Path $x 'openvr_api.dll'), 'Open', 'Read', 'Read')
     $r = Svr @('list')
-    Step 'updated while running: Exe Game listed "Needs repair"' ((Row $r 'Exe Game') -match '\| Needs repair \(game updated\)')
+    Step 'updated while running: Exe Game listed "Needs repair", not repaired by opening the window' ((Row $r 'Exe Game') -match '\| Needs repair \(game updated\)' -and (Hash (Join-Path $x 'openvr_api.dll')) -eq $hValve)
     $hold.Dispose(); $hold = $null
 
-    Write-Host '-- untick / Disable'
+    Write-Host '-- untick / Disable / Disable all / Unregister'
     $r = Svr @('toggle', 'row=Fake Unity', 'answers=Yes,OK')
     Step 'untick Fake Unity: Valve''s DLL back, no real / sidecar, row Off' ((Hash (Join-Path $u64 'openvr_api.dll')) -eq $hValve -and -not (Test-Path (Join-Path $u64 'openvr_api_real.dll')) -and -not (Test-Path (Join-Path $u64 'eye_capture_proxy.ini')) -and (Row $r 'Fake Unity') -match '\| Off \|')
     $r = Svr @('reenable', 'row=Exe Game', 'answers=Yes,OK')
-    Step 'Re-enable Exe Game (repaired meanwhile when the window opened): confirmation + On' ($r.text -match 'BOX: Re-enable SteamVR recording for Exe Game\?.*already enabled' -and (LogText) -match 'repair \(window opened\): Exe Game' -and (Row $r 'Exe Game') -match '\| On \|')
+    Step 'Re-enable Exe Game (the click repairs it): confirmation "enabled again (the game was updated)" + On' ($r.text -match 'BOX: Re-enable SteamVR recording for Exe Game\?.*will be enabled again \(the game was updated\)' -and (Hash (Join-Path $x 'openvr_api.dll')) -eq $hProxy -and (Row $r 'Exe Game') -match '\| On \|')
     $r = Svr @('disable', 'row=Exe Game', 'answers=Yes,OK')
     Step 'Disable Exe Game: original back, row gone (not a Steam game)' ((Hash (Join-Path $x 'openvr_api.dll')) -eq $hValve -and (Row $r 'Exe Game') -eq '' -and $r.rows.Count -eq 5)
-    $null = Svr @('disable', 'row=Second VR', 'answers=Yes,OK')
-    $r = Svr @('disable', 'row=OC Game', 'answers=Yes,OK')
-    Step 'Disable Second VR + OC Game: originals back (.opencomposite kept), everything Off, no [game] left' ((Hash (Join-Path $s 'openvr_api.dll')) -eq $hValve -and (Hash (Join-Path $o 'openvr_api.dll')) -eq $hValve -and (Hash (Join-Path $o 'openvr_api.dll.opencomposite')) -eq $hOc -and (Row $r 'OC Game') -match '\| Off \|' -and (Get-Content $ini -Raw) -notmatch '(?m)^\[game\]')
+    Step 'Home key kept while games are still enabled' ((Get-ItemProperty -Path "HKCU:\$homeKey" -Name Home -ErrorAction SilentlyContinue).Home -eq $t)
+    $r = Svr @('disableall', 'answers=No')
+    Step 'Disable all, answered No: the confirmation lists OC Game and Second VR; nothing changed' ($r.text -match 'BOX: Disable SteamVR recording for all 2 game\(s\)\?\|\|  OC Game\|  Second VR\|' -and (Hash (Join-Path $s 'openvr_api.dll')) -eq $hProxy -and (Hash (Join-Path $o 'openvr_api.dll')) -eq $hProxy -and $r.text -match 'BUTTONS: .*disableall=1')
+    [System.IO.File]::WriteAllText($askFile, "Yes`r`nYes`r`n", $utf8)
+    $null = Svr @('unregister')
+    $log = LogText
+    Step 'Unregister: asks "Also put the original openvr_api.dll back in 2 SteamVR game(s)?" (Yes)' ($log -match 'question box: Unregister VR EyeCapture from OpenXR games\?[\s\S]*?-> Yes \(test mode\)' -and $log -match 'question box: Also put the original openvr_api\.dll back in 2 SteamVR game\(s\)\?[\s\S]*?OC Game[\s\S]*?Second VR[\s\S]*?-> Yes \(test mode\)')
+    Step 'Unregister: both games disabled (originals back, .opencomposite kept), no [game] left, registry part skipped in test mode' ((Hash (Join-Path $s 'openvr_api.dll')) -eq $hValve -and (Hash (Join-Path $o 'openvr_api.dll')) -eq $hValve -and (Hash (Join-Path $o 'openvr_api.dll.opencomposite')) -eq $hOc -and (Get-Content $ini -Raw) -notmatch '(?m)^\[game\]' -and $log -match 'disable all \(unregister\): 2 of 2 game\(s\) disabled' -and $log -match 'balloon \[SteamVR games\] SteamVR recording disabled for 2 of 2 game\(s\)\.' -and $log -match 'test mode without EYECAP_TRAY_TEST_REG -- the OpenXR registration part is skipped')
+    Step 'Unregister: the last game gone -> the (test) Home value deleted' ($log -match 'no SteamVR game enabled any more -- deleted HKCU\\.*SvrHome' -and -not (Get-ItemProperty -Path "HKCU:\$homeKey" -Name Home -ErrorAction SilentlyContinue))
+    $r = Svr @('toggle', 'row=Second VR', 'answers=Yes,OK')
+    Step 'tick Second VR again: On, Home key written again' ((Row $r 'Second VR') -match '\| On \|' -and (Get-ItemProperty -Path "HKCU:\$homeKey" -Name Home -ErrorAction SilentlyContinue).Home -eq $t)
+    $r = Svr @('disableall', 'answers=Yes,OK')
+    Step 'Disable all, Yes: Second VR original back, Off, result box, Home value deleted, Disable all greyed' ($r.text -match 'BOX: SteamVR recording disabled for 1 of 1 game\(s\)\.' -and (Hash (Join-Path $s 'openvr_api.dll')) -eq $hValve -and (Row $r 'Second VR') -match '\| Off \|' -and -not (Get-ItemProperty -Path "HKCU:\$homeKey" -Name Home -ErrorAction SilentlyContinue) -and $r.text -match 'BUTTONS: enableall=\d disableall=0' -and (Get-Content $ini -Raw) -notmatch '(?m)^\[game\]')
 
     Write-Host '-- Rescan after Old Game was uninstalled'
     Remove-Item -Recurse -Force $old; Remove-Item (Join-Path $lib2 'steamapps\appmanifest_2003.acf')

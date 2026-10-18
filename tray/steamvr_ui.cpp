@@ -58,6 +58,7 @@ struct Row {
     std::vector<std::wstring> dirs32;
     std::vector<Location> locs;         // dirs, inspected
     RowState state = RowState::Unknown;
+    steamvr::RepairWhy repairWhy = steamvr::RepairWhy::None;   // NeedsRepair: why (the first folder that needs one)
 };
 std::vector<Row> g_rows;
 
@@ -83,11 +84,14 @@ std::wstring Rel(const std::wstring& root, const std::wstring& dir) {
     return dir;
 }
 
-const wchar_t* StateText(RowState s) {
+const wchar_t* StateText(RowState s, steamvr::RepairWhy why = steamvr::RepairWhy::GameUpdated) {
     switch (s) {
     case RowState::On: return L"On";
     case RowState::Off: return L"Off";
-    case RowState::NeedsRepair: return L"Needs repair (game updated) — Re-enable";
+    case RowState::NeedsRepair:
+        return why == steamvr::RepairWhy::Moved ? L"Needs repair (VR EyeCapture moved) — click Repair"
+             : why == steamvr::RepairWhy::ProxyOutdated ? L"Needs repair (older recorder version) — click Repair"
+             : L"Needs repair (game updated) — click Repair";
     case RowState::OpenComposite: return L"OpenComposite installed";
     case RowState::Only32: return L"32-bit, not supported";
     case RowState::OriginalMissing: return L"original missing — verify the game files in Steam";
@@ -97,7 +101,11 @@ const wchar_t* StateText(RowState s) {
 }
 std::wstring LocText(const Location& L) {
     switch (L.state) {
-    case LocState::Enabled: return L.proxyOutdated ? L"on (older proxy)" : L"on";
+    case LocState::Enabled:
+        if (steamvr::RepairNeeded(L, g_opt.installDir) == steamvr::RepairWhy::Moved)
+            return L"on, but its settings point to " + (L.sidecarHome.empty() ? std::wstring(L"(nothing)") : L.sidecarHome) +
+                   L" -- VR EyeCapture moved? Repair";
+        return L.proxyOutdated ? L"on (older proxy)" : L"on";
     case LocState::ProxyMissing: return L"proxy missing — game updated?";
     case LocState::OriginalMissing: return L"original missing";
     case LocState::OpenComposite: return L"OpenComposite installed";
@@ -107,11 +115,16 @@ std::wstring LocText(const Location& L) {
     }
 }
 
-RowState StateOf(const Row& r) {
+RowState StateOf(Row& r) {
+    r.repairWhy = steamvr::RepairWhy::None;
     if (!DirExists(r.root)) return RowState::NotFound;
     bool on = false, repair = false, orig = false, oc = false, off = false;
     for (const Location& L : r.locs) {
-        if (L.state == LocState::ProxyMissing || (L.state == LocState::Enabled && L.proxyOutdated)) repair = true;
+        const steamvr::RepairWhy w = steamvr::RepairNeeded(L, g_opt.installDir);
+        if (w != steamvr::RepairWhy::None) {
+            repair = true;
+            if (r.repairWhy == steamvr::RepairWhy::None) r.repairWhy = w;
+        }
         else if (L.state == LocState::Enabled) on = true;
         else if (L.state == LocState::OriginalMissing) orig = true;
         else if (L.state == LocState::OpenComposite) oc = true;
@@ -146,19 +159,106 @@ void LogSteps(const steamvr::ActionResult& r, const char* what, const std::wstri
     else LOGW("tray: steamvr: %s %s FAILED (error %lu): %s", what, N(dir).c_str(), r.error, N(r.message).c_str());
 }
 
-std::vector<GameEntry> LoadGames() {
+// ---- HKCU\Software\OpenXR-EyeCapture\Home = the install folder (REG_SZ, no admin): the SteamVR proxy's FALLBACK when a game
+// folder has no sidecar (src/openvr/openvr_hooks.h; the sidecar already carries home). Written only when the user enabled or
+// repaired a SteamVR game, and only when it differs -- never at tray start. Deleted when the user disabled the last game
+// (DeleteHomeKey). Tests: the key comes from XR_EYE_CAPTURE_TEST_HOME_KEY (an HKCU subkey); a test-mode tray without it
+// touches nothing.
+std::wstring HomeKeyPath(bool testMode) {
+    wchar_t keyBuf[512];
+    const DWORD n = GetEnvironmentVariableW(EYECAP_TEST_HOME_KEY_ENV, keyBuf, 512);
+    if (n > 0 && n < 512) return keyBuf;
+    return testMode ? std::wstring() : std::wstring(EYECAP_HOME_REG_KEY);
+}
+
+void EnsureHomeKey(const std::wstring& installDir, bool testMode) {
+    const std::wstring key = HomeKeyPath(testMode);
+    if (key.empty()) return;
+    wchar_t cur[1024] = L"";
+    DWORD bytes = sizeof(cur) - sizeof(wchar_t);
+    if (RegGetValueW(HKEY_CURRENT_USER, key.c_str(), EYECAP_HOME_REG_VALUE, RRF_RT_REG_SZ, nullptr, cur, &bytes) == ERROR_SUCCESS &&
+        _wcsicmp(cur, installDir.c_str()) == 0)
+        return;
+    HKEY k = nullptr;
+    LSTATUS e = RegCreateKeyExW(HKEY_CURRENT_USER, key.c_str(), 0, nullptr, 0, KEY_SET_VALUE, nullptr, &k, nullptr);
+    if (e == ERROR_SUCCESS) {
+        e = RegSetValueExW(k, EYECAP_HOME_REG_VALUE, 0, REG_SZ, (const BYTE*)installDir.c_str(), (DWORD)((installDir.size() + 1) * sizeof(wchar_t)));
+        RegCloseKey(k);
+    }
+    if (e == ERROR_SUCCESS) LOGI("tray: SteamVR home: HKCU\\%s\\Home = %s", N(key).c_str(), N(installDir).c_str());
+    else LOGW("tray: SteamVR home: cannot write HKCU\\%s\\Home (error %ld)", N(key).c_str(), (long)e);
+}
+
+// The user disabled the last SteamVR game: the Home value goes (only when it names this install folder or a folder that no
+// longer exists -- another install's value is left alone), and the key too when nothing else is in it.
+void DeleteHomeKey(const std::wstring& installDir, bool testMode) {
+    const std::wstring key = HomeKeyPath(testMode);
+    if (key.empty()) return;
+    wchar_t cur[1024] = L"";
+    DWORD bytes = sizeof(cur) - sizeof(wchar_t);
+    if (RegGetValueW(HKEY_CURRENT_USER, key.c_str(), EYECAP_HOME_REG_VALUE, RRF_RT_REG_SZ, nullptr, cur, &bytes) != ERROR_SUCCESS) return;
+    if (_wcsicmp(cur, installDir.c_str()) != 0 && DirExists(cur)) {
+        LOGI("tray: SteamVR home: HKCU\\%s\\Home = %s (another install) -- left alone", N(key).c_str(), N(cur).c_str());
+        return;
+    }
+    const LSTATUS e = RegDeleteKeyValueW(HKEY_CURRENT_USER, key.c_str(), EYECAP_HOME_REG_VALUE);
+    if (e != ERROR_SUCCESS) { LOGW("tray: SteamVR home: cannot delete HKCU\\%s\\Home (error %ld)", N(key).c_str(), (long)e); return; }
+    LOGI("tray: SteamVR home: no SteamVR game enabled any more -- deleted HKCU\\%s\\Home", N(key).c_str());
+    HKEY k = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, key.c_str(), 0, KEY_READ, &k) != ERROR_SUCCESS) return;
+    DWORD subKeys = 1, values = 1;
+    const LSTATUS q = RegQueryInfoKeyW(k, nullptr, nullptr, nullptr, &subKeys, nullptr, nullptr, &values, nullptr, nullptr, nullptr, nullptr);
+    RegCloseKey(k);
+    if (q == ERROR_SUCCESS && subKeys == 0 && values == 0 && RegDeleteKeyW(HKEY_CURRENT_USER, key.c_str()) == ERROR_SUCCESS)
+        LOGI("tray: SteamVR home: deleted the empty key HKCU\\%s", N(key).c_str());
+}
+
+std::vector<GameEntry> LoadGamesAt(const std::wstring& ini) {
     std::vector<GameEntry> g;
-    if (!steamvr::LoadGameList(IniPath(), g)) g.clear();
+    if (!steamvr::LoadGameList(ini, g)) g.clear();
     return g;
 }
-// Read-modify-write of the [game] entries under the ini lock (the [found] cache is kept).
-bool SaveGames(const std::function<void(std::vector<GameEntry>&)>& change) {
-    std::lock_guard<std::mutex> lk(g_iniM);
-    std::vector<GameEntry> games = LoadGames();
-    change(games);
-    const bool ok = steamvr::SaveGameList(IniPath(), games);
-    if (!ok) LOGW("tray: steamvr: cannot write %s", N(IniPath()).c_str());
+std::vector<GameEntry> LoadGames() { return LoadGamesAt(IniPath()); }
+// Read-modify-write of the [game] entries of <installDir>\steamvr_games.ini under the ini lock (the [found] cache is kept).
+// A change that removes the last game deletes the Home value (DeleteHomeKey).
+bool SaveGamesAt(const std::wstring& installDir, bool testMode, const std::function<void(std::vector<GameEntry>&)>& change) {
+    const std::wstring ini = IniPathFor(installDir);
+    bool ok = false, lastGone = false;
+    {
+        std::lock_guard<std::mutex> lk(g_iniM);
+        std::vector<GameEntry> games = LoadGamesAt(ini);
+        const bool had = !games.empty();
+        change(games);
+        ok = steamvr::SaveGameList(ini, games);
+        lastGone = ok && had && games.empty();
+    }
+    if (!ok) LOGW("tray: steamvr: cannot write %s", N(ini).c_str());
+    if (lastGone) DeleteHomeKey(installDir, testMode);
     return ok;
+}
+bool SaveGames(const std::function<void(std::vector<GameEntry>&)>& change) { return SaveGamesAt(g_opt.installDir, g_opt.testMode, change); }
+
+// Disables every folder in `dirs` of one game (DisableLocation each); results += one line per folder. Returns the folders
+// that still hold our files (refused / failed: they stay in the list); a missing folder or one with nothing of ours left is
+// dropped.
+std::vector<std::wstring> DisableGameFolders(const std::wstring& name, const std::wstring& root, const std::vector<std::wstring>& dirs,
+                                             std::wstring& results) {
+    std::vector<std::wstring> remaining;
+    for (const std::wstring& d : dirs) {
+        if (!DirExists(d)) {
+            results += L"  " + Rel(root, d) + L"\n      folder not found -- removed from the list\n";
+            LOGI("tray: steamvr: disable %s: %s not found, dropped from the list", N(name).c_str(), N(d).c_str());
+            continue;
+        }
+        const Location L = steamvr::InspectLocation(d, std::string());
+        const steamvr::ActionResult r = steamvr::DisableLocation(L);
+        LogSteps(r, "disable", d);
+        // refused with nothing of ours in that folder (32-bit / OpenComposite / unknown DLL now): dropped from the list too
+        const bool nothingOurs = !r.ok && r.error == 0 && L.state != LocState::OriginalMissing;
+        if (!r.ok && !nothingOurs) remaining.push_back(d);
+        results += L"  " + Rel(root, d) + L"\n      " + r.message + L"\n";
+    }
+    return remaining;
 }
 
 int SelectedRow() {
@@ -180,7 +280,9 @@ void UpdateDetails() {
         const Row& r = g_rows[(size_t)ri];
         t = r.name + (r.appid.empty() ? std::wstring() : L" (Steam app " + r.appid + L")") + L"\r\nGame folder: " + r.root;
         if (!r.exe.empty()) t += L"\r\nExe: " + r.exe;
-        t += r.enabled ? L"\r\nRecording enabled by you (repaired automatically after game updates)." : L"\r\nNot enabled.";
+        t += r.enabled ? L"\r\nRecording enabled by you (after a game update the tray app tells you, and Repair puts it back)." : L"\r\nNot enabled.";
+        if (r.state == RowState::NeedsRepair)
+            t += L"\r\nNeeds repair: " + elog::Widen(steamvr::RepairWhyName(r.repairWhy)) + L". Click Repair (or Re-enable); close the game first.";
         if (r.antiCheat) t += L"\r\nAnti-cheat (EasyAntiCheat / BattlEye) found in the game folder.";
         if (r.truncated) t += L"\r\nThe game folder is very large: the Steam scan stopped early there (ticking the game searches it fully).";
         for (const Location& L : r.locs)
@@ -212,8 +314,14 @@ void UpdateButtons() {
     const bool sel = SelectedRow() >= 0;
     EnableWindow(GetDlgItem(g_dlg, ID_SVR_DISABLE), sel && g_rows[(size_t)SelectedRow()].enabled);
     EnableWindow(GetDlgItem(g_dlg, ID_SVR_REENABLE), sel && g_rows[(size_t)SelectedRow()].enabled);
-    bool anyOff = false;
-    for (const Row& r : g_rows) anyOff = anyOff || (!r.enabled && r.state == RowState::Off);
+    bool anyOff = false, anyOn = false, anyRepair = false;
+    for (const Row& r : g_rows) {
+        anyOff = anyOff || (!r.enabled && r.state == RowState::Off);
+        anyOn = anyOn || r.enabled;
+        anyRepair = anyRepair || (r.enabled && r.state == RowState::NeedsRepair);
+    }
+    EnableWindow(GetDlgItem(g_dlg, ID_SVR_DISABLEALL), anyOn);
+    EnableWindow(GetDlgItem(g_dlg, ID_SVR_REPAIR), anyRepair);
     bool running = false;
     { std::lock_guard<std::mutex> lk(g_scan.m); running = g_scan.running; }
     EnableWindow(GetDlgItem(g_dlg, ID_SVR_ENABLEALL), anyOff && !running);
@@ -276,7 +384,7 @@ void Refresh(const std::wstring& selectRoot = std::wstring()) {
     int selIdx = -1;
     for (size_t i = 0; i < g_rows.size(); ++i) {
         const Row& r = g_rows[i];
-        const std::wstring line = r.name + L"\t" + StateText(r.state) + L"\t" + r.root;
+        const std::wstring line = r.name + L"\t" + StateText(r.state, r.repairWhy) + L"\t" + r.root;
         SendMessageW(lb, LB_ADDSTRING, 0, (LPARAM)line.c_str());
         if (selIdx < 0 && !keep.empty() && SameDir(r.root, keep)) selIdx = (int)i;
     }
@@ -333,33 +441,6 @@ std::wstring PickExe() {
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_DONTADDTORECENT;
     if (!GetOpenFileNameW(&ofn)) return std::wstring();
     return file;
-}
-
-// HKCU\Software\OpenXR-EyeCapture\Home = the install folder (REG_SZ, no admin): the SteamVR proxy's FALLBACK when a game folder
-// has no sidecar (src/openvr/openvr_hooks.h; the sidecar already carries home). Written only when the user enabled a SteamVR
-// game, and only when it differs -- never at tray start. Tests: the key comes from XR_EYE_CAPTURE_TEST_HOME_KEY (an HKCU
-// subkey); a test-mode tray without it writes nothing.
-void EnsureHomeKey() {
-    wchar_t keyBuf[512];
-    const DWORD n = GetEnvironmentVariableW(EYECAP_TEST_HOME_KEY_ENV, keyBuf, 512);
-    std::wstring key = (n > 0 && n < 512) ? std::wstring(keyBuf) : std::wstring();
-    if (key.empty()) {
-        if (g_opt.testMode) return;
-        key = EYECAP_HOME_REG_KEY;
-    }
-    wchar_t cur[1024] = L"";
-    DWORD bytes = sizeof(cur) - sizeof(wchar_t);
-    if (RegGetValueW(HKEY_CURRENT_USER, key.c_str(), EYECAP_HOME_REG_VALUE, RRF_RT_REG_SZ, nullptr, cur, &bytes) == ERROR_SUCCESS &&
-        _wcsicmp(cur, g_opt.installDir.c_str()) == 0)
-        return;
-    HKEY k = nullptr;
-    LSTATUS e = RegCreateKeyExW(HKEY_CURRENT_USER, key.c_str(), 0, nullptr, 0, KEY_SET_VALUE, nullptr, &k, nullptr);
-    if (e == ERROR_SUCCESS) {
-        e = RegSetValueExW(k, EYECAP_HOME_REG_VALUE, 0, REG_SZ, (const BYTE*)g_opt.installDir.c_str(), (DWORD)((g_opt.installDir.size() + 1) * sizeof(wchar_t)));
-        RegCloseKey(k);
-    }
-    if (e == ERROR_SUCCESS) LOGI("tray: SteamVR home: HKCU\\%s\\Home = %s", elog::Narrow(key).c_str(), elog::Narrow(g_opt.installDir).c_str());
-    else LOGW("tray: SteamVR home: cannot write HKCU\\%s\\Home (error %ld)", elog::Narrow(key).c_str(), (long)e);
 }
 
 // Enable (or re-enable) one game: scan, OpenComposite question, confirmation, enable every 64-bit folder, save the list.
@@ -419,7 +500,9 @@ void EnableFlow(const std::wstring& exe, const std::wstring& root, const std::ws
         case LocState::NotEnabled: plan = L"will be enabled"; todo.push_back(i); break;
         case LocState::ProxyMissing: plan = L"will be enabled again (the game was updated)"; todo.push_back(i); break;
         case LocState::Enabled:
-            plan = L.proxyOutdated ? L"already enabled -- the proxy will be updated" : L"already enabled -- will be refreshed";
+            plan = steamvr::RepairNeeded(L, g_opt.installDir) == steamvr::RepairWhy::Moved
+                       ? L"already enabled -- VR EyeCapture moved: its settings will point to this folder again"
+                   : L.proxyOutdated ? L"already enabled -- the proxy will be updated" : L"already enabled -- will be refreshed";
             todo.push_back(i);
             break;
         case LocState::Unsupported32: plan = L"32-bit -- not supported, skipped"; break;
@@ -471,7 +554,7 @@ void EnableFlow(const std::wstring& exe, const std::wstring& root, const std::ws
         if (r.ok) { ++okCount; e.dlls.push_back(L.dir); }
         results += L"  " + Rel(root, L.dir) + L"\n      " + r.message + L"\n";
     }
-    if (okCount) EnsureHomeKey();
+    if (okCount) EnsureHomeKey(g_opt.installDir, g_opt.testMode);
     bool saved = true;
     SaveGames([&](std::vector<GameEntry>& games) {
         // folders listed before that this scan did not touch but that still hold our files stay in the list
@@ -495,7 +578,7 @@ void EnableFlow(const std::wstring& exe, const std::wstring& root, const std::ws
     if (okCount == todo.size()) {
         Box(L"SteamVR recording is enabled for " + name + L".\n\n" + results + L"\nStart the game from Steam with SteamVR running and " +
                 how + L" to record (this tray app must be running). After a game update or Steam's \"Verify integrity of game "
-                L"files\" the tray app repairs it at its next start." + saveErr,
+                L"files\" the tray app tells you at its next start; one click on Repair puts it back." + saveErr,
             MB_OK | MB_ICONINFORMATION);
     } else {
         Box(name + L": " + std::to_wstring(okCount) + L" of " + std::to_wstring(todo.size()) + L" folder(s) enabled.\n\n" + results +
@@ -516,22 +599,8 @@ void DisableRow(const Row& g) {
         LOGI("tray: steamvr: disable %s: cancelled", N(g.name).c_str());
         return;
     }
-    std::vector<std::wstring> remaining;
     std::wstring results;
-    for (const std::wstring& d : g.dirs) {
-        if (!DirExists(d)) {
-            results += L"  " + Rel(g.root, d) + L"\n      folder not found -- removed from the list\n";
-            LOGI("tray: steamvr: disable %s: %s not found, dropped from the list", N(g.name).c_str(), N(d).c_str());
-            continue;
-        }
-        const Location L = steamvr::InspectLocation(d, g_ourVersion);
-        const steamvr::ActionResult r = steamvr::DisableLocation(L);
-        LogSteps(r, "disable", d);
-        // refused with nothing of ours in that folder (32-bit / OpenComposite / unknown DLL now): dropped from the list too
-        const bool nothingOurs = !r.ok && r.error == 0 && L.state != LocState::OriginalMissing;
-        if (!r.ok && !nothingOurs) remaining.push_back(d);
-        results += L"  " + Rel(g.root, d) + L"\n      " + r.message + L"\n";
-    }
+    const std::vector<std::wstring> remaining = DisableGameFolders(g.name, g.root, g.dirs, results);
     SaveGames([&](std::vector<GameEntry>& games) {
         if (remaining.empty()) {
             steamvr::RemoveGame(games, g.root);
@@ -559,7 +628,7 @@ void ToggleRow(int ri) {
     if (ri < 0 || (size_t)ri >= g_rows.size()) return;
     const Row r = g_rows[(size_t)ri];
     if (!Toggleable(r)) {
-        LOGI("tray: steamvr: %s: %s -- cannot be ticked", N(r.name).c_str(), N(StateText(r.state)).c_str());
+        LOGI("tray: steamvr: %s: %s -- cannot be ticked", N(r.name).c_str(), N(StateText(r.state, r.repairWhy)).c_str());
         MessageBeep(MB_ICONWARNING);
         return;
     }
@@ -618,7 +687,7 @@ void OnEnableAll() {
         if (!e.dlls.empty()) { add.push_back(e); ++games; }
         results += L"  " + r.name + L": " + (e.dlls.empty() ? L"not enabled" : L"enabled") + res + L"\n";
     }
-    if (games) EnsureHomeKey();
+    if (games) EnsureHomeKey(g_opt.installDir, g_opt.testMode);
     SaveGames([&](std::vector<GameEntry>& g) { for (const GameEntry& e : add) steamvr::UpsertGame(g, e); });
     LOGI("tray: steamvr: enable all: %zu of %zu game(s) enabled", games, todo.size());
     Box(L"SteamVR recording enabled for " + std::to_wstring(games) + L" of " + std::to_wstring(todo.size()) + L" game(s).\n\n" + results,
@@ -631,6 +700,99 @@ void OnReenable() {
     if (ri < 0) return;
     const Row r = g_rows[(size_t)ri];
     EnableFlow(r.exe, r.root, r.name, r.appid, true);
+}
+
+// "Repair": every folder of the enabled games that FindRepairs reports (game updated / older recorder / VR EyeCapture moved)
+// is enabled again (RepairEnabledGames: in-use folders skipped, the export check applies). The user's click is the consent:
+// nothing is repaired without it. One result box.
+void OnRepair() {
+    std::wstring tried;
+    const std::wstring src = FindProxySource(g_opt.installDir, &tried);
+    if (src.empty()) {
+        Box(L"The VR EyeCapture recorder for SteamVR games (openvr_api.dll) was not found. Looked for:\n" + tried, MB_OK | MB_ICONERROR);
+        return;
+    }
+    const std::string ver = steamvr::InspectDll(src).proxyVersion;
+    const std::vector<GameEntry> games = LoadGames();
+    const std::vector<steamvr::RepairItem> items = steamvr::RepairEnabledGames(games, src, g_opt.installDir, ver);
+    std::wstring done, skipped, failed;
+    size_t ok = 0;
+    for (const steamvr::RepairItem& it : items) {
+        using W = steamvr::RepairItem::What;
+        const char* w = it.what == W::Repaired ? "repaired after a game update" : it.what == W::Updated ? "recorder updated"
+                      : it.what == W::Moved ? "settings point to this folder again" : it.what == W::SkippedInUse ? "skipped" : "FAILED";
+        LOGI("tray: steamvr: repair (Repair clicked): %s, %s: %s -- %s", N(it.game).c_str(), N(it.dir).c_str(), w, N(it.message).c_str());
+        const std::wstring line = L"  " + it.game + L" -- " + it.dir + L"\n      " + it.message + L"\n";
+        if (it.what == W::SkippedInUse) skipped += line;
+        else if (it.what == W::Failed) failed += line;
+        else { done += line; ++ok; }
+    }
+    LOGI("tray: steamvr: repair (Repair clicked): %zu folder(s) repaired, %zu not", ok, items.size() - ok);
+    if (ok) EnsureHomeKey(g_opt.installDir, g_opt.testMode);
+    g_status.clear();
+    std::wstring t = items.empty() ? std::wstring(L"Nothing needs a repair.") : L"SteamVR recording repaired in " + std::to_wstring(ok) +
+                                                                                  L" of " + std::to_wstring(items.size()) + L" folder(s).";
+    if (!done.empty()) t += L"\n\nRepaired:\n" + done;
+    if (!skipped.empty()) t += L"\n\nIn use (the game is running) -- close it and click Repair again:\n" + skipped;
+    if (!failed.empty()) t += L"\n\nNot repaired:\n" + failed;
+    Box(t, MB_OK | (ok == items.size() ? MB_ICONINFORMATION : MB_ICONWARNING));
+    Refresh();
+}
+
+struct DisableAllOutcome {
+    size_t games = 0, done = 0;
+    std::wstring results;   // one block per game
+};
+// Disables every [game] entry of <installDir>\steamvr_games.ini (DisableGameFolders), keeps the folders that failed in the
+// list, and deletes the Home value when no game is left (SaveGamesAt). No questions: the callers ask first.
+DisableAllOutcome DisableAllCore(const std::wstring& installDir, bool testMode, const char* why) {
+    DisableAllOutcome o;
+    std::vector<GameEntry> games;
+    {
+        std::lock_guard<std::mutex> lk(g_iniM);
+        games = LoadGamesAt(IniPathFor(installDir));
+    }
+    o.games = games.size();
+    std::vector<std::pair<std::wstring, std::vector<std::wstring>>> left;   // root -> folders that still hold our files
+    for (const GameEntry& g : games) {
+        std::wstring res;
+        const std::vector<std::wstring> rem = DisableGameFolders(g.name, g.root, g.dlls, res);
+        if (rem.empty()) ++o.done;
+        left.emplace_back(g.root, rem);
+        o.results += g.name + (rem.empty() ? L": the game's own openvr_api.dll is back\n" : L": not every folder could be changed\n") + res;
+    }
+    SaveGamesAt(installDir, testMode, [&](std::vector<GameEntry>& cur) {
+        for (const auto& l : left) {
+            if (l.second.empty()) { steamvr::RemoveGame(cur, l.first); continue; }
+            for (GameEntry& e : cur)
+                if (SameDir(e.root, l.first)) e.dlls = l.second;
+        }
+    });
+    LOGI("tray: steamvr: disable all (%s): %zu of %zu game(s) disabled", why, o.done, o.games);
+    return o;
+}
+
+// "Disable all": one confirmation listing the enabled games, then DisableAllCore.
+void OnDisableAll() {
+    const std::vector<GameEntry> games = LoadGames();
+    if (games.empty()) {
+        Box(L"No SteamVR game is enabled.", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    std::wstring list;
+    for (const std::wstring& n : EnabledGameNames(g_opt.installDir)) list += L"  " + n + L"\n";   // sorted by name
+    if (Box(L"Disable SteamVR recording for all " + std::to_wstring(games.size()) + L" game(s)?\n\n" + list +
+                L"\nEach game's own openvr_api.dll is put back. Close the games and SteamVR first: the files of a running game are "
+                L"not changed.",
+            MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES) {
+        LOGI("tray: steamvr: disable all: cancelled");
+        return;
+    }
+    const DisableAllOutcome o = DisableAllCore(g_opt.installDir, g_opt.testMode, "Disable all clicked");
+    Box(L"SteamVR recording disabled for " + std::to_wstring(o.done) + L" of " + std::to_wstring(o.games) + L" game(s).\n\n" + o.results +
+            (o.done == o.games ? std::wstring() : L"\nClose the game and SteamVR, then try again."),
+        MB_OK | (o.done == o.games ? MB_ICONINFORMATION : MB_ICONWARNING));
+    Refresh();
 }
 
 void OnDisable() {
@@ -831,7 +993,7 @@ void DrawRow(const DRAWITEMSTRUCT* di) {
     if (!sel && r.state == RowState::NeedsRepair) fg = RGB(200, 40, 40);
     else if (!sel && (r.state == RowState::Only32 || r.state == RowState::NotFound || r.state == RowState::Unknown)) fg = GetSysColor(COLOR_GRAYTEXT);
     SetTextColor(di->hDC, fg);
-    const std::wstring cols[3] = {r.name, StateText(r.state), r.root};
+    const std::wstring cols[3] = {r.name, StateText(r.state, r.repairWhy), r.root};
     const int xs[3] = {kCheckW, kColState, kColFolder}, xe[3] = {kColState - 6, kColFolder - 6, di->rcItem.right - di->rcItem.left - 4};
     for (int i = 0; i < 3; ++i) {
         RECT tr{di->rcItem.left + xs[i], di->rcItem.top, di->rcItem.left + xe[i], di->rcItem.bottom};
@@ -846,8 +1008,8 @@ void BuildControls() {
     Make(L"STATIC",
          L"Records SteamVR (OpenVR) games. Tick a game: VR EyeCapture's openvr_api.dll goes into that game's folder and the game's "
          L"own one is kept as openvr_api_real.dll next to it; untick it to put the original back. Only that game changes. After a "
-         L"game update or Steam's \"Verify integrity of game files\" the tray app repairs it at its next start. OpenXR games do not "
-         L"need this (Register for VR games).",
+         L"game update or Steam's \"Verify integrity of game files\" the game shows \"Needs repair\": click Repair. OpenXR games do "
+         L"not need this (Register for VR games).",
          SS_LEFT | SS_NOPREFIX, kMargin, 10, w, 64, ID_SVR_INTRO);
     Make(L"STATIC", L"Recording mode:", SS_LEFT | SS_NOPREFIX, kMargin, 82, 110, 18, -1);
     HWND mode = Make(L"COMBOBOX", L"", WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST, kMargin + 112, 78, w - 112, 200, ID_SVR_MODE);
@@ -863,12 +1025,14 @@ void BuildControls() {
     Make(L"EDIT", L"", WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL, kMargin, hy + 268, w, 100, ID_SVR_DETAILS,
          WS_EX_CLIENTEDGE);
     const int by = kClientH - kMargin - 28;
-    Make(L"BUTTON", L"Enable all", WS_TABSTOP | BS_PUSHBUTTON, kMargin, by, 100, 28, ID_SVR_ENABLEALL);
-    Make(L"BUTTON", L"Add a game by exe...", WS_TABSTOP | BS_PUSHBUTTON, kMargin + 108, by, 160, 28, ID_SVR_ENABLE);
-    Make(L"BUTTON", L"Disable", WS_TABSTOP | BS_PUSHBUTTON, kMargin + 276, by, 90, 28, ID_SVR_DISABLE);
-    Make(L"BUTTON", L"Re-enable", WS_TABSTOP | BS_PUSHBUTTON, kMargin + 374, by, 90, 28, ID_SVR_REENABLE);
-    Make(L"BUTTON", L"Rescan", WS_TABSTOP | BS_PUSHBUTTON, kMargin + 472, by, 90, 28, ID_SVR_RESCAN);
-    Make(L"BUTTON", L"Close", WS_TABSTOP | BS_PUSHBUTTON, kClientW - kMargin - 100, by, 100, 28, ID_SVR_CLOSE);
+    Make(L"BUTTON", L"Enable all", WS_TABSTOP | BS_PUSHBUTTON, kMargin, by, 90, 28, ID_SVR_ENABLEALL);
+    Make(L"BUTTON", L"Disable all", WS_TABSTOP | BS_PUSHBUTTON, kMargin + 96, by, 90, 28, ID_SVR_DISABLEALL);
+    Make(L"BUTTON", L"Add a game by exe...", WS_TABSTOP | BS_PUSHBUTTON, kMargin + 192, by, 150, 28, ID_SVR_ENABLE);
+    Make(L"BUTTON", L"Disable", WS_TABSTOP | BS_PUSHBUTTON, kMargin + 348, by, 80, 28, ID_SVR_DISABLE);
+    Make(L"BUTTON", L"Re-enable", WS_TABSTOP | BS_PUSHBUTTON, kMargin + 434, by, 80, 28, ID_SVR_REENABLE);
+    Make(L"BUTTON", L"Repair", WS_TABSTOP | BS_PUSHBUTTON, kMargin + 520, by, 80, 28, ID_SVR_REPAIR);
+    Make(L"BUTTON", L"Rescan", WS_TABSTOP | BS_PUSHBUTTON, kMargin + 606, by, 80, 28, ID_SVR_RESCAN);
+    Make(L"BUTTON", L"Close", WS_TABSTOP | BS_PUSHBUTTON, kClientW - kMargin - 90, by, 90, 28, ID_SVR_CLOSE);
 }
 
 LRESULT CALLBACK DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
@@ -886,6 +1050,8 @@ LRESULT CALLBACK DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case ID_SVR_ENABLEALL: OnEnableAll(); return 0;
         case ID_SVR_DISABLE: OnDisable(); return 0;
         case ID_SVR_REENABLE: OnReenable(); return 0;
+        case ID_SVR_REPAIR: OnRepair(); return 0;
+        case ID_SVR_DISABLEALL: OnDisableAll(); return 0;
         case ID_SVR_RESCAN: StartScan("Rescan"); return 0;
         case ID_SVR_CLOSE:
         case IDCANCEL:   // Escape (IsDialogMessage)
@@ -935,39 +1101,49 @@ std::wstring FindProxySource(const std::wstring& installDir, std::wstring* tried
     return std::wstring();
 }
 
-std::wstring AutoRepair(const std::wstring& installDir, const char* why) {
+RepairCheck CheckRepairs(const std::wstring& installDir, const char* why) {
+    RepairCheck rc;
     std::vector<GameEntry> games;
     {
         std::lock_guard<std::mutex> lk(g_iniM);
-        if (!steamvr::LoadGameList(IniPathFor(installDir), games) || games.empty()) return std::wstring();
+        if (!steamvr::LoadGameList(IniPathFor(installDir), games) || games.empty()) return rc;
     }
     const std::wstring src = FindProxySource(installDir);
     if (src.empty()) {
-        LOGW("tray: steamvr: repair (%s): no proxy openvr_api.dll next to the tray -- nothing checked", why);
-        return std::wstring();
+        LOGW("tray: steamvr: repair check (%s): no proxy openvr_api.dll next to the tray -- nothing checked", why);
+        return rc;
     }
     const std::string ver = steamvr::InspectDll(src).proxyVersion;
-    const std::vector<steamvr::RepairItem> items = steamvr::RepairEnabledGames(games, src, installDir, ver);
-    std::vector<std::wstring> repaired, updated;
-    for (const steamvr::RepairItem& it : items) {
-        const char* w = it.what == steamvr::RepairItem::What::Repaired ? "repaired after a game update"
-                      : it.what == steamvr::RepairItem::What::Updated ? "proxy updated to "
-                      : it.what == steamvr::RepairItem::What::SkippedInUse ? "skipped" : "FAILED";
-        LOGI("tray: steamvr: repair (%s): %s, %s: %s%s -- %s", why, N(it.game).c_str(), N(it.dir).c_str(), w,
-             it.what == steamvr::RepairItem::What::Updated ? ver.c_str() : "", N(it.message).c_str());
-        if (it.what == steamvr::RepairItem::What::Repaired) AddUnique(repaired, it.game);
-        if (it.what == steamvr::RepairItem::What::Updated) AddUnique(updated, it.game);
+    std::vector<std::wstring> names;
+    for (const steamvr::RepairNeed& n : steamvr::FindRepairs(games, installDir, ver)) {
+        LOGI("tray: steamvr: repair check (%s): %s, %s: needs repair (%s)", why, N(n.game).c_str(), N(n.dir).c_str(),
+             steamvr::RepairWhyName(n.why));
+        AddUnique(names, n.game);
+        ++rc.folders;
     }
-    LOGI("tray: steamvr: repair (%s): %zu enabled game(s) checked, %zu folder(s) acted on", why, games.size(), items.size());
-    auto join = [](const std::vector<std::wstring>& v) {
-        std::wstring s;
-        for (size_t i = 0; i < v.size(); ++i) s += (i ? (i + 1 == v.size() ? L" and " : L", ") : L"") + v[i];
-        return s;
-    };
-    std::wstring text;
-    if (!repaired.empty()) text = L"SteamVR recording repaired for " + join(repaired) + L" after a game update";
-    if (!updated.empty()) text += (text.empty() ? L"" : L"; ") + std::wstring(L"SteamVR recorder updated for ") + join(updated);
-    return text;
+    rc.games = names.size();
+    std::sort(names.begin(), names.end(), [](const std::wstring& a, const std::wstring& b) { return _wcsicmp(a.c_str(), b.c_str()) < 0; });
+    for (size_t i = 0; i < names.size(); ++i) rc.names += (i ? (i + 1 == names.size() ? L" and " : L", ") : L"") + names[i];
+    LOGI("tray: steamvr: repair check (%s): %zu enabled game(s) checked, %zu need a repair -- nothing changed (Repair in the SteamVR "
+         "games window does it)", why, games.size(), rc.games);
+    return rc;
+}
+
+std::vector<std::wstring> EnabledGameNames(const std::wstring& installDir) {
+    std::vector<std::wstring> out;
+    std::lock_guard<std::mutex> lk(g_iniM);
+    for (const GameEntry& g : LoadGamesAt(IniPathFor(installDir))) out.push_back(g.name);
+    std::sort(out.begin(), out.end(), [](const std::wstring& a, const std::wstring& b) { return _wcsicmp(a.c_str(), b.c_str()) < 0; });
+    return out;
+}
+
+std::wstring DisableAllGames(const std::wstring& installDir, bool testMode, const char* why, bool* allOk) {
+    const DisableAllOutcome o = DisableAllCore(installDir, testMode, why);
+    if (allOk) *allOk = o.done == o.games;
+    if (g_dlg) PostMessageW(g_dlg, WM_SVR_SCANDONE, 0, 0);   // the open window re-reads the list
+    std::wstring t = L"SteamVR recording disabled for " + std::to_wstring(o.done) + L" of " + std::to_wstring(o.games) + L" game(s).";
+    if (o.done != o.games) t += L"\n\n" + o.results + L"\nClose the game and SteamVR, then use SteamVR games... -> Disable all.";
+    return t;
 }
 
 void ShowDialog(const Options& o) {
@@ -978,8 +1154,10 @@ void ShowDialog(const Options& o) {
     }
     g_opt = o;
     g_done = false;
-    g_status = AutoRepair(o.installDir, "window opened");
-    if (!g_status.empty()) g_status += L".";
+    {   // read-only: the rows show "Needs repair", the Repair button acts
+        const RepairCheck rc = CheckRepairs(o.installDir, "window opened");
+        g_status = rc.games ? std::to_wstring(rc.games) + L" game(s) need a repair (" + rc.names + L"): click Repair." : std::wstring();
+    }
     NONCLIENTMETRICSW ncm{sizeof(ncm)};
     if (SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0)) g_font = CreateFontIndirectW(&ncm.lfMessageFont);
     static bool registered = false;
