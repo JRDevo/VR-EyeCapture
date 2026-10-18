@@ -82,6 +82,7 @@ struct Config {
     // tray only reads the Run value, as before).
     bool         startWithWindows = false;
     bool         startWithWindowsSet = false;
+    int          uiTheme = 0;            // theme (tray only): look of the tray's windows and menus, 0 = system, 1 = light, 2 = dark
     bool         swapEyes = false;       // swap_eyes: put the right eye in the left half (for players that flip SBS)
     bool         recordOverlays = true;  // record_overlays: composite the game's / mods' overlay layers into the recording
     bool         liveShare = true;       // live_share: hand the eyes (re-projected like a recording, or raw) to a live viewer (OBS plugin) when one appears (live_share.h)

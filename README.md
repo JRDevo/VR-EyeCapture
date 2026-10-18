@@ -49,10 +49,10 @@ games with Direct3D 11.
   (`beeps = 0` turns them off, e.g. when they end up in the recorded audio).
   It can be any key, a mouse side button, an Xbox controller button or a wheel / joystick button (or several of them).
 - **Tray app with a main window** — every option has a help text, no `config.ini` editing needed.
-- **One-click registration** — the tray registers the layer for you (one UAC prompt); **Register** / **Unregister** are in its menu.
-- **Tray menu** — Start / Stop recording, Open captures folder, Convert last recording now, Open VR EyeCapture, Open log,
-  Pause / Resume / Cancel conversion (with its progress and time left) while one runs,
-  Edit config, Register for VR games... / Unregister from VR games..., SteamVR games..., Exit.
+- **One-click registration** — the tray registers the layer for you (one UAC prompt); **Register** / **Unregister** are in the app window (Advanced > Tools).
+- **Tray menu** — short, in the app's light / dark theme: Start / Stop recording, Open VR EyeCapture, Open captures folder,
+  Convert last recording now, SteamVR games..., Exit, and Pause / Resume / Cancel conversion (with its progress and time
+  left) while one runs. Everything else is in the app window.
 - **Tray icon** — the goggles logo with a status dot (grey, green, red, amber, blue); the lenses swap colours while it
   records or converts; the tooltip shows game, resolution, fps, dropped frames and elapsed time.
 - **Start with Windows** — optional, off by default (app window → Advanced).
@@ -143,12 +143,8 @@ conversion queue); **right-click** it for the menu.
 | **Start recording** / **Stop recording** | Starts or stops a recording in the running VR game. Same as your hotkey (shown next to it). Greyed out while no game is running. |
 | **Open captures folder** | Opens the folder with your recordings (`Videos\VR EyeCapture` unless you set another one). |
 | **Convert last recording now** | Converts the newest recording at once (the YouTube `.mkv`, the 8K copy, the flat copy, whatever you switched on), even if conversion is set to wait until the game closes or to "When I say". |
-| **Convert a recording...** | Opens a file dialog in the captures folder; every MP4 you pick (several with Ctrl / Shift) is converted at once, one after another, whatever the Convert setting says. Only recordings are accepted: a converted file (`.mkv`, `_FLAT.mp4`) or any other file is refused with a "Not a recording" balloon, so it can never be re-converted and deleted. The same button is in the app window. |
-| **Tag a video as 3D** | A submenu for videos made elsewhere (for example a side-by-side OBS recording): **Side by side...** or **Top / bottom...** opens a file dialog in your Videos folder (`.mkv`, `.mp4`, `.mov`, several allowed). Each file is copied, without re-encoding, into `<name>_3D.mkv` next to it with the 3D tag YouTube reads (never overwriting; `(2)` is added if the name exists). It runs in the background, does not disturb a running conversion, and a balloon tells you when it is done. |
-| **Open log** | Opens the recorder's log, `eye_capture.log` in `%LOCALAPPDATA%\VR EyeCapture\logs` (the tray's own log is `tray.log` next to it). Useful when something does not work, and for bug reports. |
 | **Open VR EyeCapture** (bold; same as left-click) | Opens the app window (below). |
-| **Edit config** | Opens `config.ini` in Notepad, for the few keys the window does not show. |
-| **Register for VR games...** / **Unregister from VR games...** | Tells Windows that OpenXR games may load the recorder (one administrator prompt), or removes that again. Needed once. |
+| *(moved to the app window)* | **Convert a recording...** (Export group), **Open config.ini** (footer), and in Advanced > **Tools:** **Open log**, **Tag as 3D...** (side by side / top / bottom: copies a video made elsewhere, e.g. an OBS recording, into `<name>_3D.mkv` with the 3D tag YouTube reads, without re-encoding), **Register for VR games...** / **Unregister from VR games...** (one administrator prompt; needed once, the installer does it). |
 | **SteamVR games...** | The SteamVR (OpenVR) games in your Steam library, each with a check box: tick to record it, untick to undo; **Enable all**, **Add a game by exe...** for other games ([SteamVR games](#steamvr-games-virtual-desktop--steamvr)). |
 | **Exit** | Closes the tray app. Games started after that are not recorded. A running conversion is cancelled (its half-written file is deleted) and a waiting one is dropped; the MP4 stays. |
 
@@ -167,6 +163,7 @@ Point at any setting and the **Description** box at the bottom explains it. **Sa
 | **Export** | **YouTube output**: the plain 3D MKV, the sharper 8K 3D MKV (slower to make), both, or none. **8K bitrate**: 100, 150 (default) or 200 Mbit/s for the 8K file (NVIDIA encoder). **8K codec**: HEVC (default) or AV1 (RTX 40 / 50; sharper at the same bitrate, falls back to HEVC). **Convert**: immediately, when the VR session ends, when the game exits (so it does not cost frame rate while you play), or *When I say* (never on its own). **Convert a recording...**: pick MP4s to convert next. **Add to queue...**: pick MP4s that wait in the Conversions list until you click Start / Start all. Both use the Export settings the window shows at that moment (saved or not) for those files. **Also create a 2D (flat) video** for people without a headset. **Keep original MP4**. **Output layout**: how the two eyes are packed for YouTube (top/bottom, half height is what YouTube likes; greyed for VR180 / VR360). **Eye crop**: 16:9 widescreen (recommended; plays in the Quest YouTube app and gets 8K), 4:3 (taller view), 4:3 padded to 16:9 (the taller view with black side bars, 7680x4320 so it still gets 8K) or none (full eye, but tall videos may crash the Quest YouTube player). **Record directly in the YouTube layout (no re-encode)** (`record_for_youtube`): the recording itself is made in that output layout and eye crop at the 8K size, so the tray only copies it into the `.mkv` (seconds) and that `.mkv` is the upload; the 8K bitrate / codec are greyed then (no separate 8K file), and the full side-by-side picture is not kept. Flat projection only. |
 | **Conversions** | Live view of the conversion queue (refreshes twice a second). **Running**: the file, its format, the step (MKV, flat or 8K), percent, time left, or why it waits; a progress bar; **Pause** / **Resume** and **Cancel** (when the running conversion waits for the Convert setting, Pause reads **Run now** and starts it). **Waiting**: the conversions in the order they run, each as `<file> - <format> - <state>`, e.g. `rec.mp4 - 8K AV1 100M, 4:3, tb_half - waiting for you`. States: *next*, *waiting for you* (added with Add to queue, or restored after a restart: waits for Start), *waiting: converts when the game closes* (the Convert setting), *queued*. Automatic recordings show *(current settings)*: they use the saved settings as they are when their conversion starts. Select one or several (Ctrl / Shift) and click **Start** (they run next, in order), **Start all** (every waiting one, in list order), or **Remove** (the MP4 stays). The list is saved in `queue.json` (in `%LOCALAPPDATA%\VR EyeCapture`); after a restart every entry comes back as *waiting for you*. |
 | **Advanced** | **SteamVR games**: how SteamVR games are recorded (per game, quick mode or off; the same setting as in the SteamVR games window). **Log level** (how much goes into the log) and **Start with Windows** (starts the tray app when you log in). |
+| Theme | Top right: **Same as Windows** (default), **Light** or **Dark**, for this window, the SteamVR games window and the tray menu (`theme` in `config.ini`). Applies on Save. |
 | Buttons | **Open config.ini**, **Restore Defaults** (fills in the defaults, nothing saved until Save), **SteamVR games...**, **Save** (saves; the window stays open), **Minimize**, **Exit** (closes the window; asks first when there are unsaved changes; the tray keeps running). The window has no title bar: drag it by the header (the logo row) or the free space at the bottom. |
 
 </details>
@@ -295,7 +292,7 @@ If the game crashes or is killed while recording, the MP4 is lost (it is only fi
 
 **Tray icon** (the status dot): grey goggles = no VR game, green = ready, red = recording (the lenses swap colours),
 amber = starting / finalizing / failed, blue = converting a finished recording, or recordings waiting to be converted while no game is running (see "Upload to YouTube").
-Left-click: the app window. Right-click: Start / Stop recording, Open captures folder, Convert last recording now, Open log, Edit config, Exit, and while a
+Left-click: the app window. Right-click: Start / Stop recording, Open VR EyeCapture, Open captures folder, Convert last recording now, SteamVR games..., Exit, and while a
 conversion runs Pause / Resume / Cancel conversion. The tooltip shows game, resolution, fps, dropped frames and elapsed time, and
 "converting <file> (MKV) 42% - about 6 min left" / "paused: <file> ..." / "last: <file>.mkv ready". `EyeCaptureTray.exe --start | --stop | --toggle | --status` does the
 same from a script or a Stream Deck button (`--start` / `--toggle` print an error if the tray app is not running);
@@ -759,8 +756,8 @@ The plugin is a separate download. It is not in the main zip, so you only get it
 - Panels in the live view need extra video memory (about 200 MB per panel format, separate from a recording's).
 - OBS must use the Direct3D 11 renderer (the Windows default) and the same GPU as the game. OBS may run as
   administrator; the game must not run as administrator when OBS does not.
-- OBS does not write the 3D tags. A side-by-side OBS recording plays flat on YouTube. For 3D uploads, right-click the
-  tray icon -> **Tag a video as 3D** -> **Side by side...** and pick the OBS file: it makes a `_3D.mkv` copy (no
+- OBS does not write the 3D tags. A side-by-side OBS recording plays flat on YouTube. For 3D uploads, open the app
+  window -> Advanced -> **Tag as 3D...** -> **Side by side...** and pick the OBS file: it makes a `_3D.mkv` copy (no
   re-encode, takes seconds) that YouTube shows as 3D. The tray's own recording needs no such step.
 - Streaming sites show a side-by-side stream as two pictures, so stream one eye.
 
@@ -864,7 +861,7 @@ the frame layout it detected (`TWO_SWAPCHAINS`, `TEXTURE_ARRAY`, `ONE_SWAPCHAIN_
 - **Nothing happens on the hotkey**: first make sure `EyeCaptureTray.exe` was running before the game started; if not the
   log says `EyeCaptureTray not running ... layer dormant for this session`. Then check the log has a `session ... created: graphics API D3D11 -> capture AVAILABLE`
   line for the game. No `loaded into <game>.exe` line at all = the layer is not registered (the tray tooltip then says
-  "Not registered for VR games": right-click the tray icon → **Register for VR games...**) or the game does not use
+  "Not registered for VR games": app window → Advanced → **Register for VR games...**) or the game does not use
   OpenXR. Registration problems are logged in `logs\tray.log` (`tray: registration: ...`, `tray: --register ...`).
   A controller or wheel button: run `EyeCaptureTray.exe --inputs` in a command prompt and press the button; it prints the
   exact text to put in `hotkey` (e.g. `Joy:Thrustmaster T300RS Racing Wheel:Button3`). `logs\tray.log` lists the devices
@@ -946,7 +943,7 @@ If something goes wrong, [open an issue](../../issues/new/choose) on this GitHub
 Without the logs I usually can't tell what happened.
 
 **Files to attach** — the logs are in `%LOCALAPPDATA%\VR EyeCapture\logs` (paste that into the Explorer address bar, or
-tray menu → **Open log**):
+app window → Advanced → **Open log**):
 
 - **`logs\eye_capture.log`** — **required, always.**
 - **`logs\tray.log`** — **required.**

@@ -1538,15 +1538,44 @@ void PaintBackground(HWND, HDC dc, const RECT& rc) {
     DeleteObject(b);
 }
 
+void ThemeMenus() {
+    typedef int(WINAPI * PFN_SetPreferredAppMode)(int);   // 2 = ForceDark, 3 = ForceLight
+    typedef void(WINAPI * PFN_FlushMenuThemes)();
+    static PFN_SetPreferredAppMode setMode = nullptr;
+    static PFN_FlushMenuThemes flush = nullptr;
+    static bool looked = false;
+    if (!looked) {
+        looked = true;
+        if (WindowsBuildAtLeast(18362)) {
+            if (HMODULE ux = LoadLibraryExW(L"uxtheme.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32)) {
+                setMode = (PFN_SetPreferredAppMode)GetProcAddress(ux, MAKEINTRESOURCEA(135));
+                flush = (PFN_FlushMenuThemes)GetProcAddress(ux, MAKEINTRESOURCEA(136));
+            }
+        }
+    }
+    if (!setMode) return;
+    setMode(g_theme.dark ? 2 : 3);
+    if (flush) flush();
+}
+
 bool OnSettingChange(HWND top) {
     if (!Reload()) return false;
+    Repaint(top);
+    return true;
+}
+
+void Repaint(HWND top) {
+    if (!top) return;
     ApplyWindow(top);
     EnumChildWindows(top, [](HWND c, LPARAM) -> BOOL {
+        wchar_t cls[16] = L"";
+        GetClassNameW(c, cls, 16);
+        if (!_wcsicmp(cls, L"Edit") || !_wcsicmp(cls, L"ListBox"))   // their scroll bars
+            SetWindowTheme(c, g_theme.dark ? L"DarkMode_Explorer" : nullptr, nullptr);
         SetWindowPos(c, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
         InvalidateRect(c, nullptr, TRUE);
         return TRUE;
     }, 0);
-    return true;
 }
 
 void SetDim(HWND stat, bool dim) {

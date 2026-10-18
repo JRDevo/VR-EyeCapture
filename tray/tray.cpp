@@ -56,6 +56,7 @@
 #include <string>
 #include <vector>
 #include "config.h"
+#include "glass.h"
 #include "input.h"
 #include "install.h"
 #include "postprocess.h"
@@ -76,7 +77,8 @@ const UINT WM_TAG3D = WM_APP + 8;           // a "Tag a video as 3D" thread has 
 const UINT WM_OPEN_STEAMVR = WM_APP + 9;    // open the "SteamVR games" window (= the menu item; tests post it)
 const UINT WM_STEAMVR_REPAIR = WM_APP + 10; // posted once at start: CHECK the SteamVR games the user enabled (read-only; one
                                             // clickable balloon when some need a repair -- the click opens the window)
-const UINT WM_UNREGISTER = WM_APP + 11;     // "Unregister from VR games..." (= the menu item; tests post it)
+const UINT WM_UNREGISTER = WM_APP + 11;     // "Unregister from VR games..." (the app window's Tools button; tests post it)
+const UINT WM_REGISTER = WM_APP + 12;       // "Register for VR games..." (the app window's Tools button)
 const UINT kTimer = 1;
 const UINT kTipTimer = 2;     // one-shot: end of the "settings saved" tooltip
 enum : UINT { ID_TOGGLE = 100, ID_FOLDER, ID_CONVERT, ID_LOG, ID_SETTINGS, ID_CONFIG, ID_EXIT, ID_REGISTER, ID_UNREGISTER,
@@ -1253,6 +1255,12 @@ void InstallQueueHooks() {
     };
     h.gameFps = [] { return g_live ? g_st.fps : 0u; };
     settings::SetQueueHooks(h);
+    settings::ToolHooks t;   // the app window's "Tools:" row (these were tray menu items)
+    t.openLog = [] { OpenPath(g_live && g_st.logPath[0] ? std::wstring(g_st.logPath) : LogsDir(g_exeDir) + L"\\eye_capture.log"); };
+    t.tag3d = [](HWND owner, bool tb) { TagAsStereo(owner, "app window", tb); };
+    t.regState = [] { return !g_regEnabled ? 0 : RegOk() ? 2 : 1; };
+    t.toggleReg = [] { PostMessageW(g_wnd, RegOk() ? WM_UNREGISTER : WM_REGISTER, 0, 0); };   // posted: it may ask / show UAC
+    settings::SetToolHooks(t);
     settings::SetOpenSteamVrHook([] { PostMessageW(g_wnd, WM_OPEN_STEAMVR, 0, 0); });   // posted (the window runs its own message loop, which must not nest in the Settings button handler); the Settings window's "SteamVR games..." button = the tray menu item
 }
 
@@ -1286,26 +1294,11 @@ void ShowMenu() {
     if (g_live && g_st.hotkey[0]) label += std::wstring(L"\t") + g_st.hotkey;
     AppendMenuW(m, MF_STRING | ((g_live && state != ECS_STOPPING) ? 0 : MF_GRAYED), ID_TOGGLE, label.c_str());
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(m, MF_STRING, ID_FOLDER, L"Open captures folder");
-    AppendMenuW(m, MF_STRING, ID_CONVERT, L"Convert last recording now");
-    AppendMenuW(m, MF_STRING, ID_CONVERT_PICK, L"Convert a recording...");
-    {
-        HMENU tag = CreatePopupMenu();   // destroyed with the parent menu
-        AppendMenuW(tag, MF_STRING, ID_TAG3D_SBS, L"Side by side...");
-        AppendMenuW(tag, MF_STRING, ID_TAG3D_TB, L"Top / bottom...");
-        AppendMenuW(m, MF_POPUP, (UINT_PTR)tag, L"Tag a video as 3D");
-    }
-    AppendMenuW(m, MF_STRING, ID_LOG, L"Open log");
+    // short: the rest (Convert a recording..., Tag as 3D, Open log, config, Register) is in the app window
     AppendMenuW(m, MF_STRING, ID_SETTINGS, L"Open VR EyeCapture");
     SetMenuDefaultItem(m, ID_SETTINGS, FALSE);   // bold: left-click on the icon does the same
-    AppendMenuW(m, MF_STRING, ID_CONFIG, L"Edit config");
-    if (g_regEnabled) {
-        AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-        if (RegOk()) AppendMenuW(m, MF_STRING, ID_UNREGISTER, L"Unregister from VR games...");
-        else AppendMenuW(m, MF_STRING, ID_REGISTER, L"Register for VR games...");
-    } else {
-        AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-    }
+    AppendMenuW(m, MF_STRING, ID_FOLDER, L"Open captures folder");
+    AppendMenuW(m, MF_STRING, ID_CONVERT, L"Convert last recording now");
     AppendMenuW(m, MF_STRING, ID_STEAMVR, L"SteamVR games...");
     // installed copy: the uninstaller (the same as Windows Settings > Apps > VR EyeCapture > Uninstall)
     if (IsInstalledCopy(g_exeDir) && GetFileAttributesW((g_exeDir + L"\\unins000.exe").c_str()) != INVALID_FILE_ATTRIBUTES)
@@ -1315,6 +1308,8 @@ void ShowMenu() {
     POINT pt;
     GetCursorPos(&pt);
     SetForegroundWindow(g_wnd);
+    glass::Reload();       // Windows may have switched light / dark since the last menu
+    glass::ThemeMenus();
     const UINT cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, g_wnd, nullptr);
     DestroyMenu(m);
     Config cfg;
@@ -1430,8 +1425,11 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     }
-    case WM_UNREGISTER:   // = menu "Unregister from VR games..." (tests post it)
+    case WM_UNREGISTER:   // the app window's "Unregister from VR games..." (tests post it)
         UnregisterFlow();
+        return 0;
+    case WM_REGISTER:     // the app window's "Register for VR games..."
+        if (!g_regBusy) RegisterFlow(false);
         return 0;
     case WM_PAUSE_JOB:   // = menu "Pause / Resume conversion" (tests post it)
         PauseJob("WM_APP+5");
@@ -1801,6 +1799,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
         Config cfg;
         LoadConfig(g_exeDir, cfg);
         elog::SetLevel(cfg.logLevel);   // log_level = none silences tray.log from here on
+        glass::Init();                  // the tray menu and windows: the saved theme (system / light / dark)
+        if (cfg.uiTheme) glass::ForceDark(cfg.uiTheme == 2 ? 1 : 0);   // system: follow Windows (or EYECAP_TEST_GLASS in tests)
         std::wstring how;
         const std::wstring ff = pp::ResolveFfmpeg(cfg, g_exeDir, how);
         if (ff.empty()) LOGW("tray: ffmpeg not found at start (%s)", elog::Narrow(how).c_str());

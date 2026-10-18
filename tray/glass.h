@@ -71,9 +71,15 @@ void ForceMica(int mode);
 void ApplyWindow(HWND top);
 // Fills `rc` of a top-level window's client with the background: transparent (alpha 0, the Mica shows) or solid.
 void PaintBackground(HWND top, HDC dc, const RECT& rc);
+// Popup menus (TrackPopupMenu) of this process in the current light / dark theme. Call right before showing one. Uses
+// uxtheme's unnamed SetPreferredAppMode / FlushMenuThemes (ordinals 135 / 136, Windows 10 1903+, what Explorer uses);
+// without them menus stay light.
+void ThemeMenus();
 // From the window procedure of a top-level glass window on WM_SETTINGCHANGE / WM_DWMCOLORIZATIONCOLORCHANGED /
 // WM_THEMECHANGED: reloads the theme and repaints. Returns true when the theme changed.
 bool OnSettingChange(HWND top);
+// After ForceDark: re-applies the window look and repaints every control in it (also used by OnSettingChange).
+void Repaint(HWND top);
 
 // Grey text (hints, captions) / an explicit colour for a kStatic (CLR_INVALID = the theme's normal text colour).
 void SetDim(HWND stat, bool dim);

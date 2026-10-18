@@ -89,6 +89,7 @@ const Field kFields[] = {
     {L"eye_crop",          L"post_processing", Kind::Combo, ID_EYECROP,    L"16:9|4:3|4:3pad|none",
      L"16:9 (recommended)|4:3|4:3, padded to 16:9 (8K tier, black side bars)|None (full eye)"},
     {L"log_level",         L"debug",           Kind::Combo, ID_LOGLEVEL,   L"none|error|warn|info|debug", L"Off|Errors|Warnings|Information|Debug"},
+    {L"theme",             L"capture",         Kind::Combo, ID_THEME,      L"system|light|dark", L"Same as Windows|Light|Dark"},
     {L"start_with_windows", L"capture",        Kind::Check, ID_AUTOSTART,  nullptr},   // last: the registry is applied after the file (DoSave)
 };
 
@@ -156,7 +157,8 @@ std::wstring Norm(const std::wstring& key, const std::wstring& raw) {
         const std::wstring l = Lower(v);
         return l == L"warning" ? L"warn" : (l == L"off" ? L"none" : l);
     }
-    if (key == L"projection" || key == L"fill" || key == L"layout_3d" || key == L"post_when" || key == L"eye_crop") return Lower(v);
+    if (key == L"projection" || key == L"fill" || key == L"layout_3d" || key == L"post_when" || key == L"eye_crop" || key == L"theme")
+        return Lower(v);
     if (key == L"hotkey") {
         Hotkey h;
         if (ParseHotkey(v, h)) return Lower(h.text);   // canonical list (device names keep their inner spaces)
@@ -328,6 +330,7 @@ KeyValues FromConfig(const Config& c) {
     kv.emplace_back(L"indicator_opacity", FloatText(c.indicator.opacity));
     kv.emplace_back(L"audio_enabled", B(c.audioEnabled));
     kv.emplace_back(L"audio_device", c.audioDevice);
+    kv.emplace_back(L"theme", c.uiTheme == 1 ? L"light" : c.uiTheme == 2 ? L"dark" : L"system");
     kv.emplace_back(L"start_with_windows", B(c.startWithWindows));
     kv.emplace_back(L"steamvr_mode", elog::Widen(SteamVrModeKey(c.steamvr.mode)));
     kv.emplace_back(L"post_mkv", B(c.postMkv));
@@ -508,6 +511,7 @@ std::vector<std::pair<int, std::wstring>> g_customValue;   // combo id -> the fi
 std::function<void(const std::vector<std::wstring>&)> g_onSaved;
 std::function<void()> g_openSteamVr;      // SetOpenSteamVrHook
 QueueHooks          g_hooks;                // conversion worker callbacks (SetQueueHooks)
+ToolHooks           g_tools;                // the Advanced "Tools:" row (SetToolHooks)
 std::vector<unsigned long long> g_qIds;     // job ids of the waiting-list items, same order as the list box
 std::vector<std::wstring> g_qItems;         // their texts (the list is only rebuilt when this changes: no flicker)
 bool                g_qRunNow = false;      // the Pause button reads "Run now" (the running job waits for the hold)
@@ -542,6 +546,7 @@ void AdjustFrame(RECT& r, DWORD style) {
 }
 void Relayout();
 void TryClose();
+void ApplyGlassTheme();
 
 
 // ---- help texts: hover tooltip + the "Description" panel. Written for people, not for the log: a short first line that says what
@@ -753,6 +758,16 @@ const Help kHelp[] = {
                    HELP_LI L"If the entry goes missing (a cleaner tool, a moved folder), the app puts it back at its next start."
                    HELP_LI L"The switch in Task Manager > Startup apps belongs to Windows: this app never changes it." HELP_BR
                    L"Clear this before you delete the app's folder."},
+    {ID_OPENLOG, L"Opens the log file (logs\\eye_capture.log). Useful when something does not work, and for bug reports."},
+    {ID_TAG3D, L"Marks a video you already have as 3D, so YouTube and VR players show it in 3D." HELP_BR
+               L"Pick how the eyes are placed in it (side by side or top / bottom), then the video. A tagged copy (.mkv) is made next to it; "
+               L"the video itself is not re-encoded."},
+    {ID_REGLAYER, L"Turns recording of OpenXR games on or off for this PC." HELP_BR
+                  L"The installer does this for you. Use it only to repair or to switch it off. Windows asks for administrator rights."},
+    {ID_THEME, L"The look of this window, the SteamVR games window and the tray menu." HELP_BR
+               L"\u2022 Same as Windows (default): follows the Windows light / dark setting."
+               HELP_LI L"Light or Dark: always that, whatever Windows uses." HELP_BR
+               L"Changes when you click Save."},
     {ID_OPENINI, L"Opens config.ini in a text editor. It lists every setting, with comments."},
     {ID_DEFAULTS, L"Puts every field back to its default. Nothing is saved until you click Save."},
     {ID_OPENSTEAMVR, L"Opens the SteamVR games window: tick the SteamVR games to record, or choose Quick mode. OpenXR games need nothing there."},
@@ -1570,8 +1585,21 @@ pp::JobFormat WindowFormat() {
     return f;
 }
 
+// The Advanced "Tools:" row: greyed without its hook; the register button reads Register / Unregister (hidden when the
+// tray does not handle registration, e.g. test mode). Called with the queue view (500 ms timer).
+void UpdateToolButtons() {
+    EnableWindow(Ctl(ID_OPENLOG), (bool)g_tools.openLog);
+    EnableWindow(Ctl(ID_TAG3D), (bool)g_tools.tag3d);
+    const int rs = g_tools.regState ? g_tools.regState() : 0;
+    if (HWND rb = Ctl(ID_REGLAYER)) {
+        ShowWindow(rb, rs ? SW_SHOWNA : SW_HIDE);
+        SetTextIfChanged(rb, rs == 2 ? L"Unregister from VR games..." : L"Register for VR games...");
+    }
+}
+
 void UpdateQueueView() {
     if (!g_dlg) return;
+    UpdateToolButtons();
     EnableWindow(Ctl(ID_CONVERTPICK), (bool)g_hooks.pickFiles);
     EnableWindow(Ctl(ID_ADDQUEUE), (bool)g_hooks.pickFiles);
     if (!g_hooks.state || !g_hooks.queued) {
@@ -1748,6 +1776,14 @@ void ApplyCaptured(const std::wstring& t) {
     ArmCapture(0);
 }
 
+// The saved "Theme" choice: glass follows Windows (system) or is forced light / dark; the window repaints at once.
+void ApplyThemeChoice() {
+    const int sel = (int)SendMessageW(Ctl(ID_THEME), CB_GETCURSEL, 0, 0);   // 0 system, 1 light, 2 dark (the options' order)
+    glass::ForceDark(sel == 1 ? 0 : sel == 2 ? 1 : -1);
+    glass::Repaint(g_dlg);
+    ApplyGlassTheme();
+}
+
 // The window's values without steamvr_mode while it is still the loaded one: the SteamVR games window may change that key in
 // the file while this window is open (DoSave and the unsaved-changes check both use this).
 KeyValues ComparableValues() {
@@ -1785,6 +1821,7 @@ bool DoSave() {
         } else
             Report(kWindowTitle, L"The Start with Windows setting could not be changed:\n" + err);
     }
+    ApplyThemeChoice();
     if (g_onSaved) g_onSaved(r.changed);
     SetWindowTextW(Ctl(ID_SAVE), L"Saved");
     SetTimer(g_dlg, kSavedTimer, 1500, nullptr);
@@ -1896,6 +1933,21 @@ void CommandHandler(int id, int code) {
     case ID_CANCEL: TryClose(); break;
     case ID_MINIMIZE: ShowWindow(g_dlg, SW_MINIMIZE); break;
     case ID_OPENSTEAMVR: if (g_openSteamVr) g_openSteamVr(); break;
+    case ID_OPENLOG: if (code == BN_CLICKED && g_tools.openLog) g_tools.openLog(); break;
+    case ID_REGLAYER: if (code == BN_CLICKED && g_tools.toggleReg) g_tools.toggleReg(); break;
+    case ID_TAG3D:
+        if (code == BN_CLICKED && g_tools.tag3d) {   // a small menu under the button: which 3D layout the video has
+            RECT br{};
+            GetWindowRect(Ctl(ID_TAG3D), &br);
+            HMENU m = CreatePopupMenu();
+            AppendMenuW(m, MF_STRING, 1, L"Side by side...");
+            AppendMenuW(m, MF_STRING, 2, L"Top / bottom...");
+            glass::ThemeMenus();
+            const UINT pick = TrackPopupMenu(m, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN, br.left, br.bottom, 0, g_dlg, nullptr);
+            DestroyMenu(m);
+            if (pick) g_tools.tag3d(g_dlg, pick == 2);
+        }
+        break;
     case ID_OPENINI: ShellExecuteW(nullptr, L"open", g_path.c_str(), nullptr, nullptr, SW_SHOWNORMAL); break;
     case ID_DEFAULTS: {
         Config d;
@@ -2320,7 +2372,7 @@ int BuildControls(HWND dlg, Builder::Pass pass, int clientW, int clientH, int sc
     // shorter column's groups get the difference (left: leftEx on Stereo 3D; right: spare, below).
     const int kExportRows = 10, kRecordingRows = 7, kVideoRows = 5, kStereoRows = 4;
     const int leftH = groupH(kRecordingRows) + gap + groupH(kVideoRows) + gap + groupH(kStereoRows) + gap;
-    const int rightH = groupH(4) + gap + groupH(kExportRows) + gap + groupH(2) + gap;
+    const int rightH = groupH(4) + gap + groupH(kExportRows) + gap + groupH(3) + gap;
     const int leftEx = rightH > leftH ? rightH - leftH : 0;
     int y = 6;
 
@@ -2332,7 +2384,12 @@ int BuildControls(HWND dlg, Builder::Pass pass, int clientW, int clientH, int sc
         const int tw = b.TextW(t) + 6;
         const int hx = gx + logoW + 24, hy = y + (32 - 16) / 2;
         b.Make(L"STATIC", t, SS_LEFT | SS_NOPREFIX, hx, hy, tw, 16, -1);
-        keep(g_dim, b.Make(L"STATIC", g_path.c_str(), SS_LEFT | SS_NOPREFIX | SS_PATHELLIPSIS, hx + tw, hy, fullW - (logoW + 24 + tw), 16, -1));
+        // the theme drop-down at the right end of the header; the config path takes the room left of it (path ellipsis)
+        const int thW = b.TextW(L"Same as Windows") + GetSystemMetrics(SM_CXVSCROLL) + 14, thLw = b.TextW(L"Theme:") + 6;
+        const int thX = gx + fullW - thW, pathW = thX - thLw - 16 - (hx + tw);
+        keep(g_dim, b.Make(L"STATIC", g_path.c_str(), SS_LEFT | SS_NOPREFIX | SS_PATHELLIPSIS, hx + tw, hy, pathW > 0 ? pathW : 0, 16, -1));
+        b.Label(thX - thLw, y + 3, thLw, L"Theme:", ID_THEME);
+        b.Combo(ID_THEME, thX, y + 3, thW);
     }
     y += 32 + 4;
     const int yTop = y;
@@ -2581,7 +2638,7 @@ int BuildControls(HWND dlg, Builder::Pass pass, int clientW, int clientH, int sc
     y += groupH(kExportRows) + ex2 + gap;
 
     // ---- Advanced
-    b.Group(gx, y, gw, groupH(2) + ex3, L"Advanced");
+    b.Group(gx, y, gw, groupH(3) + ex3, L"Advanced");
     r = y + top;
     b.HiddenCheck(ID_REQTRAY);   // require_tray stays a config.ini key (default 1); the tray is required anyway, so no checkbox
     b.Label(lx, r, labelW, L"SteamVR games:", ID_SVRMODE);
@@ -2594,7 +2651,18 @@ int BuildControls(HWND dlg, Builder::Pass pass, int clientW, int clientH, int sc
         b.Label(sx, r, sw, L"Startup:", ID_AUTOSTART);
         b.Check(ID_AUTOSTART, sx + sw, r, L"Start with Windows");
     }
-    y += groupH(2) + ex3 + gap;
+    r += pitch;
+    b.Label(lx, r, labelW, L"Tools:", ID_OPENLOG);
+    {   // moved here from the tray menu: Open log, Tag as 3D (a small menu: side by side / top-bottom), Register / Unregister
+        const int w1 = b.ButtonW(L"Open log"), w2 = b.ButtonW(L"Tag as 3D...");
+        int w3 = b.ButtonW(L"Register for VR games...");
+        const int w3b = b.ButtonW(L"Unregister from VR games...");
+        if (w3b > w3) w3 = w3b;
+        b.Button(ID_OPENLOG, cx, r, w1, L"Open log");
+        b.Button(ID_TAG3D, cx + w1 + 8, r, w2, L"Tag as 3D...");
+        b.Button(ID_REGLAYER, cx + w1 + w2 + 16, r, w3, L"Register for VR games...");
+    }
+    y += groupH(3) + ex3 + gap;
     y = yLeftEnd > y ? yLeftEnd : y;
 
     // ---- Conversions (full width; the same two-column grid as the groups above): left = the running job (three status lines:
@@ -2888,6 +2956,7 @@ HWND DialogWindow() { return g_dlg; }
 
 void SetQueueHooks(const QueueHooks& hooks) { g_hooks = hooks; }
 void SetOpenSteamVrHook(std::function<void()> hook) { g_openSteamVr = std::move(hook); }
+void SetToolHooks(const ToolHooks& hooks) { g_tools = hooks; }
 
 void NotifyQueueChanged() {
     if (g_dlg) PostMessageW(g_dlg, WM_QUEUE_POKE, 0, 0);

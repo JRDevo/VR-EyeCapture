@@ -64,6 +64,14 @@ void SetQueueHooks(const QueueHooks& hooks);
 // The footer button "SteamVR games..." calls this (the tray sets its own "SteamVR games" opener, so there is one window in one process;
 // it brings the window to the front when open). Unset (settings_test without a tray) = the button is greyed.
 void SetOpenSteamVrHook(std::function<void()> hook);
+// The Advanced group's "Tools:" row (these used to be tray menu items). Each unset hook greys its button.
+struct ToolHooks {
+    std::function<void()>               openLog;      // opens logs\eye_capture.log
+    std::function<void(HWND, bool)>     tag3d;        // file dialog (owner), then tags the picked video: false = side by side, true = top / bottom
+    std::function<int()>                regState;     // 0 = no button (registration not handled here), 1 = "Register...", 2 = "Unregister..."
+    std::function<void()>               toggleReg;    // starts Register / Unregister (the tray posts it to itself: it may ask and show UAC)
+};
+void SetToolHooks(const ToolHooks& hooks);
 // The worker changed state: refresh the queue view now (it also refreshes every 500 ms on its own). No-op when closed.
 void NotifyQueueChanged();
 
@@ -107,6 +115,8 @@ enum : int {
     , ID_OPENSTEAMVR            // footer button "SteamVR games...": opens the tray's SteamVR games window via SetOpenSteamVrHook (not a config key; appended: existing ids do not move)
     , ID_SVRMODE                // "SteamVR games:" drop-down in the Advanced group, bound to [steamvr] steamvr_mode (appended)
     , ID_MINIMIZE               // footer button "Minimize" (the window has no title bar; ID_CANCEL reads "Exit"; appended)
+    , ID_OPENLOG, ID_TAG3D, ID_REGLAYER   // Advanced "Tools:" row (moved from the tray menu; SetToolHooks; appended)
+    , ID_THEME                  // "Theme:" drop-down in the header, bound to [capture] theme = system|light|dark (appended)
 };
 // ID_QSTART reads "Start" and acts on every selected item of ID_QLIST (a multi-select list box: LB_SETSEL / LB_GETSELITEMS).
 extern const wchar_t* const kWindowTitle;
