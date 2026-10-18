@@ -4,7 +4,7 @@
 // frame goes through exactly the call the layer makes in xrEndFrame (Recorder::SubmitFrame).
 //
 //   encoder_selftest [--api d3d11|d3d12] [--layout two|array|wide|msaa] [--eye 1920x1080] [--seconds 5] [--fps 90]
-//                    [--format srgb|unorm] [--codec hevc|h264|av1] [--out file.mp4] [--no-audio] [--no-tone]
+//                    [--format srgb|unorm|rgba_srgb|rgba|bgrx|r10|fp16] [--codec hevc|h264|av1] [--out file.mp4] [--no-audio] [--no-tone]
 //                    [--max-width N] [--max-fps N]
 //                    [--head-smoothing S] [--fov-scale K] [--follow-deg D] [--roll-lock] [--no-edge-guard] [--no-symmetric]
 //                    [--youtube tb_half|sbs_half|sbs_full|tb_full] [--eye-crop 16:9|4:3|4:3pad|none]
@@ -174,10 +174,25 @@ int main(int argc, char** argv) {
     adapter->GetDesc1(&ad);
     LOGI("game adapter: %s", elog::Narrow(ad.Description).c_str());
 
-    const bool srgb = a.format == "srgb";
-    const DXGI_FORMAT typedFmt = srgb ? DXGI_FORMAT_B8G8R8A8_UNORM_SRGB : DXGI_FORMAT_B8G8R8A8_UNORM;
-    const DXGI_FORMAT texFmt = DXGI_FORMAT_B8G8R8A8_TYPELESS;   // what runtimes typically allocate
-    const DXGI_FORMAT rtvFmt = DXGI_FORMAT_B8G8R8A8_UNORM;      // write exact bytes
+    // The swapchain format the "runtime" reports (typedFmt), the texture as allocated (texFmt: TYPELESS, what runtimes typically
+    // allocate) and the view the pattern is cleared through (rtvFmt: a non-sRGB view writes the pattern values unchanged).
+    // srgb / rgba_srgb / bgrx: sRGB-encoded data; unorm / rgba / r10 (10-bit) / fp16 (half float): linear data, the recorder
+    // applies the sRGB curve (verify_mp4 -Format unorm).
+    struct Fmt { const char* name; DXGI_FORMAT typed, tex, rtv; };
+    static const Fmt kFmts[] = {
+        {"srgb",      DXGI_FORMAT_B8G8R8A8_UNORM_SRGB, DXGI_FORMAT_B8G8R8A8_TYPELESS,      DXGI_FORMAT_B8G8R8A8_UNORM},
+        {"unorm",     DXGI_FORMAT_B8G8R8A8_UNORM,      DXGI_FORMAT_B8G8R8A8_TYPELESS,      DXGI_FORMAT_B8G8R8A8_UNORM},
+        {"rgba_srgb", DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, DXGI_FORMAT_R8G8B8A8_TYPELESS,      DXGI_FORMAT_R8G8B8A8_UNORM},
+        {"rgba",      DXGI_FORMAT_R8G8B8A8_UNORM,      DXGI_FORMAT_R8G8B8A8_TYPELESS,      DXGI_FORMAT_R8G8B8A8_UNORM},
+        {"bgrx",      DXGI_FORMAT_B8G8R8X8_UNORM_SRGB, DXGI_FORMAT_B8G8R8X8_TYPELESS,      DXGI_FORMAT_B8G8R8X8_UNORM},
+        {"r10",       DXGI_FORMAT_R10G10B10A2_UNORM,   DXGI_FORMAT_R10G10B10A2_TYPELESS,   DXGI_FORMAT_R10G10B10A2_UNORM},
+        {"fp16",      DXGI_FORMAT_R16G16B16A16_FLOAT,  DXGI_FORMAT_R16G16B16A16_TYPELESS,  DXGI_FORMAT_R16G16B16A16_FLOAT},
+    };
+    const Fmt* fm = nullptr;
+    for (const Fmt& f : kFmts) if (a.format == f.name) fm = &f;
+    if (!fm) { LOGE("bad --format %s", a.format.c_str()); return 2; }
+    if (a.detail && fm->tex != DXGI_FORMAT_B8G8R8A8_TYPELESS) { LOGE("--detail needs --format srgb or unorm"); return 2; }
+    const DXGI_FORMAT typedFmt = fm->typed, texFmt = fm->tex, rtvFmt = fm->rtv;
     const UINT w = a.eyeW, h = a.eyeH;
     const bool msaa = a.layout == "msaa", arr = a.layout == "array", wide = a.layout == "wide";
     const UINT samples = msaa ? 4 : 1;

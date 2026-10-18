@@ -1,6 +1,9 @@
 <#
     run_selftests.ps1 -- run encoder_selftest over the API / layout / format / codec matrix and verify every file.
     Needs a Release build (build\Release\encoder_selftest.exe). Plays a 440 Hz tone for the first case only.
+    Swapchain formats (--format): srgb / unorm (BGRA 8-bit), rgba_srgb / rgba (RGBA 8-bit), bgrx, r10 (R10G10B10A2, 10-bit) and
+    fp16 (R16G16B16A16 half float), all allocated TYPELESS; the sRGB ones are checked with verify_mp4 -Format srgb, the linear
+    ones (unorm, rgba, r10, fp16) with -Format unorm (the recorder applies the sRGB curve).
     symmetric_fov is on by default, so every case goes through the re-projection pass (the self-test's views are
     symmetric, so it is an identity mapping); the *_raw cases run with --no-symmetric (stage bypassed, the old path).
     The *_smooth cases run the head-smoothing re-projection with an identity pose and output_fov_scale 1 (exact identity
@@ -97,7 +100,22 @@ $cases = @(
     @{ api = 'd3d11'; layout = 'two';   eye = '960x540';   fmt = 'srgb';  codec = 'hevc'; sound = $false; qvs = 100; rclog = 'encoder quality vs speed 100 \(quality_vs_speed'; rcrep = 'quality vs speed 100$' },
     @{ api = 'd3d11'; layout = 'two';   eye = '1920x1080'; fmt = 'srgb';  codec = 'av1';  sound = $false; qvs = 0;   rclog = 'encoder quality vs speed 0 \(quality_vs_speed'; rcrep = 'quality vs speed 0$' },
     @{ api = 'd3d11'; layout = 'two';   eye = '960x540';   fmt = 'srgb';  codec = 'av1';  sound = $false; qvs = 100; rclog = 'encoder quality vs speed 100 \(quality_vs_speed'; rcrep = 'quality vs speed 100$' },
-    @{ api = 'd3d11'; layout = 'two';   eye = '1920x1080'; fmt = 'srgb';  codec = 'hevc'; sound = $false; cfr = $true; rclog = 'constant frame rate 90 fps, 0 repeated, 0 dropped' }
+    @{ api = 'd3d11'; layout = 'two';   eye = '1920x1080'; fmt = 'srgb';  codec = 'hevc'; sound = $false; cfr = $true; rclog = 'constant frame rate 90 fps, 0 repeated, 0 dropped' },
+    # swapchain formats (0.5.0): RGBA 8-bit sRGB / linear, BGRX, 10-bit (R10G10B10A2), half float (R16G16B16A16) -- all allocated
+    # TYPELESS like a runtime does; D3D11 and D3D12; 10-bit / FP16 also through AV1 and H.264
+    @{ api = 'd3d11'; layout = 'two';   eye = '1920x1080'; fmt = 'rgba_srgb'; codec = 'hevc'; sound = $false },
+    @{ api = 'd3d12'; layout = 'two';   eye = '1920x1080'; fmt = 'rgba_srgb'; codec = 'hevc'; sound = $false },
+    @{ api = 'd3d11'; layout = 'two';   eye = '1920x1080'; fmt = 'rgba';      codec = 'hevc'; sound = $false },
+    @{ api = 'd3d12'; layout = 'array'; eye = '1920x1080'; fmt = 'rgba';      codec = 'hevc'; sound = $false },
+    @{ api = 'd3d11'; layout = 'two';   eye = '1920x1080'; fmt = 'bgrx';      codec = 'hevc'; sound = $false },
+    @{ api = 'd3d12'; layout = 'two';   eye = '1920x1080'; fmt = 'bgrx';      codec = 'hevc'; sound = $false },
+    @{ api = 'd3d11'; layout = 'two';   eye = '1920x1080'; fmt = 'r10';       codec = 'hevc'; sound = $false },
+    @{ api = 'd3d12'; layout = 'two';   eye = '1920x1080'; fmt = 'r10';       codec = 'hevc'; sound = $false },
+    @{ api = 'd3d11'; layout = 'msaa';  eye = '1920x1080'; fmt = 'r10';       codec = 'av1';  sound = $false },
+    @{ api = 'd3d11'; layout = 'two';   eye = '1920x1080'; fmt = 'fp16';      codec = 'hevc'; sound = $false },
+    @{ api = 'd3d12'; layout = 'array'; eye = '1920x1080'; fmt = 'fp16';      codec = 'hevc'; sound = $false },
+    @{ api = 'd3d11'; layout = 'two';   eye = '1920x1080'; fmt = 'fp16';      codec = 'h264'; sound = $false },
+    @{ api = 'd3d12'; layout = 'two';   eye = '1920x1080'; fmt = 'fp16';      codec = 'av1';  sound = $false }
 )
 if ($Quick) { $cases = $cases[0..1] }
 
@@ -159,7 +177,7 @@ foreach ($c in $cases) {
         else { Write-Host "  FAIL log line missing: $rx" -ForegroundColor Red; $logOk = $false }
     }
     $wh = $(if ($c.pix) { $c.pix } else { $c.eye }).Split('x')   # pix = per-eye size of the encoded frame when it is scaled
-    $vargs = @{ File = $out; EyeW = [int]$wh[0]; EyeH = [int]$wh[1]; Codec = $(if ($c.expect) { $c.expect } else { $c.codec }); Format = $c.fmt; ExpectAudio = $true; ExpectSound = [bool]$c.sound }
+    $vargs = @{ File = $out; EyeW = [int]$wh[0]; EyeH = [int]$wh[1]; Codec = $(if ($c.expect) { $c.expect } else { $c.codec }); Format = $(if ($c.fmt -in @('srgb', 'rgba_srgb', 'bgrx')) { 'srgb' } else { 'unorm' }); ExpectAudio = $true; ExpectSound = [bool]$c.sound }
     if ($c.fps) { $vargs.Fps = [double]$c.fps }
     if ($c.out) { $o = $c.out.Split('x'); $vargs.OutW = [int]$o[0]; $vargs.OutH = [int]$o[1]; if (-not $c.yt) { $vargs.SkipPixels = $true } }   # scaled: no pixel checks
     if ($c.yt) { $vargs.Packing = $c.yt; $vargs.EyeCrop = $(if ($c.crop) { $c.crop } else { '16:9' }) }   # packed eyes: the pixel checks know where they are

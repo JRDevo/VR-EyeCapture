@@ -11,7 +11,7 @@
     when a Submit result differs from the mock's, when the mock did not receive exactly the game's Submits / WaitGetPoses,
     when an unhooked compositor slot was called or the accessor jump stubs lost an argument.
     Cases:
-      layout (two | wide | array | msaa | typeless | fp16) x interface (cpp | fntable), raw eyes (symmetric_fov 0): a valid
+      layout (two | wide | array | msaa | typeless | fp16 | r10 (10-bit) | bgrx) x interface (cpp | fntable), raw eyes (symmetric_fov 0): a valid
         MP4 (verify_mp4.ps1: size 3840x1080, 90 fps, st3d, audio, grey steps = gamma, left half = left eye: bounds / slices /
         eye order), log lines for the load banner, the patch (vtable / FnTable), the layout and the record start.
       two / cpp with the right eye submitted first.
@@ -124,7 +124,7 @@ function PixelAt($mp4, [int]$x, [int]$y) {
 
 # ---- layouts x interfaces (raw eyes) ----
 foreach ($iface in 'cpp', 'fntable') {
-    foreach ($layout in 'two', 'wide', 'array', 'msaa', 'typeless', 'fp16') {
+    foreach ($layout in 'two', 'wide', 'array', 'msaa', 'typeless', 'fp16', 'r10', 'bgrx') {
         $name = "${layout}_$iface"
         if (-not (Want $name)) { continue }
         $r = RunCase $name @('--layout', $layout, '--iface', $iface, '--seconds', '5') $rawCfg
@@ -138,12 +138,27 @@ foreach ($iface in 'cpp', 'fntable') {
         Need ($r.log -match 'recording summary: ') 'recording summary (finalized)' ([ref]$f)
         Need ($null -ne $r.mp4) 'no MP4' ([ref]$f)
         if ($r.mp4) {
-            $fmt = if ($layout -eq 'fp16') { 'unorm' } else { 'srgb' }
+            $fmt = if ($layout -in @('fp16', 'r10')) { 'unorm' } else { 'srgb' }   # linear data: the recorder applies the sRGB curve
             & (Join-Path $PSScriptRoot 'verify_mp4.ps1') -File $r.mp4 -EyeW 1920 -EyeH 1080 -Fps 90 -Seconds 3.7 -DurationTolerance 0.4 -Format $fmt -ExpectAudio
             Need ($LASTEXITCODE -eq 0) 'verify_mp4' ([ref]$f)
         }
         Record $name $f
     }
+}
+# ---- codecs (the layouts above record HEVC): H.264 and AV1 through the proxy ----
+foreach ($codec in 'h264', 'av1') {
+    $name = "two_cpp_$codec"
+    if (-not (Want $name)) { continue }
+    $r = RunCase $name @('--layout', 'two', '--iface', 'cpp', '--seconds', '5') ($rawCfg -replace 'codec=hevc', "codec=$codec")
+    $f = @()
+    Need ($r.code -eq 0) 'openvr_e2e failed' ([ref]$f)
+    Need ($r.log -match ('recording summary: OK [^\r\n]*3840x1080 ' + $(if ($codec -eq 'h264') { 'H\.264' } else { 'AV1' }))) "summary says $codec" ([ref]$f)
+    Need ($null -ne $r.mp4) 'no MP4' ([ref]$f)
+    if ($r.mp4) {
+        & (Join-Path $PSScriptRoot 'verify_mp4.ps1') -File $r.mp4 -EyeW 1920 -EyeH 1080 -Fps 90 -Seconds 3.7 -DurationTolerance 0.4 -Codec $codec -ExpectAudio
+        Need ($LASTEXITCODE -eq 0) "verify_mp4 ($codec)" ([ref]$f)
+    }
+    Record $name $f
 }
 if (Want 'two_cpp_rightfirst') {
     $r = RunCase 'two_cpp_rightfirst' @('--layout', 'two', '--iface', 'cpp', '--seconds', '5', '--right-first') $rawCfg

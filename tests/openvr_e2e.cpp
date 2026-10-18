@@ -7,7 +7,7 @@
 // script). Every Submit's result must be what the mock returns (MOCK_OPENVR_SUBMIT_ERROR or None) and the mock must have
 // received exactly the game's Submits (MockOpenVrCounts of the real DLL).
 //
-//   openvr_e2e --game-dir <dir> [--layout two|wide|array|msaa|typeless|fp16] [--iface cpp|fntable] [--version 028|022|099]
+//   openvr_e2e --game-dir <dir> [--layout two|wide|array|msaa|typeless|fp16|r10|bgrx] [--iface cpp|fntable] [--version 028|022|099]
 //              [--pose submit|wait|none] [--seconds 5] [--submit-error <n>] [--out-dir <dir>] [--right-first]
 //              [--eye 1920x1080] [--cycles N] [--threads]
 // --cycles N: N VR sessions in one process (VR_InitInternal2 -> frames -> VR_ShutdownInternal, N times; the proxy must re-arm
@@ -117,8 +117,8 @@ int wmain(int argc, wchar_t** argv) {
     }
     if (a.gameDir.empty()) { printf("--game-dir is required\n"); return 2; }
     const bool wide = a.layout == "wide", arr = a.layout == "array", msaa = a.layout == "msaa";
-    const bool typeless = a.layout == "typeless", fp16 = a.layout == "fp16";
-    if (!(a.layout == "two" || wide || arr || msaa || typeless || fp16)) { printf("bad --layout\n"); return 2; }
+    const bool typeless = a.layout == "typeless", fp16 = a.layout == "fp16", r10 = a.layout == "r10", bgrx = a.layout == "bgrx";
+    if (!(a.layout == "two" || wide || arr || msaa || typeless || fp16 || r10 || bgrx)) { printf("bad --layout\n"); return 2; }
     printf("openvr_e2e: layout %s, iface %s, IVRCompositor_%s, pose %s, %.1f s, eye %ux%u%s%s\n", a.layout.c_str(), a.iface.c_str(),
            a.version.c_str(), a.pose.c_str(), a.seconds, a.eyeW, a.eyeH, a.submitError ? ", submit error expected" : "",
            a.rightFirst ? ", right eye first" : "");
@@ -186,6 +186,8 @@ int wmain(int argc, wchar_t** argv) {
     if (msaa) { texFmt = DXGI_FORMAT_B8G8R8A8_TYPELESS; scratchFmt = DXGI_FORMAT_UNKNOWN; cs = vr::ColorSpace_Gamma; }
     if (typeless) { texFmt = DXGI_FORMAT_R8G8B8A8_TYPELESS; rtvFmt = DXGI_FORMAT_R8G8B8A8_UNORM; scratchFmt = DXGI_FORMAT_UNKNOWN; }
     if (fp16) { texFmt = DXGI_FORMAT_R16G16B16A16_FLOAT; rtvFmt = texFmt; scratchFmt = DXGI_FORMAT_UNKNOWN; }
+    if (r10) { texFmt = DXGI_FORMAT_R10G10B10A2_UNORM; rtvFmt = texFmt; scratchFmt = DXGI_FORMAT_UNKNOWN; }   // 10-bit, linear
+    if (bgrx) { texFmt = DXGI_FORMAT_B8G8R8X8_UNORM_SRGB; rtvFmt = DXGI_FORMAT_B8G8R8X8_UNORM; scratchFmt = DXGI_FORMAT_B8G8R8X8_TYPELESS; }
     const UINT samples = msaa ? 4 : 1, arraySize = arr ? 2 : 1, texW = wide ? 2 * a.eyeW : a.eyeW;
     std::vector<EyeTex> eyes(wide || arr ? 1 : 2);
     for (EyeTex& et : eyes) {
