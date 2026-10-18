@@ -73,6 +73,7 @@ const Field kFields[] = {
     {L"indicator_z",       L"indicator",       Kind::Edit,  ID_INDZ,       nullptr},
     {L"indicator_size",    L"indicator",       Kind::Edit,  ID_INDSIZE,    nullptr},
     {L"indicator_opacity", L"indicator",       Kind::Edit,  ID_INDOPACITY, nullptr},
+    {L"indicator_live",    L"indicator",       Kind::Check, ID_INDLIVE,    nullptr},
     {L"audio_enabled",     L"audio",           Kind::Check, ID_AUDIO,      nullptr},
     {L"steamvr_mode",      L"steamvr",         Kind::Combo, ID_SVRMODE,    L"per_game|quick|off",
      L"Per game (best quality)|Quick mode (no setup, lower quality)|Off (not recorded)"},
@@ -328,6 +329,7 @@ KeyValues FromConfig(const Config& c) {
     kv.emplace_back(L"indicator_z", FloatText(c.indicator.z));
     kv.emplace_back(L"indicator_size", FloatText(c.indicator.size));
     kv.emplace_back(L"indicator_opacity", FloatText(c.indicator.opacity));
+    kv.emplace_back(L"indicator_live", B(c.indicator.live));
     kv.emplace_back(L"audio_enabled", B(c.audioEnabled));
     kv.emplace_back(L"audio_device", c.audioDevice);
     kv.emplace_back(L"theme", c.uiTheme == 1 ? L"light" : c.uiTheme == 2 ? L"dark" : L"system");
@@ -672,6 +674,10 @@ const Help kHelp[] = {
                   L"Smaller values give more margin and show less."},
     {ID_INDICATOR, L"Shows a small red dot in the headset while a recording runs. The dot is never in the video." HELP_BR
                    L"Direct3D 11 games only (ETS2 / ATS). Read when the game starts."},
+    {ID_INDLIVE, L"Turns the dot violet while OBS shows the live picture of the game (the VR EyeCapture source in OBS)." HELP_BR
+                 L"\u2022 Ticked (default): you can see in the headset that OBS is watching, even when you are not recording."
+                 HELP_LI L"Cleared: the dot only shows while recording." HELP_BR
+                 L"The dot is never in the video or the stream. Read when the game starts."},
     {ID_INDX, L"Left / right position of the dot, in metres. 0 = centre, positive = right, negative = left. Default 0.22."},
     {ID_INDY, L"Up / down position of the dot, in metres. 0 = eye level, positive = up, negative = down. Default -0.16."},
     {ID_INDZ, L"Distance of the dot in front of you, in metres. Always negative: -0.8 = 80 cm ahead (default). Farther = smaller."},
@@ -2558,7 +2564,10 @@ int BuildControls(HWND dlg, Builder::Pass pass, int clientW, int clientH, int sc
     b.Group(gx, y, gw, groupH(4) + ex1, L"Recording Indicator");
     r = y + top;
     b.Label(lx, r, labelW, L"Indicator:", ID_INDICATOR);
-    b.Check(ID_INDICATOR, cx, r, L"Show recording indicator in headset");
+    {   // one row: the dot itself, then its violet "OBS is watching" state (indicator_live); the preview takes the right side
+        const int iw = b.Check(ID_INDICATOR, cx, r, L"Show in headset");
+        b.Check(ID_INDLIVE, cx + iw + 16, r, L"Violet for OBS");
+    }
     r += pitch;
     b.Label(lx, r, labelW, L"Size:", ID_INDSIZE);
     b.Edit(ID_INDSIZE, cx, r, 60);

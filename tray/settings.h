@@ -117,6 +117,7 @@ enum : int {
     , ID_MINIMIZE               // footer button "Minimize" (the window has no title bar; ID_CANCEL reads "Exit"; appended)
     , ID_OPENLOG, ID_TAG3D, ID_REGLAYER   // Advanced "Tools:" row (moved from the tray menu; SetToolHooks; appended)
     , ID_THEME                  // "Theme:" drop-down in the header, bound to [capture] theme = system|light|dark (appended)
+    , ID_INDLIVE                // "Violet for OBS" check next to the indicator check, bound to [indicator] indicator_live (appended)
 };
 // ID_QSTART reads "Start" and acts on every selected item of ID_QLIST (a multi-select list box: LB_SETSEL / LB_GETSELITEMS).
 extern const wchar_t* const kWindowTitle;
