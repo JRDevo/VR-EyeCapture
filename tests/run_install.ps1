@@ -11,6 +11,8 @@
                           value = tt3\json, stale gone) -> CU duplicate -> registered=yes hkcu_duplicate=yes -> --register
                           removes it -> --unregister (exit 0) -> registered=no; dll missing -> --register exit 1 and
                           files=missing; read-only LM key -> --register exit 5. tray.log has the --register lines.
+    3b. start_with_windows = 1 in config.ini: the start restores the tray's OWN Run value when missing / another folder (test Run
+                          key), never over a value switched off in Task Manager, never writes StartupApproved.
     3. GUI on test keys  : the start must not touch the startup registration: with a stale old-name "OpenXR-EyeCapture" Run value
                           and StartupApproved records in the test keys, the Run key and the records are UNCHANGED after the
                           start (one balloon + log line report it); %APPDATA%\OpenXR-EyeCapture\config.ini (scratch APPDATA)
@@ -176,6 +178,44 @@ try {
         $ok = $log -match 'tray: registration: registered \(' -and $log -match 'tooltip now: VR EyeCapture: no VR game running'
     }
     Step 'GUI: picks up an outside --register within 15 s (re-query), tooltip back to normal' $ok
+
+    # ---- start_with_windows = 1 (the user's choice in config.ini): the tray restores ITS OWN Run value when it is missing or
+    # points at another folder, never when the user switched it off in Task Manager (StartupApproved record odd); it never
+    # writes StartupApproved (docs/DEVELOPMENT.md "Antivirus: behaviour rules")
+    Stop-Process -Id $gui.Id; $gui = $null
+    Start-Sleep -Milliseconds 500
+    $cfgDir = Join-Path $t 'appdata\VR EyeCapture'
+    New-Item -ItemType Directory -Force $cfgDir | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $cfgDir 'config.ini'), "[capture]`r`nstart_with_windows = 1`r`n", (New-Object System.Text.UTF8Encoding $false))
+    if (Test-Path $runKey) { Remove-Item -Path $runKey -Recurse -Force }
+    Remove-Item -Path "$($runKey)Approved" -Recurse -Force -ErrorAction SilentlyContinue
+    $want = '"' + $exe + '"'
+    $env:EYECAP_TRAY_TEST_SHM = 'eyecap-install-test'
+    foreach ($case in @(@{ name = 'missing'; before = $null }, @{ name = 'another folder'; before = '"X:\Moved\EyeCaptureTray.exe"' })) {
+        if ($case.before) { New-Item -Path $runKey -Force | Out-Null; New-ItemProperty -Path $runKey -Name 'VR EyeCapture' -Value $case.before -PropertyType String -Force | Out-Null }
+        Remove-Item (Join-Path $t 'logs\tray.log') -ErrorAction SilentlyContinue
+        $gui = Start-Process $exe -PassThru
+        Start-Sleep -Seconds 3
+        $log = Get-Content (Join-Path $t 'logs\tray.log') -Raw -Encoding UTF8
+        $now = (Get-ItemProperty -Path $runKey -Name 'VR EyeCapture' -ErrorAction SilentlyContinue).'VR EyeCapture'
+        Step "start_with_windows = 1, Run value $($case.name): restored to this exe, logged, no StartupApproved key" ($now -eq $want -and $log -match 'tray: start with Windows: start_with_windows = 1 and the Run value was .* -- restored to' -and -not (Test-Path "$($runKey)Approved"))
+        Stop-Process -Id $gui.Id; $gui = $null
+        Start-Sleep -Milliseconds 500
+    }
+    # switched off in Task Manager: the value (pointing elsewhere) and the record stay exactly as they are
+    New-ItemProperty -Path $runKey -Name 'VR EyeCapture' -Value '"X:\Moved\EyeCaptureTray.exe"' -PropertyType String -Force | Out-Null
+    New-Item -Path "$($runKey)Approved" -Force | Out-Null
+    New-ItemProperty -Path "$($runKey)Approved" -Name 'VR EyeCapture' -Value ([byte[]](3,0,0,0,0,0,0,0,0,0,0,0)) -PropertyType Binary -Force | Out-Null
+    $snap = RunSnapshot
+    Remove-Item (Join-Path $t 'logs\tray.log') -ErrorAction SilentlyContinue
+    $gui = Start-Process $exe -PassThru
+    Start-Sleep -Seconds 3
+    $log = Get-Content (Join-Path $t 'logs\tray.log') -Raw -Encoding UTF8
+    Step 'start_with_windows = 1 but switched off in Task Manager: Run value and record UNCHANGED, nothing restored' ((RunSnapshot) -eq $snap -and $log -notmatch 'restored to')
+    Stop-Process -Id $gui.Id; $gui = $null
+    Remove-Item -Path $runKey -Recurse -Force
+    Remove-Item -Path "$($runKey)Approved" -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item Env:\EYECAP_TRAY_TEST_SHM
 } finally {
     $env:APPDATA = $oldAppdata
     foreach ($v in @('EYECAP_TRAY_TEST_REG_ROOTS', 'EYECAP_TRAY_TEST_RUN_KEY', 'EYECAP_TRAY_TEST_SHM', 'EYECAP_TRAY_TEST_REG')) { Remove-Item "Env:\$v" -ErrorAction SilentlyContinue }

@@ -76,6 +76,12 @@ struct Config {
     std::wstring audioDevice;            // substring of the render endpoint name; empty = default render device
     GammaMode    gamma = GammaMode::Auto;
     bool         requireTray = true;     // require_tray: layer stays dormant unless EyeCaptureTray.exe is running
+    // start_with_windows (tray only): the user's "Start with Windows" choice. While 1, the tray restores ITS OWN HKCU Run value
+    // at start when that value is missing or points at another folder (never StartupApproved, never when the user disabled
+    // it in Task Manager). startWithWindowsSet = the key is in the file (configs from before 0.5.0 do not have it: then the
+    // tray only reads the Run value, as before).
+    bool         startWithWindows = false;
+    bool         startWithWindowsSet = false;
     bool         swapEyes = false;       // swap_eyes: put the right eye in the left half (for players that flip SBS)
     bool         recordOverlays = true;  // record_overlays: composite the game's / mods' overlay layers into the recording
     bool         liveShare = true;       // live_share: hand the eyes (re-projected like a recording, or raw) to a live viewer (OBS plugin) when one appears (live_share.h)

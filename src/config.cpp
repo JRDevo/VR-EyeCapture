@@ -235,6 +235,8 @@ KeyResult ApplyKey(Config& c, const std::wstring& key, std::wstring val) {
         else ok = false;
     } else if (key == L"require_tray") {
         if (ParseBool(val, b)) c.requireTray = b; else ok = false;
+    } else if (key == L"start_with_windows") {
+        if (ParseBool(val, b)) { c.startWithWindows = b; c.startWithWindowsSet = true; } else ok = false;
     } else if (key == L"swap_eyes") {
         if (ParseBool(val, b)) c.swapEyes = b; else ok = false;
     } else if (key == L"record_overlays") {

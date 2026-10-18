@@ -1737,10 +1737,27 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
             PostMessageW(g_wnd, WM_CHECK_REG, 0, 0);
         }
     }
-    // "Start with Windows" (HKCU Run value, tray/install.h): READ ONLY at start. A value that points at another folder is
-    // only reported (log + one balloon); the user repairs it by ticking the Settings check box again.
+    // "Start with Windows" (HKCU Run value, tray/install.h). With start_with_windows = 1 in config.ini (the user's choice) the
+    // tray puts ITS OWN Run value back when it is missing or points at another folder -- the one start-up registry write
+    // (docs/DEVELOPMENT.md "Antivirus: behaviour rules"): only when wrong, never StartupApproved, never over a value the user
+    // switched off in Task Manager. Without the key (configs from before 0.5.0) or with 0: READ ONLY, a value that points at
+    // another folder is only reported (log + one balloon).
     {
-        const install::AutostartInfo ai = install::ReadAutostart();
+        Config ac;
+        std::vector<std::wstring> acp;
+        ParseConfigFile(ConfigPath(g_exeDir), ac, acp);
+        install::AutostartInfo ai = install::ReadAutostart();
+        if (ac.startWithWindowsSet && ac.startWithWindows && !ai.disabledInTaskManager &&
+            (!(ai.runPresent || ai.oldPresent) || !install::AutostartPointsHere(ai, g_exeDir))) {
+            const std::wstring was = ai.runPresent ? ai.runCommand : ai.oldPresent ? ai.oldCommand : L"(missing)";
+            std::wstring err;
+            if (install::SetAutostart(true, g_exeDir, err))
+                LOGI("tray: start with Windows: start_with_windows = 1 and the Run value was %s -- restored to %s", elog::Narrow(was).c_str(),
+                     elog::Narrow(install::AutostartCommand(g_exeDir)).c_str());
+            else
+                LOGW("tray: start with Windows: could not restore the Run value: %s", elog::Narrow(err).c_str());
+            ai = install::ReadAutostart();
+        }
         LOGI("tray: start with Windows: %s%s", (ai.runPresent || ai.oldPresent) && !ai.disabledInTaskManager ? "on" : "off",
              ai.disabledInTaskManager ? " (disabled in Task Manager > Startup apps)" : "");
         const std::wstring stale = install::AutostartStalePath(g_exeDir);

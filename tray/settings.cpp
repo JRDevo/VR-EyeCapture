@@ -89,6 +89,7 @@ const Field kFields[] = {
     {L"eye_crop",          L"post_processing", Kind::Combo, ID_EYECROP,    L"16:9|4:3|4:3pad|none",
      L"16:9 (recommended)|4:3|4:3, padded to 16:9 (8K tier, black side bars)|None (full eye)"},
     {L"log_level",         L"debug",           Kind::Combo, ID_LOGLEVEL,   L"none|error|warn|info|debug", L"Off|Errors|Warnings|Information|Debug"},
+    {L"start_with_windows", L"capture",        Kind::Check, ID_AUTOSTART,  nullptr},   // last: the registry is applied after the file (DoSave)
 };
 
 std::wstring Trim(const std::wstring& s) {
@@ -327,6 +328,7 @@ KeyValues FromConfig(const Config& c) {
     kv.emplace_back(L"indicator_opacity", FloatText(c.indicator.opacity));
     kv.emplace_back(L"audio_enabled", B(c.audioEnabled));
     kv.emplace_back(L"audio_device", c.audioDevice);
+    kv.emplace_back(L"start_with_windows", B(c.startWithWindows));
     kv.emplace_back(L"steamvr_mode", elog::Widen(SteamVrModeKey(c.steamvr.mode)));
     kv.emplace_back(L"post_mkv", B(c.postMkv));
     kv.emplace_back(L"keep_mp4", B(c.keepMp4));
@@ -756,7 +758,9 @@ const Help kHelp[] = {
     {ID_AUTOSTART, L"Starts this tray app when you sign in to Windows, so that it is already running before a VR game starts "
                    L"(the layer only records while the tray is running). Off by default. Writes one 'Run' entry for the current Windows "
                    L"account, nothing else (the on / off switch in Task Manager > Startup apps is Windows' own and is never changed "
-                   L"by this program); turning it off removes the entry. Clear this option before deleting the folder."},
+                   L"by this program); turning it off removes the entry. Saved as start_with_windows in config.ini: while it is ticked "
+                   L"and the entry is missing or points at another folder (removed by a cleaner, the folder moved), the tray puts it "
+                   L"back at its next start -- but never one you switched off in Task Manager. Clear this option before deleting the folder."},
     {ID_OPENINI, L"Opens config.ini in a text editor. The file lists every setting, with comments."},
     {ID_DEFAULTS, L"Resets every field to its built-in default. Nothing is saved until Save is clicked."},
     {ID_OPENSTEAMVR, L"Opens the SteamVR games window: tick the SteamVR (OpenVR) games to record, choose Per game or Quick mode. "
@@ -1486,7 +1490,9 @@ void LoadFromFile() {
     if (c.hotkey.text.empty()) ParseHotkey(kDefaultHotkey, c.hotkey);
     SetControls(FromConfig(c));
     g_loadedSvrMode = elog::Widen(SteamVrModeKey(c.steamvr.mode));
-    SendMessageW(Ctl(ID_AUTOSTART), BM_SETCHECK, AutostartChecked() ? BST_CHECKED : BST_UNCHECKED, 0);
+    // a config from before 0.5.0 has no start_with_windows: the check box shows the Run value instead (Save then adds the key)
+    if (!c.startWithWindowsSet)
+        SendMessageW(Ctl(ID_AUTOSTART), BM_SETCHECK, AutostartChecked() ? BST_CHECKED : BST_UNCHECKED, 0);
     if (!problems.empty()) {
         std::wstring m = L"The configuration file contains invalid values on the following lines. The window shows the default value for each of them, and Save replaces them:\n\n";
         for (const auto& p : problems) m += p + L"\n";
@@ -1760,13 +1766,14 @@ void DoSave() {
         Report(L"Not Saved", m);
         return;
     }
-    // "Start with Windows" is a registry state, not a config.ini key: apply it after the config was written
+    // "Start with Windows": the choice is the config key start_with_windows (written above); the Run value follows it here
+    // (a user action -- the only other writer is the tray's start-up repair while the key is 1)
     const bool wantAuto = SendMessageW(Ctl(ID_AUTOSTART), BM_GETCHECK, 0, 0) == BST_CHECKED;
     const bool hadAuto = AutostartChecked();
     if (wantAuto != hadAuto) {
         std::wstring err;
         if (install::SetAutostart(wantAuto, ExeFolder(), err)) {
-            r.changed.push_back(wantAuto ? L"start_with_windows 0->1" : L"start_with_windows 1->0");
+            LOGI("settings: start with Windows %s (HKCU Run value %s)", wantAuto ? "on" : "off", wantAuto ? "written" : "deleted");
             // Windows' own switch (Task Manager > Startup apps) is never written by this program: only pointed out
             if (wantAuto && install::ReadAutostart().disabledInTaskManager)
                 Report(kWindowTitle, L"Windows has this disabled in Task Manager > Startup apps; turn it on there.");

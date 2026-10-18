@@ -127,7 +127,8 @@ add_executable(EyeCaptureTray WIN32 tray/tray.cpp tray/postprocess.cpp tray/sett
 target_compile_options(EyeCaptureTray PRIVATE ${EYE_WARN_FLAGS})
 target_link_libraries(EyeCaptureTray PRIVATE eye_capture_core comctl32 comdlg32 dinput8 dxguid advapi32 version)
 target_include_directories(EyeCaptureTray PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tray)
-eye_add_version_info(EyeCaptureTray APP "VR EyeCapture tray app" "EyeCaptureTray.exe")
+# FileDescription "VR EyeCapture": the name Task Manager > Startup apps shows for the Run value
+eye_add_version_info(EyeCaptureTray APP "VR EyeCapture" "EyeCaptureTray.exe")
 # Manifest: runs as the invoking user, never elevates by itself (Common Controls v6 comes from a pragma in tray/settings.cpp);
 # tray/compat.manifest declares Windows 10 / 11 (layered child windows for the glass look's edit fields).
 target_link_options(EyeCaptureTray PRIVATE "/MANIFESTUAC:level='asInvoker' uiAccess='false'"

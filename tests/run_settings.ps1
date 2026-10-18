@@ -100,7 +100,7 @@ try {
 $b = Get-Content (Join-Path $t 'before.ini'); $a = Get-Content $ini
 $d = @(Compare-Object $b $a)
 Write-Host 'diff of the scratch tray config (before => after):'; $d | ForEach-Object { Write-Host ("  {0} {1}" -f $_.SideIndicator, $_.InputObject) }
-Step 'window diff is exactly the 15 changed lines (slider untouched: head_smoothing 0.57 kept; max_width 3000 -> 0)' ($d.Count -eq 30)
+Step 'window diff is exactly the 16 changed lines (slider untouched: head_smoothing 0.57 kept; max_width 3000 -> 0; start_with_windows 0 -> 1)' ($d.Count -eq 32 -and ($a -contains 'start_with_windows = 1'))
 $aText = Get-Content $ini -Raw
 Step 'Record for YouTube ticked: saved file has record_for_youtube = 1 (once, in place)' (($aText -match '(?m)^record_for_youtube = 1\s*$') -and ([regex]::Matches($aText, '(?m)^record_for_youtube').Count -eq 1))
 Step 'combo "3D MKV and 8K 3D MKV": saved file has post_mkv = 1 and post_yt8k = 1' (($aText -match '(?m)^post_yt8k = 1\s*$') -and ($aText -match '(?m)^post_mkv = 1\s*$'))
