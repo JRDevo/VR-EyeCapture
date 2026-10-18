@@ -130,6 +130,10 @@ What this license covers in VR EyeCapture:
   this license: it is licensed under the GNU General Public License, version 2
   or (at your option) any later version (SPDX: GPL-2.0-or-later), because it is
   built against OBS Studio's libobs, which is GPL. See `obs/COPYING.md`.
+- `src/live_share_proto.h` (the live-share protocol header that both the layer
+  and the OBS plugin compile) is dual-licensed: this PolyForm Noncommercial
+  License 1.0.0 OR, at your option, GPL-2.0-or-later (SPDX:
+  `PolyForm-Noncommercial-1.0.0 OR GPL-2.0-or-later`).
 - Third-party components (the OpenXR SDK headers, the subset of Valve's OpenVR
   header in `third_party/openvr/`, the libobs headers) are NOT covered by this
   license; their own terms apply. See THIRD_PARTY.md. VR EyeCapture ships no

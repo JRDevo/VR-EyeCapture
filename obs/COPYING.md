@@ -18,6 +18,10 @@ The full text of the GNU General Public License, version 2:
 Why GPL: the plugin is built against OBS Studio's `libobs` headers and links `obs.dll`, and OBS Studio is licensed under
 GPL-2.0-or-later.
 
+The plugin also compiles one header from outside this folder, `src/live_share_proto.h` (the shared-memory protocol with
+the recorder). That header is dual-licensed `PolyForm-Noncommercial-1.0.0 OR GPL-2.0-or-later`, so it is available to the
+plugin under GPL-2.0-or-later.
+
 Source code: the complete source of the plugin is in the `obs/` folder of <https://github.com/JRDevo/VR-EyeCapture>; build
 steps in `obs/README.md`. The libobs headers are fetched from the OBS Studio repository at build time (OBS Studio 31.0.0,
 <https://github.com/obsproject/obs-studio>); OBS Studio itself is not redistributed.

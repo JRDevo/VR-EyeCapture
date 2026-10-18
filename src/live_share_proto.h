@@ -1,6 +1,9 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR GPL-2.0-or-later
 /* live_share_proto -- the shared-memory protocol between the layer (producer, inside the game: src/live_share.cpp) and a
  * live viewer (consumer: the OBS source plugin obs/, tests/live_share_test.cpp; both through obs/live_consumer.cpp).
  * Plain C (also included by C++), x64 only.
+ * License: this one header is dual-licensed -- the PolyForm Noncommercial License 1.0.0 (LICENSE.md) OR, at your option,
+ * the GNU GPL version 2 or later (obs/COPYING.md) -- so the GPL OBS plugin, which compiles it, stays GPL-clean.
  *
  * One named block, Local\OpenXR-EyeCapture-Live, CREATED BY THE CONSUMER. The layer never creates it: no block (or a
  * stale consumer heartbeat) = no consumer = the layer does nothing beyond one OpenFileMappingW probe per second. The
