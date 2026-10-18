@@ -214,6 +214,18 @@ std::wstring TextOf(HWND h) {
     if (n) GetWindowTextW(h, &s[0], n + 1);
     return s;
 }
+// The semibold version of a font (group titles), made once per base font and kept for the process.
+HFONT SemiboldOf(HFONT base) {
+    static std::vector<std::pair<HFONT, HFONT>> cache;
+    for (const auto& c : cache) if (c.first == base) return c.second;
+    LOGFONTW lf{};
+    if (!GetObjectW(base, sizeof(lf), &lf)) return base;
+    lf.lfWeight = FW_SEMIBOLD;
+    HFONT f = CreateFontIndirectW(&lf);
+    if (!f) return base;
+    cache.emplace_back(base, f);
+    return f;
+}
 bool FocusCues(HWND h) { return !(SendMessageW(h, WM_QUERYUISTATE, 0, 0) & UISF_HIDEFOCUS); }
 
 bool IsGroup(HWND h) {
@@ -256,6 +268,7 @@ struct State {
     LRESULT check = BST_UNCHECKED;
     COLORREF color = CLR_INVALID;
     bool dim = false, panel = false, odTransparent = false;
+    bool primary = false;   // button: made BS_DEFPUSHBUTTON (the accent one); BM_SETSTYLE from the dialog manager does not change it
     // combo
     std::vector<std::wstring> items;
     std::vector<LPARAM> data;
@@ -353,28 +366,12 @@ void PaintButton(HWND h, HDC dc) {
     const HFONT font = FontOf(h);
     const std::wstring text = TextOf(h);
     const float W = (float)rc.right, H = (float)rc.bottom;
-    if (type == BS_GROUPBOX) {   // a card: rounded panel, the title inside its top-left
-        FillRound(g, p.card, 0.5f, 7.5f, W - 1, H - 8, 6);
-        StrokeRound(g, p.cardStroke, 0, 7, W, H - 7, 6);
-        HDC mdc = cv.Dc();
-        HGDIOBJ old = SelectObject(mdc, font);
-        SIZE ts{};
-        GetTextExtentPoint32W(mdc, text.c_str(), (int)text.size(), &ts);
-        SelectObject(mdc, old);
-        // the title sits on the card's top edge like a classic group box caption, on a pill of the window colour
+    if (type == BS_GROUPBOX) {   // a card: rounded panel over the whole control, the title (semibold) inside its top-left
+        FillRound(g, p.card, 0.5f, 0.5f, W - 1, H - 1, 6);
+        StrokeRound(g, p.cardStroke, 0, 0, W, H, 6);
         if (!text.empty()) {
-            const float tx = 10, tw = (float)ts.cx + 8;
-            if (!t.mica) {
-                Gdiplus::SolidBrush b(Argb(t.window));
-                g.FillRectangle(&b, tx - 4, 0.f, tw, (float)ts.cy);
-            } else {
-                g.SetCompositingMode(Gdiplus::CompositingModeSourceCopy);
-                Gdiplus::SolidBrush clear(Color(0, 0, 0, 0));
-                g.FillRectangle(&clear, tx - 4, 0.f, tw, 14.f);
-                g.SetCompositingMode(Gdiplus::CompositingModeSourceOver);
-            }
-            RECT tr{(LONG)tx, 0, (LONG)(tx + ts.cx + 2), ts.cy};
-            cv.Text(text, tr, enabled ? t.text : t.textDisabled, DT_LEFT | DT_TOP | DT_SINGLELINE, font);
+            RECT tr{12, 3, rc.right - 8, rc.bottom};
+            cv.Text(text, tr, enabled ? t.text : t.textDisabled, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_END_ELLIPSIS, SemiboldOf(font));
         }
         return;
     }
@@ -404,8 +401,9 @@ void PaintButton(HWND h, HDC dc) {
         }
         return;
     }
-    // push button
-    const bool def = type == BS_DEFPUSHBUTTON;
+    // push button: only the one made as the default button is accent-filled. The dialog manager moves BS_DEFPUSHBUTTON to
+    // whichever push button has the focus (BM_SETSTYLE); painting that would leave a clicked button orange.
+    const bool def = s->primary;
     Color fill = p.control;
     COLORREF tc = enabled ? t.text : t.textDisabled;
     if (!enabled) fill = p.controlDisabled;
@@ -447,6 +445,9 @@ LRESULT CALLBACK ButtonProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     State* s = St(h);
     const bool group = s && (GetWindowLongW(h, GWL_STYLE) & BS_TYPEMASK) == BS_GROUPBOX;
     switch (msg) {
+    case WM_CREATE:
+        s->primary = (GetWindowLongW(h, GWL_STYLE) & BS_TYPEMASK) == BS_DEFPUSHBUTTON;
+        return 0;
     case WM_PAINT: {
         PAINTSTRUCT ps;
         HDC dc = BeginPaint(h, &ps);
@@ -795,14 +796,16 @@ LRESULT CALLBACK ProgressProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 auto& g = cv.G();
                 PaintUnder(h, g, rc);
                 const Theme& t = g_theme;
-                const float cy = rc.bottom / 2.f, W = (float)rc.right;
-                FillRound(g, t.dark ? White(0x8B) : Black(0x72), 0, cy - 0.5f, W, 1, 0.5f);
+                // a rounded 6 px track (fainter while disabled = nothing running) and the filled part on it, same height
+                const float th = 6, cy = rc.bottom / 2.f, W = (float)rc.right;
+                const bool enabled = IsWindowEnabled(h) != FALSE;
+                FillRound(g, t.dark ? White(enabled ? 0x1C : 0x0C) : Black(enabled ? 0x14 : 0x08), 0, cy - th / 2, W, th, th / 2);
                 const int span = std::max(1, s->hi - s->lo);
                 const float fw = W * std::max(0, std::min(span, s->pos - s->lo)) / span;
                 COLORREF c = t.accent;
-                if (s->page == PBST_PAUSED) c = RGB(157, 93, 0);
-                else if (s->page == PBST_ERROR) c = RGB(196, 43, 28);
-                if (fw > 0) FillRound(g, Argb(c), 0, cy - 2, std::max(4.f, fw), 4, 2);
+                if (s->page == PBST_PAUSED) c = t.dark ? RGB(252, 225, 0) : RGB(157, 93, 0);
+                else if (s->page == PBST_ERROR) c = t.dark ? RGB(255, 153, 164) : RGB(196, 43, 28);
+                if (enabled && fw > 0) FillRound(g, Argb(c), 0, cy - th / 2, std::max(th, fw), th, th / 2);
             }
         }
         EndPaint(h, &ps);
@@ -1318,7 +1321,6 @@ LRESULT CALLBACK EditSubclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, 
             Canvas cv(h, wdc, rc);
             if (cv.Ok()) {
                 auto& g = cv.G();
-                PaintUnder(h, g, rc);
                 const Theme& t = g_theme;
                 const Palette p = Pal();
                 const bool focus = GetFocus() == h;
@@ -1326,11 +1328,17 @@ LRESULT CALLBACK EditSubclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, 
                 GetClassNameW(h, cls, 16);
                 const bool ro = _wcsicmp(cls, L"Edit") != 0 || (GetWindowLongW(h, GWL_STYLE) & ES_READONLY) != 0;
                 const float W = (float)rc.right, H = (float)rc.bottom;
-                Color field = Argb(t.dark ? RGB(45, 45, 45) : RGB(255, 255, 255));
+                Color field = Argb(t.dark ? RGB(52, 52, 52) : RGB(255, 255, 255));
                 if (focus && !ro) field = Argb(t.dark ? RGB(31, 31, 31) : RGB(255, 255, 255));
                 if (!IsWindowEnabled(h)) field = Argb(t.dark ? RGB(40, 40, 40) : RGB(249, 249, 249));
+                // a layered edit (Mica) is one opaque rectangle: the translucent card / Mica under it would come out as a dark
+                // box around the field, so the whole frame is the field colour
+                const bool layered = (GetWindowLongW(h, GWL_EXSTYLE) & WS_EX_LAYERED) != 0;
+                if (layered) g.Clear(field);
+                else PaintUnder(h, g, rc);
                 FillRound(g, field, 1, 1, W - 2, H - 2, 4);
-                StrokeRound(g, p.controlStroke, 1, 1, W - 2, H - 2, 4);
+                // no outline on a layered edit: the window region's stepped corners would cut it into light ticks
+                if (!layered) StrokeRound(g, p.controlStroke, 1, 1, W - 2, H - 2, 4);
                 if (!ro) {
                     if (focus) FillRound(g, Argb(t.accent), 2, H - 3, W - 4, 2, 1);
                     else { Gdiplus::Pen pen(t.dark ? White(0x8B) : Black(0x72), 1.f); g.DrawLine(&pen, 4.f, H - 1.5f, W - 4.f, H - 1.5f); }
@@ -1341,14 +1349,6 @@ LRESULT CALLBACK EditSubclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, 
         // let the edit draw its scroll bar (multi-line) on top
         if (GetWindowLongW(h, GWL_STYLE) & WS_VSCROLL) return DefSubclassProc(h, msg, wp, lp);
         return 0;
-    }
-    case WM_WINDOWPOSCHANGED: {
-        const WINDOWPOS* wp2 = (const WINDOWPOS*)lp;
-        if (!(wp2->flags & SWP_NOSIZE) && (GetWindowLongW(h, GWL_EXSTYLE) & WS_EX_LAYERED)) {
-            // a layered child is one opaque surface: cut the corners off so the card / Mica shows there
-            SetWindowRgn(h, CreateRoundRectRgn(0, 0, wp2->cx + 1, wp2->cy + 1, 9, 9), TRUE);
-        }
-        break;
     }
     case WM_SETFOCUS:
     case WM_KILLFOCUS:
@@ -1562,9 +1562,7 @@ void FrameEdit(HWND edit) {
     if (g_theme.mica) {
         SetWindowLongW(edit, GWL_EXSTYLE, GetWindowLongW(edit, GWL_EXSTYLE) | WS_EX_LAYERED);
         SetLayeredWindowAttributes(edit, 0, 255, LWA_ALPHA);
-        RECT r;
-        GetWindowRect(edit, &r);
-        SetWindowRgn(edit, CreateRoundRectRgn(0, 0, r.right - r.left + 1, r.bottom - r.top + 1, 9, 9), TRUE);
+        // no rounded window region: its stepped corners showed as light ticks; the square field is the colour of the card
     }
     if (g_theme.dark) SetWindowTheme(edit, L"DarkMode_Explorer", nullptr);   // dark scroll bar
     SetWindowPos(edit, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
@@ -1580,7 +1578,7 @@ HBRUSH EditBrush(HDC dc, HWND edit) {
     const int i = disabled ? 2 : focus ? 1 : 0;
     const COLORREF bg = disabled ? (t.dark ? RGB(40, 40, 40) : RGB(249, 249, 249))
                       : focus ? (t.dark ? RGB(31, 31, 31) : RGB(255, 255, 255))
-                              : (t.dark ? RGB(45, 45, 45) : RGB(255, 255, 255));
+                              : (t.dark ? RGB(52, 52, 52) : RGB(255, 255, 255));
     if (!g_editBrush[i]) g_editBrush[i] = CreateSolidBrush(bg);
     ::SetTextColor(dc, disabled ? t.textDisabled : t.text);
     SetBkColor(dc, bg);
@@ -1588,7 +1586,7 @@ HBRUSH EditBrush(HDC dc, HWND edit) {
 }
 
 COLORREF FieldBg() {
-    return g_theme.dark ? RGB(45, 45, 45) : RGB(255, 255, 255);
+    return g_theme.dark ? RGB(52, 52, 52) : RGB(255, 255, 255);
 }
 
 void ListRowColors(bool selected, bool focused, COLORREF* bg, COLORREF* fg) {

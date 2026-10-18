@@ -106,6 +106,7 @@ enum : int {
     ID_FPSWARN                  // red warning line on the top edge of the Export group box: the game's frame rate is uneven for 60 fps YouTube video (hidden otherwise)
     , ID_OPENSTEAMVR            // footer button "SteamVR games...": opens the tray's SteamVR games window via SetOpenSteamVrHook (not a config key; appended: existing ids do not move)
     , ID_SVRMODE                // "SteamVR games:" drop-down in the Advanced group, bound to [steamvr] steamvr_mode (appended)
+    , ID_MINIMIZE               // footer button "Minimize" (the window has no title bar; ID_CANCEL reads "Exit"; appended)
 };
 // ID_QSTART reads "Start" and acts on every selected item of ID_QLIST (a multi-select list box: LB_SETSEL / LB_GETSELITEMS).
 extern const wchar_t* const kWindowTitle;

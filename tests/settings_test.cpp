@@ -1099,7 +1099,15 @@ int TestDrive(DWORD pid, bool leaveSlider) {
     Check(SendMessageW(GetDlgItem(d, settings::ID_AUTOSTART), BM_GETCHECK, 0, 0) == BST_UNCHECKED, "Start with Windows: unchecked by default");
     SendMessageW(GetDlgItem(d, settings::ID_AUTOSTART), BM_SETCHECK, BST_CHECKED, 0);
     SendMessageW(GetDlgItem(d, settings::ID_SAVE), BM_CLICK, 0, 0);
-    Check(WaitDialog(pid, false) == nullptr, "good values: Save closed the window");
+    Sleep(300);
+    Check(FindDialog(pid) != nullptr, "good values: Save saved and kept the window open");
+    {
+        wchar_t st[32] = L"";
+        GetWindowTextW(GetDlgItem(d, settings::ID_SAVE), st, 32);
+        Check(wcscmp(st, L"Saved") == 0, "the Save button reads 'Saved' right after the save");
+    }
+    SendMessageW(GetDlgItem(d, settings::ID_CANCEL), BM_CLICK, 0, 0);   // Exit: nothing unsaved, closes at once
+    Check(WaitDialog(pid, false) == nullptr, "Exit closed the window");
     std::wstring stored;
     Check(install::AutostartEnabled(&stored), "Start with Windows ticked + Save: the (test) Run value exists");
     Check(stored.size() > 2 && stored.front() == L'"' && stored.find(L"EyeCaptureTray.exe") != std::wstring::npos, "Run value is a quoted EyeCaptureTray.exe path");
@@ -1138,6 +1146,7 @@ int TestDrive(DWORD pid, bool leaveSlider) {
             SendMessageW(mw, CB_SETCURSEL, (WPARAM)pk.pick, 0);
             SendMessageW(d2, WM_COMMAND, MAKEWPARAM(settings::ID_MAXWIDTH, CBN_SELCHANGE), (LPARAM)mw);
             SendMessageW(GetDlgItem(d2, settings::ID_SAVE), BM_CLICK, 0, 0);
+            SendMessageW(GetDlgItem(d2, settings::ID_CANCEL), BM_CLICK, 0, 0);   // Save keeps the window open: Exit
         } else {
             SendMessageW(GetDlgItem(d2, settings::ID_CANCEL), BM_CLICK, 0, 0);
         }
@@ -1176,6 +1185,7 @@ int TestDrive(DWORD pid, bool leaveSlider) {
             SendMessageW(pw, CB_SETCURSEL, 3, 0);
             SendMessageW(d3, WM_COMMAND, MAKEWPARAM(settings::ID_POSTWHEN, CBN_SELCHANGE), (LPARAM)pw);
             SendMessageW(GetDlgItem(d3, settings::ID_SAVE), BM_CLICK, 0, 0);
+            SendMessageW(GetDlgItem(d3, settings::ID_CANCEL), BM_CLICK, 0, 0);   // Save keeps the window open: Exit
         } else {
             Check(sel == 3 && wcscmp(item, L"When I say") == 0, "reopened: post_when = manual shows as 'When I say'; Cancel");
             SendMessageW(GetDlgItem(d3, settings::ID_CANCEL), BM_CLICK, 0, 0);

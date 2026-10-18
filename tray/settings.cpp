@@ -522,6 +522,8 @@ int                 g_scrollY = 0, g_scrollMax = 0;   // scroll offset / its max
 std::vector<HWND>   g_made;                 // every control made by Builder::Make, in creation order (the Move pass walks it)
 int                 g_helpMinH = 0;         // height of the help edit that shows the longest help text without cut (MeasureHelp)
 std::wstring        g_loadedSvrMode;           // steamvr_mode as loaded into the window (DoSave writes it only when changed)
+KeyValues           g_savedKv;              // the window's values as last loaded / saved (ComparableValues): Exit asks when they differ
+const UINT_PTR      kSavedTimer = 7;        // one-shot: the Save button reads "Saved" for a moment after a save
 int                 g_helpPad = 0;          // help edit client height minus its default formatting rectangle height
 int                 g_naturalH = 0;         // content height with the help edit at g_helpMinH (independent of the window size)
 size_t              g_contentEnd = 0;       // g_made index of the first footer control (set by the Create pass)
@@ -532,7 +534,14 @@ const int           kFooterH = 64;
 const int           kFooterBgId = 3001;     // opaque owner-drawn strip behind the footer buttons
 // The client is never narrower than kLayoutW, even with the vertical scroll bar shown.
 int MinClientW() { return kLayoutW + GetSystemMetrics(SM_CXVSCROLL); }
+// The window rectangle for a client rectangle: AdjustWindowRectEx without the title bar (DlgProc WM_NCCALCSIZE removes it).
+void AdjustFrame(RECT& r, DWORD style) {
+    const LONG top = r.top;
+    AdjustWindowRectEx(&r, style, FALSE, WS_EX_APPWINDOW);
+    r.top = top;
+}
 void Relayout();
+void TryClose();
 
 
 // ---- help texts: hover tooltip + the "Description" panel. Product-documentation style: short, neutral, complete sentences.
@@ -765,8 +774,9 @@ const Help kHelp[] = {
     {ID_DEFAULTS, L"Resets every field to its built-in default. Nothing is saved until Save is clicked."},
     {ID_OPENSTEAMVR, L"Opens the SteamVR games window: tick the SteamVR (OpenVR) games to record, choose Per game or Quick mode. "
                      L"OpenXR games need nothing here."},
-    {ID_SAVE, L"Writes the changed values to config.ini. The next recording uses them."},
-    {ID_CANCEL, L"Closes the window without saving."},
+    {ID_SAVE, L"Writes the changed values to config.ini. The window stays open. The next recording uses them."},
+    {ID_MINIMIZE, L"Minimizes the window to the taskbar."},
+    {ID_CANCEL, L"Closes the window. When there are unsaved changes, it asks first. The tray app keeps running."},
     {ID_ABOUTLINK, L"The project page on GitHub: downloads, the latest version, the manual and bug reports. The tool is free for noncommercial use "
                    L"(PolyForm Noncommercial License 1.0.0, Copyright (c) 2026 JRDevo)."},
 };
@@ -1619,6 +1629,7 @@ void UpdateQueueView() {
     if ((int)SendMessageW(pb, PBM_GETPOS, 0, 0) != pos) SendMessageW(pb, PBM_SETPOS, (WPARAM)pos, 0);
     const int pbState = s.busy && s.paused ? PBST_PAUSED : PBST_NORMAL;
     if ((int)SendMessageW(pb, PBM_GETSTATE, 0, 0) != pbState) SendMessageW(pb, PBM_SETSTATE, (WPARAM)pbState, 0);
+    if ((IsWindowEnabled(pb) != FALSE) != s.busy) EnableWindow(pb, s.busy);   // a faint empty track while nothing runs
 
     // Pause / Resume / Run now (a running job held by post_when, not paused by the user: Run now forces it)
     g_qRunNow = s.busy && s.paused && !s.userPaused && !s.forced;
@@ -1753,19 +1764,29 @@ void ApplyCaptured(const std::wstring& t) {
     ArmCapture(0);
 }
 
-void DoSave() {
-    SaveResult r;
+// The window's values without steamvr_mode while it is still the loaded one: the SteamVR games window may change that key in
+// the file while this window is open (DoSave and the unsaved-changes check both use this).
+KeyValues ComparableValues() {
     KeyValues kv = CollectControls();
-    // steamvr_mode is also set by the SteamVR games window, possibly while this window is open: written only when its drop-down
-    // was changed here (else a mode picked there meanwhile would be put back)
     for (auto it = kv.begin(); it != kv.end(); ++it)
         if (it->first == L"steamvr_mode" && it->second == g_loadedSvrMode) { kv.erase(it); break; }
+    return kv;
+}
+
+// Save: writes config.ini; the window stays open (Exit closes it). false = nothing was saved (bad values, reported).
+bool DoSave() {
+    SaveResult r;
+    // steamvr_mode is also set by the SteamVR games window, possibly while this window is open: written only when its drop-down
+    // was changed here (else a mode picked there meanwhile would be put back)
+    const KeyValues kv = ComparableValues();
     if (!SaveKeyValuesToFile(g_path, kv, r)) {
         std::wstring m = L"The settings could not be saved:\n\n";
         for (const auto& p : r.problems) m += p + L"\n";
         Report(L"Not Saved", m);
-        return;
+        return false;
     }
+    for (const auto& p : kv) if (p.first == L"steamvr_mode") g_loadedSvrMode = p.second;   // saved: now the file's value
+    g_savedKv = ComparableValues();
     // "Start with Windows": the choice is the config key start_with_windows (written above); the Run value follows it here
     // (a user action -- the only other writer is the tray's start-up repair while the key is 1)
     const bool wantAuto = SendMessageW(Ctl(ID_AUTOSTART), BM_GETCHECK, 0, 0) == BST_CHECKED;
@@ -1781,6 +1802,19 @@ void DoSave() {
             Report(kWindowTitle, L"The Start with Windows setting could not be changed:\n" + err);
     }
     if (g_onSaved) g_onSaved(r.changed);
+    SetWindowTextW(Ctl(ID_SAVE), L"Saved");
+    SetTimer(g_dlg, kSavedTimer, 1500, nullptr);
+    return true;
+}
+
+// Exit / Alt+F4 / the taskbar's Close: asks Save / Don't save / Cancel when the window holds unsaved changes (never in test mode,
+// where Exit closes without saving like the old Cancel button).
+void TryClose() {
+    if (!g_reporter && ComparableValues() != g_savedKv) {
+        const int a = glass::MessageBox(g_dlg, L"Save the changes before closing?", kWindowTitle, MB_YESNOCANCEL | MB_ICONQUESTION);
+        if (a == IDCANCEL) return;
+        if (a == IDYES && !DoSave()) return;
+    }
     DestroyWindow(g_dlg);
 }
 
@@ -1871,10 +1905,12 @@ void CommandHandler(int id, int code) {
         ShowHelp(HelpText(id));
         return;
     }
-    if ((id == ID_SAVE || id == ID_CANCEL || id == ID_OPENINI || id == ID_DEFAULTS || id == ID_BROWSE || id == ID_OPENSTEAMVR) && code != BN_CLICKED) return;
+    if ((id == ID_SAVE || id == ID_CANCEL || id == ID_MINIMIZE || id == ID_OPENINI || id == ID_DEFAULTS || id == ID_BROWSE ||
+         id == ID_OPENSTEAMVR) && code != BN_CLICKED) return;
     switch (id) {
     case ID_SAVE: DoSave(); break;
-    case ID_CANCEL: DestroyWindow(g_dlg); break;
+    case ID_CANCEL: TryClose(); break;
+    case ID_MINIMIZE: ShowWindow(g_dlg, SW_MINIMIZE); break;
     case ID_OPENSTEAMVR: if (g_openSteamVr) g_openSteamVr(); break;
     case ID_OPENINI: ShellExecuteW(nullptr, L"open", g_path.c_str(), nullptr, nullptr, SW_SHOWNORMAL); break;
     case ID_DEFAULTS: {
@@ -2031,6 +2067,11 @@ LRESULT CALLBACK DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             UpdateFreeSpace();
             return 0;
         }
+        if (wp == kSavedTimer) {   // one-shot: "Saved" back to "Save"
+            KillTimer(h, kSavedTimer);
+            SetWindowTextW(Ctl(ID_SAVE), L"Save");
+            return 0;
+        }
         // some controls (edit, trackbar) may keep WM_SETCURSOR to themselves: also look at what is under the mouse
         if (wp == kHoverTimer) {
             POINT pt;
@@ -2066,13 +2107,39 @@ LRESULT CALLBACK DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_GETMINMAXINFO: {
         MINMAXINFO* mm = (MINMAXINFO*)lp;
         RECT r{0, 0, MinClientW(), kMinClientH};
-        AdjustWindowRectEx(&r, (DWORD)GetWindowLongW(h, GWL_STYLE), FALSE, (DWORD)GetWindowLongW(h, GWL_EXSTYLE));
+        AdjustFrame(r, (DWORD)GetWindowLongW(h, GWL_STYLE));
         mm->ptMinTrackSize.x = r.right - r.left;
         mm->ptMinTrackSize.y = r.bottom - r.top;
         return 0;
     }
+    case WM_NCCALCSIZE:
+        // no title bar: the client starts at the window's top edge (the header with the logo is the caption, so the Mica / the
+        // window colour runs through without a seam); the side and bottom resize borders stay. Maximized, the window hangs over
+        // the screen edge by its frame on every side: the top is inset like the sides.
+        if (wp) {
+            NCCALCSIZE_PARAMS* p = (NCCALCSIZE_PARAMS*)lp;
+            const LONG top = p->rgrc[0].top, left = p->rgrc[0].left;
+            const LRESULT r = DefWindowProcW(h, msg, wp, lp);
+            p->rgrc[0].top = top + (IsZoomed(h) ? p->rgrc[0].left - left : 0);
+            return r;
+        }
+        return DefWindowProcW(h, msg, wp, lp);
+    case WM_NCHITTEST: {
+        const LRESULT r = DefWindowProcW(h, msg, wp, lp);
+        if (r != HTCLIENT) return r;
+        POINT pt{(short)LOWORD(lp), (short)HIWORD(lp)};
+        ScreenToClient(h, &pt);
+        RECT rc{};
+        GetClientRect(h, &rc);
+        if (!IsZoomed(h) && pt.y < 6) return pt.x < 12 ? HTTOPLEFT : pt.x >= rc.right - 12 ? HTTOPRIGHT : HTTOP;
+        // the header (logo, config path: they let the mouse through) and the footer's free space drag the window
+        RECT lr{};
+        if (HWND logo = Ctl(ID_LOGO)) { GetWindowRect(logo, &lr); MapWindowPoints(nullptr, h, (POINT*)&lr, 2); }
+        if (pt.y < lr.bottom + 4 || pt.y >= rc.bottom - g_footerH) return HTCAPTION;
+        return r;
+    }
     case WM_CLOSE:
-        DestroyWindow(h);
+        TryClose();
         return 0;
     case WM_DESTROY:
         KillTimer(h, kQueueTimer);
@@ -2083,6 +2150,7 @@ LRESULT CALLBACK DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         KillTimer(h, kCaptureTimer);
         KillTimer(h, kPulseTimer);
         KillTimer(h, kFreeSpaceTimer);
+        KillTimer(h, kSavedTimer);
         g_capturing = 0;
         input::SetCapture(false);
         g_done = true;
@@ -2620,9 +2688,10 @@ int BuildControls(HWND dlg, Builder::Pass pass, int clientW, int clientH, int sc
     b.Button(ID_DEFAULTS, gx + wOpen + 8, by, wDef, L"Restore Defaults");
     b.Button(ID_OPENSTEAMVR, gx + wOpen + wDef + 16, by, wSvr, L"SteamVR games...");
     EnableWindow(GetDlgItem(dlg, ID_OPENSTEAMVR), g_openSteamVr ? TRUE : FALSE);
-    b.Button(ID_SAVE, gx + gw - 2 * wOk - 8, by, wOk, L"Save", true);
-    b.Button(ID_CANCEL, gx + gw - wOk, by, wOk, L"Cancel");
-    if (create) for (int id : {ID_OPENINI, ID_DEFAULTS, ID_OPENSTEAMVR, ID_SAVE, ID_CANCEL}) g_footer.push_back(GetDlgItem(dlg, id));
+    b.Button(ID_SAVE, gx + gw - 3 * wOk - 16, by, wOk, L"Save", true);
+    b.Button(ID_MINIMIZE, gx + gw - 2 * wOk - 8, by, wOk, L"Minimize");
+    b.Button(ID_CANCEL, gx + gw - wOk, by, wOk, L"Exit");
+    if (create) for (int id : {ID_OPENINI, ID_DEFAULTS, ID_OPENSTEAMVR, ID_SAVE, ID_MINIMIZE, ID_CANCEL}) g_footer.push_back(GetDlgItem(dlg, id));
     const wchar_t* const noteText = L"Changes apply to the next recording. Keyboard hotkeys and the indicator require a game restart.";
     const int noteW = b.TextW(noteText) + 4;
     HWND note = b.Make(L"STATIC", noteText, SS_LEFT | SS_NOPREFIX, gx, fy + 9, noteW, 16, -1);
@@ -2884,8 +2953,9 @@ void ShowDialog(const std::wstring& configPath, std::function<void(const std::ve
     g_made.clear();
     g_helpMinH = g_helpPad = g_naturalH = 0;
     RECT rc{0, 0, kLayoutW, 700};   // provisional: resized below to the height BuildControls computed
-    const DWORD style = WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_THICKFRAME;
-    AdjustWindowRectEx(&rc, style, FALSE, WS_EX_APPWINDOW);
+    // no WS_SYSMENU: DWM would draw its caption buttons over the header (WM_NCCALCSIZE removes the title bar; Minimize / Exit are in the footer)
+    const DWORD style = WS_CAPTION | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_THICKFRAME;
+    AdjustFrame(rc, style);
     const int w = rc.right - rc.left, hgt = rc.bottom - rc.top;
     const int sx = (GetSystemMetrics(SM_CXSCREEN) - w) / 2, sy = (GetSystemMetrics(SM_CYSCREEN) - hgt) / 2;
     g_dlg = CreateWindowExW(WS_EX_APPWINDOW, L"EyeCaptureSettings", kWindowTitle, style, sx < 0 ? 0 : sx, sy < 0 ? 0 : sy,
@@ -2907,7 +2977,7 @@ void ShowDialog(const std::wstring& configPath, std::function<void(const std::ve
         // the whole content without scrolling when the work area allows it; else as high as the work area (Relayout shows the
         // scroll bar; MinClientW() already leaves room for it)
         RECT fit{0, 0, MinClientW(), g_naturalH + g_footerH};
-        AdjustWindowRectEx(&fit, style, FALSE, WS_EX_APPWINDOW);
+        AdjustFrame(fit, style);
         const int fw = fit.right - fit.left, maxH = wa.bottom - wa.top;
         const int fh = fit.bottom - fit.top < maxH ? fit.bottom - fit.top : maxH;
         const int fx = wa.left + (wa.right - wa.left - fw) / 2, fy = wa.top + (maxH - fh) / 2;
@@ -2917,6 +2987,7 @@ void ShowDialog(const std::wstring& configPath, std::function<void(const std::ve
         SetTimer(g_dlg, kPulseTimer, 50, nullptr);
         SetTimer(g_dlg, kQueueTimer, 500, nullptr);
         LoadFromFile();
+        g_savedKv = ComparableValues();
         UpdateQueueView();
         CheckTextFit();
         ShowWindow(g_dlg, SW_SHOW);
