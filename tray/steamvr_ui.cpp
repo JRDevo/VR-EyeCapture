@@ -550,13 +550,21 @@ void EnableFlow(const std::wstring& exe, const std::wstring& root, const std::ws
             MB_OK | MB_ICONWARNING);
         return;
     }
-    const std::wstring q = std::wstring(reenable ? L"Re-enable" : L"Enable") + L" SteamVR recording for " + name +
-                           L"?\n\nClose the game and SteamVR first.\n\nGame folder:\n" + root + L"\n\nopenvr_api.dll found in:\n" +
-                           list + anti +
-                           L"\nThe game's own file stays next to it as openvr_api_real.dll. Untick the game to put it back.";
-    if (Box(q, MB_YESNO | (anti.empty() ? MB_ICONQUESTION : MB_ICONWARNING | MB_DEFBUTTON2)) != IDYES) {
-        LOGI("tray: steamvr: %s %s: cancelled", what, N(name).c_str());
-        return;
+    {   // the plan goes to the log; the user is asked only when anti-cheat was found (the tick is the consent: untick undoes it,
+        // and a running game's files are refused anyway)
+        std::wstring flat = list;
+        for (wchar_t& ch : flat) if (ch == L'\n') ch = L'|';
+        LOGI("tray: steamvr: %s %s: plan: %s", what, N(name).c_str(), N(flat).c_str());
+    }
+    if (!anti.empty()) {
+        const std::wstring q = std::wstring(reenable ? L"Re-enable" : L"Enable") + L" SteamVR recording for " + name +
+                               L"?\n\nClose the game and SteamVR first.\n\nGame folder:\n" + root + L"\n\nopenvr_api.dll found in:\n" +
+                               list + anti +
+                               L"\nThe game's own file stays next to it as openvr_api_real.dll. Untick the game to put it back.";
+        if (Box(q, MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) {
+            LOGI("tray: steamvr: %s %s: cancelled", what, N(name).c_str());
+            return;
+        }
     }
     GameEntry e;
     e.name = name;
