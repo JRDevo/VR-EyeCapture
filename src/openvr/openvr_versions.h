@@ -2,7 +2,9 @@
 // calls. From the history of Valve's openvr.h:
 //   * IVRCompositor: SetTrackingSpace, GetTrackingSpace, WaitGetPoses (2), GetLastPoses, GetLastPoseForTrackedDeviceIndex,
 //     Submit (5) -- the same first six methods since IVRCompositor_014. Later versions only appended methods (and _028
-//     inserted SubmitWithArrayIndex at 6, after Submit), so the two hooked slots never moved.
+//     inserted SubmitWithArrayIndex at 6, after Submit), so the two hooked slots never moved -- until IVRCompositor_029
+//     (OpenVR 2.15, e.g. No Man's Sky), which inserted GetSubmitTexture at 5: there Submit is slot 6 (53 methods; checked
+//     2026-10-18 against Valve's openvr.h and openvr_capi.h of 2.15.6, the C++ class and the FnTable agree).
 //   * methodCount: the size of the "FnTable:" function table of that version, for the copy the proxy hands out -- an
 //     ESTIMATE from the openvr.h history (a review recalled different counts for some versions, e.g. _022 = 43; not
 //     verified either way). It does not need to be exact: the copy
@@ -34,6 +36,7 @@ const CompositorVersion kCompositorVersions[] = {
     {"IVRCompositor_026", 48, 2, 5},
     {"IVRCompositor_027", 51, 2, 5},
     {"IVRCompositor_028", 52, 2, 5},
+    {"IVRCompositor_029", 53, 2, 6},
 };
 const int kCompositorVersionCount = (int)(sizeof(kCompositorVersions) / sizeof(kCompositorVersions[0]));
 const uint32_t kFnTableCopyMargin = 16;

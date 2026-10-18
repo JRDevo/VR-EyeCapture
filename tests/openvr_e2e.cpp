@@ -233,7 +233,11 @@ int wmain(int argc, wchar_t** argv) {
     vr::IVRCompositor* cpp = a.iface == "cpp" ? static_cast<vr::IVRCompositor*>(comp) : nullptr;
     void* const* fn = a.iface == "fntable" ? static_cast<void* const*>(comp) : nullptr;
     const vr::PFN_FnWaitGetPoses fnWait = fn ? (vr::PFN_FnWaitGetPoses)fn[2] : nullptr;
-    const vr::PFN_FnSubmit fnSubmit = fn ? (vr::PFN_FnSubmit)fn[5] : nullptr;
+    // IVRCompositor_029 inserted GetSubmitTexture at 5: Submit is slot 6 there (C++ vtable and FnTable alike)
+    const int slotSubmit = a.version == "029" ? 6 : 5;
+    const vr::PFN_FnSubmit fnSubmit = fn ? (vr::PFN_FnSubmit)fn[slotSubmit] : nullptr;
+    typedef vr::EVRCompositorError (*PFN_CppSubmit)(void*, vr::EVREye, const vr::Texture_t*, const vr::VRTextureBounds_t*, vr::EVRSubmitFlags);
+    const PFN_CppSubmit cppSubmit029 = cpp && slotSubmit == 6 ? (PFN_CppSubmit)(*(void***)cpp)[6] : nullptr;   // not in our _028 header
     // a second ask for the same interface must give a working object too (vtable patched once)
     if (cpp) { void* again = pGet(ifName.c_str(), &ge); if (again != comp) Fail("second VR_GetGenericInterface returned another object"); }
 
@@ -296,8 +300,9 @@ int wmain(int argc, wchar_t** argv) {
             vr::VRTextureBounds_t b{0, 0, 1, 1};
             if (wide) { b.uMin = e ? 0.5f : 0.0f; b.uMax = e ? 1.0f : 0.5f; }
             const vr::EVRSubmitFlags flags = a.pose == "submit" ? vr::Submit_TextureWithPose : vr::Submit_Default;
-            const vr::EVRCompositorError r = cpp ? cpp->Submit((vr::EVREye)e, &t, (wide || f % 2) ? &b : nullptr, flags)
-                                                 : fnSubmit((vr::EVREye)e, &t, (wide || f % 2) ? &b : nullptr, flags);
+            const vr::EVRCompositorError r = cppSubmit029 ? cppSubmit029(cpp, (vr::EVREye)e, &t, (wide || f % 2) ? &b : nullptr, flags)
+                                             : cpp ? cpp->Submit((vr::EVREye)e, &t, (wide || f % 2) ? &b : nullptr, flags)
+                                                   : fnSubmit((vr::EVREye)e, &t, (wide || f % 2) ? &b : nullptr, flags);
             ++gameSubmits[e];
             if ((int)r != a.submitError) ++badResults;
         }

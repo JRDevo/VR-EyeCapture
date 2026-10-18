@@ -130,15 +130,16 @@ int main() {
         Check(FindCompositorVersion(nullptr, &fn, &comp) == -1, "null name");
         bool slotsOk = true, countsOk = true;
         for (int i = 0; i < kCompositorVersionCount; ++i) {
-            slotsOk = slotsOk && kCompositorVersions[i].slotWaitGetPoses == 2 && kCompositorVersions[i].slotSubmit == 5;
+            const uint32_t wantSubmit = strcmp(kCompositorVersions[i].name, "IVRCompositor_029") >= 0 ? 6u : 5u;   // _029 inserted GetSubmitTexture
+            slotsOk = slotsOk && kCompositorVersions[i].slotWaitGetPoses == 2 && kCompositorVersions[i].slotSubmit == wantSubmit;
             countsOk = countsOk && kCompositorVersions[i].methodCount > 6 &&
                        kCompositorVersions[i].methodCount + kFnTableCopyMargin <= kFnTableMax &&
                        (i == 0 || kCompositorVersions[i].methodCount >= kCompositorVersions[i - 1].methodCount);
         }
-        Check(slotsOk, "every known IVRCompositor: WaitGetPoses slot 2, Submit slot 5");
+        Check(slotsOk, "every known IVRCompositor: WaitGetPoses slot 2, Submit slot 5 (slot 6 from _029)");
         Check(countsOk, "method counts plausible, non-decreasing, copy fits kFnTableMax");
-        Check(kCompositorVersionCount == 10 && strcmp(kCompositorVersions[0].name, "IVRCompositor_019") == 0 &&
-              strcmp(kCompositorVersions[9].name, "IVRCompositor_028") == 0, "versions 019 .. 028");
+        Check(kCompositorVersionCount == 11 && strcmp(kCompositorVersions[0].name, "IVRCompositor_019") == 0 &&
+              strcmp(kCompositorVersions[10].name, "IVRCompositor_029") == 0, "versions 019 .. 029");
         Check(kSystemVersions[0].slotFloatProperty == 22 && kSystemVersions[3].slotFloatProperty == 23 &&
               kSystemVersions[0].slotProjectionRaw == 2 && kSystemVersions[0].slotEyeToHead == 4, "IVRSystem slot table");
     }

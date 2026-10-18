@@ -330,6 +330,22 @@ if (Want 'submit_error') {
     Record 'submit_error' $f
 }
 
+# ---- IVRCompositor_029 (OpenVR 2.15, e.g. No Man's Sky): Submit moved to slot 6 ----
+foreach ($iface in 'cpp', 'fntable') {
+    $name = "v029_$iface"
+    if (-not (Want $name)) { continue }
+    $r = RunCase $name @('--layout', 'two', '--iface', $iface, '--seconds', '4', '--version', '029') $rawCfg
+    $f = @()
+    Need ($r.code -eq 0) 'openvr_e2e failed' ([ref]$f)
+    if ($iface -eq 'cpp') { Need ($r.log -match 'IVRCompositor_029 \(C\+\+ object .*\): vtable .* patched in place -- slot 2 WaitGetPoses, slot 6 Submit') 'vtable patch line (slot 6)' ([ref]$f) }
+    else { Need ($r.log -match 'FnTable:IVRCompositor_029 \(FnTable .*\): copied \d+ entries') 'FnTable copy line' ([ref]$f) }
+    Need ($r.log -notmatch 'IVRCompositor_029 is a version this proxy does not know') 'still unknown' ([ref]$f)
+    Need ($r.log -match 'record: start .*_SBS\.mp4 \| SteamVR D3D11') 'record start line' ([ref]$f)
+    Need ($r.log -match 'recording summary: ') 'recording summary (finalized)' ([ref]$f)
+    Need ($null -ne $r.mp4) 'no MP4' ([ref]$f)
+    Record $name $f
+}
+
 # ---- unknown compositor version ----
 if (Want 'unknown_version') {
     $r = RunCase 'unknown_version' @('--layout', 'two', '--seconds', '3', '--version', '099') $rawCfg

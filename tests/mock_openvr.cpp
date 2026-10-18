@@ -160,8 +160,17 @@ void* const kVt022[41] = {
     S(20), S(21), S(22), S(23), S(24), S(25), S(26), S(27), S(28), S(29),
     S(30), S(31), S(32), S(33), S(34), S(35), S(36), S(37), S(38), S(39),
     S(40)};
+// _029: GetSubmitTexture inserted at 5 (a stub here), so Submit is slot 6
+void* const kVt029[53] = {
+    S(0), S(1), (void*)&CppWait, S(3), S(4), S(5), (void*)&CppSubmit, S(7), S(8), S(9),
+    S(10), S(11), S(12), S(13), S(14), S(15), S(16), S(17), S(18), S(19),
+    S(20), S(21), S(22), S(23), S(24), S(25), S(26), S(27), S(28), S(29),
+    S(30), S(31), S(32), S(33), S(34), S(35), S(36), S(37), S(38), S(39),
+    S(40), S(41), S(42), S(43), S(44), S(45), S(46), S(47), S(48), S(49),
+    S(50), S(51), S(52)};
 #undef S
 struct RawObj { void* const* vtbl; };
+RawObj g_comp029{kVt029};
 RawObj g_comp028{kVt028};
 RawObj g_comp022{kVt022};
 
@@ -242,6 +251,13 @@ void* g_fn028[52] = {
     F(30), F(31), F(32), F(33), F(34), F(35), F(36), F(37), F(38), F(39),
     F(40), F(41), F(42), F(43), F(44), F(45), F(46), F(47), F(48), F(49),
     F(50), F(51)};
+void* g_fn029[53] = {
+    F(0), F(1), (void*)&FnWait, F(3), F(4), F(5), (void*)&FnSubmit, F(7), F(8), F(9),
+    F(10), F(11), F(12), F(13), F(14), F(15), F(16), F(17), F(18), F(19),
+    F(20), F(21), F(22), F(23), F(24), F(25), F(26), F(27), F(28), F(29),
+    F(30), F(31), F(32), F(33), F(34), F(35), F(36), F(37), F(38), F(39),
+    F(40), F(41), F(42), F(43), F(44), F(45), F(46), F(47), F(48), F(49),
+    F(50), F(51), F(52)};
 void* g_fn022[41] = {
     F(0), F(1), (void*)&FnWait, F(3), F(4), (void*)&FnSubmit, F(6), F(7), F(8), F(9),
     F(10), F(11), F(12), F(13), F(14), F(15), F(16), F(17), F(18), F(19),
@@ -519,6 +535,8 @@ MOCK_EXPORT void* VR_GetGenericInterface(const char* name, vr::EVRInitError* e) 
     const bool only019 = Env("MOCK_OPENVR_SYSTEM") == "019";
     if (n == "IVRCompositor_028" || n == "IVRCompositor_099") return &g_comp028;
     if (n == "IVRCompositor_022") return &g_comp022;
+    if (n == "IVRCompositor_029") return &g_comp029;
+    if (n == "FnTable:IVRCompositor_029") return g_fn029;
     if (n == "FnTable:IVRCompositor_028" || n == "FnTable:IVRCompositor_099") return g_fn028;
     if (n == "FnTable:IVRCompositor_022") return g_fn022;
     if (n == "IVRSystem_022" && !only019) return static_cast<vr::IVRSystem*>(&g_sys022);

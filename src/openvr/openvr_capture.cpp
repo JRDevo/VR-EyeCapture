@@ -636,10 +636,11 @@ void FnHooksFor(int v, void** wait, void** submit) {
     case 7: FnHooks<7>::Fill(wait, submit); break;
     case 8: FnHooks<8>::Fill(wait, submit); break;
     case 9: FnHooks<9>::Fill(wait, submit); break;
+    case 10: FnHooks<10>::Fill(wait, submit); break;
     default: *wait = *submit = nullptr; break;
     }
 }
-static_assert(kCompositorVersionCount == 10, "FnHooksFor covers 10 compositor versions");
+static_assert(kCompositorVersionCount == 11, "FnHooksFor covers 11 compositor versions");
 
 // ------------------------------------------------------------------------------------------------ control thread
 
