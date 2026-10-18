@@ -972,7 +972,8 @@ app window → Advanced → **Open log**):
 because it is built against OBS Studio's libobs.
 
 - Free to use, copy, change and share for **noncommercial** purposes.
-- **No commercial use** (no selling, no paid bundles) without written permission.
+- **Your recordings are yours.** You may publish and monetize them (YouTube ads, sponsors, streams, paid content).
+- **No commercial use of the tool itself** (no selling, no paid bundles, no paid service) without written permission.
 - If you share it, include the license and the copyright notice.
 - No warranty: you use it at your own risk.
 

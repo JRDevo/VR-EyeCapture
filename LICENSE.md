@@ -138,3 +138,14 @@ What this license covers in VR EyeCapture:
   header in `third_party/openvr/`, the libobs headers) are NOT covered by this
   license; their own terms apply. See THIRD_PARTY.md. VR EyeCapture ships no
   Valve or OBS binary.
+
+Additional permission for your recordings:
+
+- The videos, screenshots and other recordings you make with this software are
+  yours. The licensor claims no rights in them.
+- You may publish them and earn money from them: ad revenue (for example YouTube
+  monetization), sponsorships, live streams, memberships, donations and paid
+  content. This counts as a permitted purpose under this license.
+- The noncommercial limit applies to the software itself. Without written
+  permission you may not sell the software, include it in a paid product or
+  bundle, or offer it as a paid service.
