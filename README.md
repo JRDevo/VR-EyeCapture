@@ -133,7 +133,7 @@ conversion queue); **right-click** it for the menu.
 
 ### The tray menu (right-click the icon)
 
-![The tray menu](docs/images/tray_menu.png)
+![The tray menu](docs/images/tray_menu_v050.png)
 
 | Item | What it does |
 |---|---|
@@ -150,7 +150,7 @@ conversion queue); **right-click** it for the menu.
 
 ### The app window (left-click the tray icon)
 
-![The app window](docs/images/settings.png)
+![The app window](docs/images/settings_v050.png)
 
 *(Dark theme shown. The window follows the Windows light / dark setting unless you pick one under Theme.)*
 
@@ -711,15 +711,15 @@ The plugin is a separate download. It is not in the installer, so you only get i
 
 1. Start OBS. Click **+** under Sources and pick **VR EyeCapture**. Click **Add a new VR EyeCapture**, then OK.
 
-   ![Add Source: VR EyeCapture](docs/images/obs_add_source.png)
+   ![Add Source: VR EyeCapture](docs/images/obs_add_source_v050.png)
 
 2. In the Properties window, pick the **View** and click OK. The preview there stays black until a game runs.
 
-   ![Source properties](docs/images/obs_properties.png)
+   ![Source properties](docs/images/obs_properties_v050.png)
 
 3. Keep the source visible (the eye icon in the Sources list is on). The game only sends pictures while it is visible.
 
-   ![The source in the Sources list](docs/images/obs_sources.png)
+   ![The source in the Sources list](docs/images/obs_sources_v050.png)
 
 4. Start the tray app, then the game. The picture shows when the game's VR session runs.
 5. Click the source and press **Ctrl+F** (Fit to screen). Do this again after you change the View: one eye and side by
