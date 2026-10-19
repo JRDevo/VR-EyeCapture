@@ -699,11 +699,11 @@ recording are independent.
 
 **Install**
 
-The plugin is a separate download. It is not in the main zip, so you only get it if you use OBS.
+The plugin is a separate download. It is not in the installer, so you only get it if you use OBS.
 
 1. Download `VR-EyeCapture-OBS-v<version>.zip` from the
    [latest release](https://github.com/JRDevo/VR-EyeCapture/releases/latest) under **Assets**. Use the same
-   version as the main zip: a plugin and a layer of different versions ignore each other.
+   version as the installer: a plugin and a layer of different versions ignore each other.
 2. Close OBS.
 3. Copy `obs-eyecapture.dll` from that zip to `C:\ProgramData\obs-studio\plugins\obs-eyecapture\bin\64bit\` (make the folders).
 
