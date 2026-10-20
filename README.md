@@ -44,6 +44,9 @@ games with Direct3D 11 or Direct3D 12.
 - **OpenXR API layer** — works with any runtime (Virtual Desktop VDXR, SteamVR, Oculus / Meta Link); nothing is injected
   and no game files are touched.
 - **Direct3D 11 and 12 games** — any OpenXR game that renders with either.
+- **32-bit OpenXR games too** (Direct3D 11) — e.g. an old 32-bit game with a VR mod: the encoder runs in a separate 64-bit
+  helper (`EyeCaptureRecorder.exe`, started by the tray), so the game's 2 GB address space stays free
+  ([32-bit games](#32-bit-openxr-games)).
 - **SteamVR (OpenVR) games** — tray menu **SteamVR games...** enables recording per game (Direct3D 11 and 12).
 - **One hotkey** — default `ScrollLock`, or the tray icon, starts and stops a recording; beeps in the headset confirm
   (`beeps = 0` turns them off, e.g. when they end up in the recorded audio).
@@ -202,6 +205,10 @@ OpenXR is a trademark of The Khronos Group.
 - Windows 10 (1703 or newer) or Windows 11, 64-bit.
 - An OpenXR game using **Direct3D 11 or Direct3D 12**, or a SteamVR (OpenVR) game using **Direct3D 11 or Direct3D 12**. Vulkan is planned ([`docs/VULKAN.md`](docs/VULKAN.md));
   OpenGL is not supported. Unsupported games run normally, just without recording.
+- **32-bit OpenXR games** (a 32-bit game, or a 32-bit VR mod of an old game, through the 32-bit OpenXR loader): **Direct3D 11**
+  only, with a 32-bit OpenXR runtime (e.g. Virtual Desktop's VDXR, which ships one). They are recorded through
+  `eye_capture32.dll` + the 64-bit helper `EyeCaptureRecorder.exe` (both installed and registered by the setup; see
+  [32-bit OpenXR games](#32-bit-openxr-games)).
 - A GPU with a hardware HEVC (H.265) encoder: NVIDIA GTX 10xx or newer, AMD RX 400 or newer, Intel 7th gen or newer.
   HEVC is needed for wide frames: a Quest 3 at high settings is about 6000 x 3200 side by side, beyond H.264 limits.
   Optional: `codec = av1` records AV1 on GPUs with a hardware AV1 encoder (NVIDIA RTX 40 / 50 series; tested on an RTX 5090:
@@ -220,7 +227,8 @@ OpenXR is a trademark of The Khronos Group.
 1. Run `VR-EyeCapture-Setup-v<version>.exe` and accept the one Windows administrator (UAC) prompt. It installs into
    `C:\Program Files\VR EyeCapture` (you can pick another folder), adds a Start menu entry and registers the layer for all
    OpenXR apps: `HKLM\SOFTWARE\Khronos\OpenXR\1\ApiLayers\Implicit\<folder>\XR_APILAYER_JRDEVO_eye_capture.json = 0`
-   (any older registration from another folder is replaced).
+   (any older registration from another folder is replaced), and for 32-bit OpenXR games the 32-bit layer in the 32-bit
+   registry view: `HKLM\SOFTWARE\WOW6432Node\Khronos\OpenXR\1\ApiLayers\Implicit\<folder>\XR_APILAYER_JRDEVO_eye_capture32.json = 0`.
 2. At the end, leave **Start VR EyeCapture now** ticked: the tray icon appears. Later: Start menu → **VR EyeCapture**.
    The program folder stays read-only; your data lives in your own folders: settings in
    `%APPDATA%\VR EyeCapture\config.ini`, logs in `%LOCALAPPDATA%\VR EyeCapture\logs`, recordings in
@@ -247,7 +255,8 @@ value `Home`, deletes the program, and then asks twice (No is the default): dele
 recordings in `Videos\VR EyeCapture`? Nothing else is left behind.
 
 Command-line forms (from an administrator prompt): `EyeCaptureTray.exe --register` / `--unregister` (exit code 0 = done,
-5 = no administrator rights); `EyeCaptureTray.exe --status` prints `registered=yes|no|stale` and `autostart=yes|no` among the status fields;
+5 = no administrator rights; both do the 64-bit and the 32-bit layer); `EyeCaptureTray.exe --status` prints `registered=yes|no|stale`
+(both layers), `registered32=yes|no|stale|nofiles` (the 32-bit layer alone) and `autostart=yes|no` among the status fields;
 `--quit` closes the running tray app of that folder and `--uninstall-cleanup` does the uninstaller's clean-up (both used by the setup).
 `scripts\install.ps1` / `uninstall.ps1` are only for building from source (see [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)).
 
@@ -300,6 +309,26 @@ does not stop the layer; the hotkey keeps working until the game ends.
 Set `require_tray = 0` in `config.ini` to always arm without the tray (old behaviour, hotkey only).
 The tray app also owns the registration: at start it checks that the layer is registered for its own folder (and removes
 any per-user HKCU copy, which would make some loaders load the layer twice) and offers to register it if not.
+
+### 32-bit OpenXR games
+
+A 32-bit game loads the 32-bit OpenXR loader, which only sees the 32-bit layer `eye_capture32.dll` (registered by the setup
+in the 32-bit part of the registry). That layer keeps the game's side small: the hotkey, the tray icon, the beeps, the
+in-headset dot and the settings work exactly as in a 64-bit game, but each eye picture is copied on the GPU into a shared
+texture and the recording itself is made by **`EyeCaptureRecorder.exe`**, a 64-bit helper the tray app starts by itself
+when a 32-bit game opens its VR session (and which exits with the game). So the game's limited 2 GB address space is not
+used for the encoder (measured: about 6 MB more while recording), and the recordings are the same as for a 64-bit game
+(symmetric view, head smoothing, dome, audio, the MKV / 8K conversions). The tray log says
+`32-bit games: started ...EyeCaptureRecorder.exe ... for <game>`; the recorder writes into the same `eye_capture.log`.
+
+- **Direct3D 11 only.** Overlay panels (`record_overlays`) and the OBS live view are not available for 32-bit games: only
+  the game's two eye pictures are recorded.
+- **One 32-bit game at a time.** A second one runs normally and says in the log why it is not recorded.
+- If the game exits or crashes while recording, the helper still finishes the MP4 (and the tray converts it as usual).
+- The tray app must run (as for every game): a hotkey press right after a 32-bit game started waits up to 8 s for the
+  helper. Without it you hear the error beep and the log says `EyeCaptureRecorder.exe ... is not running`.
+- A game that runs as administrator cannot be recorded by a normal tray app (Windows keeps them apart): run the game
+  normally.
 
 </details>
 
@@ -964,7 +993,9 @@ thread or GPU queue.
 
 See [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md). Short version: Visual Studio 2022, then
 `powershell -ExecutionPolicy Bypass -File scripts\package.ps1`. It makes the installer `VR-EyeCapture-Setup-v<version>.exe` and the
-separate `VR-EyeCapture-OBS-v<version>.zip` in `dist\` (build notes for the plugin: [`obs/README.md`](obs/README.md)).
+separate `VR-EyeCapture-OBS-v<version>.zip` in `dist\` (build notes for the plugin: [`obs/README.md`](obs/README.md)). It builds
+twice: the normal x64 configure (`build`) and a Win32 one (`build32`) for the 32-bit layer `eye_capture32.dll`
+([`docs/X86_DESIGN.md`](docs/X86_DESIGN.md)).
 
 </details>
 

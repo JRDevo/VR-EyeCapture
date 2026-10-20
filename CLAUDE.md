@@ -8,6 +8,9 @@ Project memory lives in the Claude workspace for this folder (`~/.claude/project
 ## Build / test
 - CMake is NOT on PATH. Use:
   `"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" --build build --config Release`
+- 32-bit OpenXR games (`docs/X86_DESIGN.md`): a second configure `cmake -B build32 -S . -G "Visual Studio 17 2022" -A Win32`
+  builds only `eye_capture32.dll` (+ its 32-bit mock runtime / `layer_e2e`); `EyeCaptureRecorder.exe` (the 64-bit helper that
+  records for it) is in the x64 build. Test: `tests\run_x86.ps1` (GPU, same skip rules as `run_e2e.ps1`).
 - 0 warnings in our sources is the bar. Tests: `tests\run_selftests.ps1`, `tests\run_e2e.ps1`, `tests\run_jitter.ps1`,
   `tests\run_dome.ps1`, `tests\run_settings.ps1`, `tests\run_reload.ps1`, `tests\run_yt8k.ps1` (tray 8K step, CPU only),
   `tests\run_tag3d.ps1` (tray "Tag a video as 3D" via `--tag3d`, CPU only), `tests\run_live.ps1` (OBS live share, GPU),
@@ -27,6 +30,9 @@ Project memory lives in the Claude workspace for this folder (`~/.claude/project
   "SteamVR games" copies `steamvr\openvr_api.dll`, else `build\Release\openvr_api.dll`, into a game folder on Enable).
   Refresh them from `build\Release` after a build — the DLL only when no game has it loaded, the tray only when
   no `EyeCaptureTray` process runs (close it, copy, start it again).
+- 32-bit games: the root also holds `eye_capture32.dll` + `XR_APILAYER_JRDEVO_eye_capture32.json` (from `build32\Release`) and
+  `EyeCaptureRecorder.exe`; the 32-bit json is registered in the 32-bit view (`HKLM\SOFTWARE\WOW6432Node\Khronos\...`) by the
+  same `--register` / `install.ps1`. Refresh `EyeCaptureRecorder.exe` only when none runs (it lives as long as its 32-bit game).
 - Registry: the layer is registered in **HKLM only**, written by `EyeCaptureTray.exe --register` running elevated (the
   tray offers it at start / from its menu with one UAC prompt; `--unregister` removes it; `tray/install.cpp`). ETS2/ATS
   use their own built-in OpenXR loader that reads only HKLM. Never also register HKCU — the official loader then loads
