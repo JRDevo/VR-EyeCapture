@@ -15,6 +15,16 @@
         MP4 (verify_mp4.ps1: size 3840x1080, 90 fps, st3d, audio, grey steps = gamma, left half = left eye: bounds / slices /
         eye order), log lines for the load banner, the patch (vtable / FnTable), the layout and the record start.
       two / cpp with the right eye submitted first.
+      D3D12 games (openvr_e2e --api d3d12: TextureType_DirectX12, D3D12TextureData_t with the game's direct queue, textures
+        handed over in PIXEL_SHADER_RESOURCE): layouts two / wide (one texture + bounds for both eyes) / array / msaa /
+        typeless / fp16 / r10 x cpp / fntable, right eye first, two VR sessions, a threaded game, the in-headset dot (its
+        texture on a private D3D11 device): the same MP4 checks as D3D11 + "SteamVR D3D12" in the record start line + the
+        D3D12 debug layer of the fake game reports no error (a texture left in another state = a barrier mismatch at the
+        game's next frame; skipped with a note when the debug layer is not installed) + the mock saw valid D3D12 Submits.
+      head smoothing (0.6 + symmetric_fov) and the VR180 dome, D3D11 and D3D12: re-projection lines, the symmetric size /
+        a _VR180.mp4 whose dome size comes from the source density (the poses and fovs reached the recorder).
+      live share, D3D11 and D3D12 (tests/live_share_test.exe = the OBS plugin's consumer on a private block): raw eyes
+        bit-exact, the producer stops when the consumer closes, nothing recorded.
       in-headset dot (IVROverlay; the mock's "FnTable:IVROverlay_027" records every call, "mock overlay: ..."): one overlay
         with a per-process key, width / HMD-relative position from indicator_size / _x / _y / _z, a 64x64 texture per state
         (the last one = saved, green), shown, pulsed through SetOverlayAlpha (0.35 .. 1.0), destroyed at shutdown, no bad
@@ -78,7 +88,7 @@ $saved = @{}
 foreach ($n in 'APPDATA', 'XR_EYE_CAPTURE_TEST_HOME_KEY', 'XR_EYE_CAPTURE_REQUIRE_TRAY', 'XR_EYE_CAPTURE_TRAY_IPC', 'XR_EYE_CAPTURE_AUTORECORD',
                'XR_EYE_CAPTURE_CONFIG', 'MOCK_OPENVR_SYSTEM', 'XR_EYE_CAPTURE_OUTPUT_DIR', 'XR_EYE_CAPTURE_MIRROR_OPENVR_DLL',
                'XR_EYE_CAPTURE_TEST_SHM', 'EYECAP_TRAY_TEST_SHM', 'EYECAP_TRAY_TEST_VRSERVER', 'MOCK_OPENVR_QUIT_AFTER_MS',
-               'MOCK_OPENVR_MIRROR_COMBINED', 'MOCK_OPENVR_NO_SERVER', 'MOCK_OPENVR_SCENE_PID', 'MOCK_OPENVR_MIRROR_KEYEDMUTEX', 'XR_EYE_CAPTURE_TEST_OPENVRPATHS', 'MOCK_OPENVR_OVERLAY') { $saved[$n] = [Environment]::GetEnvironmentVariable($n) }
+               'MOCK_OPENVR_MIRROR_COMBINED', 'MOCK_OPENVR_NO_SERVER', 'MOCK_OPENVR_SCENE_PID', 'MOCK_OPENVR_MIRROR_KEYEDMUTEX', 'XR_EYE_CAPTURE_TEST_OPENVRPATHS', 'MOCK_OPENVR_OVERLAY', 'XR_EYE_CAPTURE_TEST_LIVE_SHM') { $saved[$n] = [Environment]::GetEnvironmentVariable($n) }
 $env:APPDATA = $appdata
 $env:XR_EYE_CAPTURE_TEST_HOME_KEY = $testKey
 $env:XR_EYE_CAPTURE_REQUIRE_TRAY = '0'
@@ -328,6 +338,149 @@ if (Want 'submit_error') {
     Need ($r.log -match "the runtime's Submit\((left|right)\) returned error 101") 'error logged' ([ref]$f)
     Need ($null -ne $r.mp4) 'no MP4 (the capture runs before the Submit is forwarded)' ([ref]$f)
     Record 'submit_error' $f
+}
+
+# ---- D3D12 games (TextureType_DirectX12: D3D12TextureData_t, resource + the game's direct queue, PIXEL_SHADER_RESOURCE) ----
+# Same checks as the D3D11 layouts (two textures, one wide texture + bounds for both eyes, array, MSAA, typeless, fp16,
+# 10-bit) + the D3D12 debug layer in the fake game must report no error (a texture left in another state than the game
+# handed over = a barrier mismatch at the game's next frame) and the mock must have seen every Submit as a valid D3D12 one.
+function D3d12Checks($r, [ref]$f) {
+    Need ($r.log -match "capture AVAILABLE on the game's D3D12 device, copies on its direct queue") 'D3D12 source line' $f
+    Need ($r.log -match 'steamvr: texture \S+: \d+x\d+ .* D3D12 flags 0x\w+ queue ') 'D3D12 texture line' $f
+    Need ($r.out -match 'E2E_D3D12_DEBUG=(on|unavailable) errors 0') 'D3D12 debug layer errors (or no E2E_D3D12_DEBUG line)' $f
+    if ($r.out -match 'E2E_D3D12_DEBUG=unavailable') { Write-Host '  note: D3D12 debug layer not installed -- resource states not validated' -ForegroundColor Yellow }
+}
+foreach ($iface in 'cpp', 'fntable') {
+    foreach ($layout in 'two', 'wide', 'array', 'msaa', 'typeless', 'fp16', 'r10') {
+        $name = "d3d12_${layout}_$iface"
+        if (-not (Want $name)) { continue }
+        $r = RunCase $name @('--api', 'd3d12', '--layout', $layout, '--iface', $iface, '--seconds', '5') $rawCfg
+        $f = @()
+        Need ($r.code -eq 0) 'openvr_e2e failed' ([ref]$f)
+        D3d12Checks $r ([ref]$f)
+        Need ($r.log -match 'record: start .*_SBS\.mp4 \| SteamVR D3D12 \| 3840x1080 SBS .*\| 90 fps') 'record start line (SteamVR D3D12, 3840x1080, 90 fps)' ([ref]$f)
+        Need ($r.log -match 'recording summary: OK') 'recording summary OK' ([ref]$f)
+        Need ($null -ne $r.mp4) 'no MP4' ([ref]$f)
+        if ($r.mp4) {
+            $fmt = if ($layout -in @('fp16', 'r10')) { 'unorm' } else { 'srgb' }
+            & (Join-Path $PSScriptRoot 'verify_mp4.ps1') -File $r.mp4 -EyeW 1920 -EyeH 1080 -Fps 90 -Seconds 3.7 -DurationTolerance 0.4 -Format $fmt -ExpectAudio
+            Need ($LASTEXITCODE -eq 0) 'verify_mp4' ([ref]$f)
+        }
+        Record $name $f
+    }
+}
+if (Want 'd3d12_two_rightfirst') {
+    $r = RunCase 'd3d12_two_rightfirst' @('--api', 'd3d12', '--layout', 'two', '--seconds', '5', '--right-first') $rawCfg
+    $f = @()
+    Need ($r.code -eq 0) 'openvr_e2e failed' ([ref]$f)
+    D3d12Checks $r ([ref]$f)
+    Need ($null -ne $r.mp4) 'no MP4' ([ref]$f)
+    if ($r.mp4) { & (Join-Path $PSScriptRoot 'verify_mp4.ps1') -File $r.mp4 -EyeW 1920 -EyeH 1080 -Fps 90 -Seconds 3.7 -DurationTolerance 0.4 -ExpectAudio; Need ($LASTEXITCODE -eq 0) 'verify_mp4 (left half must still be the left eye)' ([ref]$f) }
+    Record 'd3d12_two_rightfirst' $f
+}
+foreach ($c in @(@{ n = 'd3d12_reinit_cpp'; a = @('--cycles', '2'); cfg = $rawCfg },
+                 @{ n = 'd3d12_threads_fntable'; a = @('--iface', 'fntable', '--threads', '--pose', 'wait'); cfg = $symCfg })) {
+    if (-not (Want $c.n)) { continue }
+    $r = RunCase $c.n (@('--api', 'd3d12', '--layout', 'two', '--seconds', '5') + $c.a) $c.cfg
+    $f = @()
+    Need ($r.code -eq 0) 'openvr_e2e failed (counts / Submit results / D3D12 debug layer)' ([ref]$f)
+    D3d12Checks $r ([ref]$f)
+    if ($c.n -like '*reinit*') {
+        Need ($r.out -match 'E2E_MP4S=2') 'two MP4s (one per VR session)' ([ref]$f)
+        Need (([regex]::Matches($r.log, "capture AVAILABLE on the game's D3D12 device")).Count -eq 2) 'a new D3D12 source per VR session' ([ref]$f)
+    } else {
+        Need ($r.log -match 'head pose of the recorded frames: WaitGetPoses render pose') 'the WaitGetPoses pose is used' ([ref]$f)
+        Need ($null -ne $r.mp4) 'no MP4' ([ref]$f)
+    }
+    Need (([regex]::Matches($r.log, 'recording summary: OK')).Count -ge 1) 'recording finalized' ([ref]$f)
+    Record $c.n $f
+}
+# the in-headset dot on a D3D12 game: the overlay texture lives on a private D3D11 device on the game's adapter
+if (Want 'd3d12_indicator') {
+    $r = RunCase 'd3d12_indicator' @('--api', 'd3d12', '--layout', 'two', '--seconds', '5') ($rawCfg + ';vr_indicator=1;indicator_x=0.30;indicator_y=-0.25;indicator_z=-1.0;indicator_size=0.03;indicator_opacity=1.0')
+    $f = @()
+    $o = OverlayInfo $r.out
+    Need ($r.code -eq 0) 'openvr_e2e failed' ([ref]$f)
+    D3d12Checks $r ([ref]$f)
+    Need ($r.log -match 'indicator: D3D12 game -- the dot''s texture lives on a small private D3D11 device on the same adapter') 'private D3D11 device line' ([ref]$f)
+    Need ($null -ne $o) 'no "mock overlay" line' ([ref]$f)
+    if ($o) {
+        Need ($o.ver -eq 'IVROverlay_027' -and $o.creates -eq 1 -and $o.textures -ge 3 -and $o.texW -eq 64 -and $o.texH -eq 64) "one overlay, a 64x64 texture per state (got $($o.ver), $($o.creates), $($o.textures), $($o.texW)x$($o.texH))" ([ref]$f)
+        Need ($o.rgba[0] -lt 80 -and $o.rgba[1] -gt 180 -and $o.rgba[2] -lt 110 -and $o.rgba[3] -gt 240) "the last texture is the green 'saved' dot (centre $($o.rgba -join ','))" ([ref]$f)
+        Need ($o.shows -ge 1 -and $o.alphas -ge 20 -and $o.destroys -eq 1 -and $o.bad -eq 0 -and $o.other -eq 0) "shown, pulsed, destroyed once, no bad handle / other slot (shows $($o.shows), alphas $($o.alphas), destroys $($o.destroys), bad $($o.bad), other $($o.other))" ([ref]$f)
+    }
+    Need ($null -ne $r.mp4) 'no MP4' ([ref]$f)
+    if ($r.mp4) { & (Join-Path $PSScriptRoot 'verify_mp4.ps1') -File $r.mp4 -EyeW 1920 -EyeH 1080 -Fps 90 -Seconds 3.7 -DurationTolerance 0.4 -ExpectAudio; Need ($LASTEXITCODE -eq 0) 'verify_mp4 (the pattern, no dot in the recording)' ([ref]$f) }
+    Record 'd3d12_indicator' $f
+}
+
+# ---- re-projection through the proxy, D3D11 and D3D12 alike: head smoothing + symmetric_fov, and the VR180 dome ----
+foreach ($api in 'd3d11', 'd3d12') {
+    $name = "${api}_head_smoothing"
+    if (Want $name) {
+        $r = RunCase $name @('--api', $api, '--layout', 'two', '--seconds', '5', '--pose', 'wait') ($symCfg -replace 'head_smoothing=0', 'head_smoothing=0.6')
+        $f = @()
+        Need ($r.code -eq 0) 'openvr_e2e failed' ([ref]$f)
+        if ($api -eq 'd3d12') { D3d12Checks $r ([ref]$f) }
+        Need ($r.log -match 'recorder: head smoothing ON -- head_smoothing 0\.60') 'head smoothing on' ([ref]$f)
+        Need ($r.log -match 're-projection summary \(head smoothing ') 're-projection summary' ([ref]$f)
+        Need ($r.log -match 'recording summary: OK') 'recording summary OK' ([ref]$f)
+        Need ($null -ne $r.mp4) 'no MP4' ([ref]$f)
+        if ($r.mp4) {
+            & (Join-Path $PSScriptRoot 'verify_mp4.ps1') -File $r.mp4 -EyeW ($r.symW / 2) -EyeH $r.symH -OutW $r.symW -OutH $r.symH -Fps 90 -Seconds 3.7 -DurationTolerance 0.4 -ExpectAudio -SkipPixels
+            Need ($LASTEXITCODE -eq 0) "verify_mp4 at the symmetric size $($r.symW)x$($r.symH)" ([ref]$f)
+        }
+        Record $name $f
+    }
+    $name = "${api}_dome_vr180"
+    if (Want $name) {
+        $r = RunCase $name @('--api', $api, '--layout', 'two', '--seconds', '5', '--pose', 'wait') ($symCfg -replace 'projection=flat', 'projection=vr180')
+        $f = @()
+        Need ($r.code -eq 0) 'openvr_e2e failed' ([ref]$f)
+        if ($api -eq 'd3d12') { D3d12Checks $r ([ref]$f) }
+        Need ($r.log -match 'recorder: dome vr180: source density') 'dome line' ([ref]$f)
+        Need ($r.log -match 'recording summary: OK') 'recording summary OK' ([ref]$f)
+        Need ($r.mp4 -and $r.mp4 -match '_VR180\.mp4$') 'a _VR180.mp4' ([ref]$f)
+        Record $name $f
+    }
+}
+
+# ---- live share (the OBS plugin's data path) through the proxy, D3D11 and D3D12: tests/live_share_test.exe (the plugin's
+# consumer code) asks for raw eyes on a private block (XR_EYE_CAPTURE_TEST_LIVE_SHM); both eyes must be the test pattern
+# bit-exactly, frames at the requested rate, the producer stops when the consumer closes; no recording (no autorecord). ----
+$cons = Join-Path $bin 'live_share_test.exe'
+foreach ($api in 'd3d11', 'd3d12') {
+    $name = "live_$api"
+    if (-not (Want $name)) { continue }
+    if (-not (Test-Path $cons)) { Write-Host "`n=== ${name}: build first: $cons" -ForegroundColor Red; Record $name @('live_share_test.exe missing'); continue }
+    $out = Join-Path $outRoot $name
+    if (Test-Path $log) { Remove-Item $log -Force }
+    $shm = "Local\OpenXR-EyeCapture-Live-Test-$PID-$api"
+    $env:XR_EYE_CAPTURE_TEST_LIVE_SHM = $shm
+    $env:XR_EYE_CAPTURE_AUTORECORD = $null
+    $env:XR_EYE_CAPTURE_CONFIG = $rawCfg + ';live_share=1'
+    Write-Host "`n=== $name" -ForegroundColor Cyan
+    $so = Join-Path $b "$name.stdout.txt"
+    $p = Start-Process -FilePath $exe -ArgumentList '--api', $api, '--game-dir', "`"$game`"", '--out-dir', "`"$out`"", '--layout', 'two', '--seconds', '14' -PassThru -NoNewWindow -RedirectStandardOutput $so
+    $null = $p.Handle
+    $co = & $cons --shm $shm --timeout 10 --raw --eye 1920x1080 2>&1 | Out-String
+    $cExit = $LASTEXITCODE
+    $done = $p.WaitForExit(60000)
+    if (-not $done) { Stop-Process -Id $p.Id -Force }
+    $env:XR_EYE_CAPTURE_AUTORECORD = '4'
+    $env:XR_EYE_CAPTURE_TEST_LIVE_SHM = $null
+    $co.Trim().Split("`n") | ForEach-Object { Write-Host "  $_" }
+    $go = if (Test-Path $so) { Get-Content $so -Raw } else { '' }
+    $lt = if (Test-Path $log) { Get-Content $log -Raw -Encoding UTF8 } else { '' }
+    ($lt -split "`r?`n") | Where-Object { $_ -match 'live share|capture AVAILABLE' } | Select-Object -First 12 | ForEach-Object { Write-Host "  $_" }
+    $f = @()
+    Need ($cExit -eq 0 -and $co -match 'LIVE_OK') 'consumer LIVE_OK (raw eyes = the pattern, bit-exact)' ([ref]$f)
+    Need ($done -and $p.ExitCode -eq 0 -and $go -match 'openvr_e2e PASS') 'the game ran clean (openvr_e2e PASS)' ([ref]$f)
+    Need ($lt -match 'live share: consumer found') 'live share: consumer found' ([ref]$f)
+    Need ($lt -match 'live share: stopped \(consumer gone') 'live share: stopped (consumer gone ...)' ([ref]$f)
+    Need ($lt -notmatch 'record: start') 'no recording (live only)' ([ref]$f)
+    if ($api -eq 'd3d12') { Need ($go -match 'E2E_D3D12_DEBUG=(on|unavailable) errors 0') 'D3D12 debug layer errors' ([ref]$f) }
+    Record $name $f
 }
 
 # ---- IVRCompositor_029 (OpenVR 2.15, e.g. No Man's Sky): Submit moved to slot 6 ----

@@ -7,7 +7,9 @@
 //
 // Resource states: per XR_KHR_D3D12_enable, a released colour swapchain image is in D3D12_RESOURCE_STATE_RENDER_TARGET
 // (UNORDERED_ACCESS when the swapchain has only the UAV usage bit). We transition it to COPY_SOURCE and back. Ring
-// textures live in COMMON between uses (the hand-off state across APIs).
+// textures live in COMMON between uses (the hand-off state across APIs). A caller that knows better sets
+// SwapchainInfo::d3d12State (the SteamVR proxy: PIXEL_SHADER_RESOURCE, OpenVR's D3D12 Submit convention); the image is put
+// back into exactly that state.
 #include "frame_source.h"
 #include <d3d12.h>
 #include <atomic>
@@ -271,12 +273,9 @@ private:
         b.Transition.StateAfter = to;
         return b;
     }
-    static D3D12_RESOURCE_STATES SwapchainState(const EyeView& e) {
-        if (e.sc && (e.sc->usageFlags & kUsageColor)) return D3D12_RESOURCE_STATE_RENDER_TARGET;
-        if (e.sc && (e.sc->usageFlags & kUsageUav)) return D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-        return D3D12_RESOURCE_STATE_RENDER_TARGET;
-    }
+    static D3D12_RESOURCE_STATES SwapchainState(const EyeView& e) { return ScState(e.sc); }
     static D3D12_RESOURCE_STATES ScState(const SwapchainInfo* sc) {
+        if (sc && sc->d3d12State >= 0) return (D3D12_RESOURCE_STATES)sc->d3d12State;   // the caller's hand-off state
         if (sc && (sc->usageFlags & kUsageColor)) return D3D12_RESOURCE_STATE_RENDER_TARGET;
         if (sc && (sc->usageFlags & kUsageUav)) return D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
         return D3D12_RESOURCE_STATE_RENDER_TARGET;

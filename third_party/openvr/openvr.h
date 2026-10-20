@@ -26,6 +26,9 @@
 #pragma once
 #include <cstdint>
 
+struct ID3D12Resource;
+struct ID3D12CommandQueue;
+
 namespace vr {
 
 typedef uint32_t TrackedDeviceIndex_t;
@@ -60,9 +63,18 @@ enum EColorSpace {
 };
 
 struct Texture_t {
-    void*        handle;      // DirectX: ID3D11Texture2D*
+    void*        handle;      // DirectX: ID3D11Texture2D*; DirectX12: D3D12TextureData_t*
     ETextureType eType;
     EColorSpace  eColorSpace;
+};
+
+// TextureType_DirectX12: Texture_t::handle points to this. The compositor reads the resource on m_pCommandQueue (the queue
+// the game rendered it on). Valve's D3D12 sample (hellovr_dx12) transitions the eye texture to
+// D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE before Submit and back to RENDER_TARGET for the next frame.
+struct D3D12TextureData_t {
+    ID3D12Resource*     m_pResource;
+    ID3D12CommandQueue* m_pCommandQueue;
+    uint32_t            m_nNodeMask;
 };
 
 enum ETrackingResult {

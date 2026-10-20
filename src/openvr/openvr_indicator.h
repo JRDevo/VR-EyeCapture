@@ -7,8 +7,10 @@
 // texture upload) while recording, green 1.5 s after a save, red X 2 s after a failure, violet while a live viewer receives
 // frames (indicator_live), hidden otherwise.
 //
-// Called on the game's render thread inside the second eye's Submit (under the proxy's lock), on the game's D3D11 device:
-// the 64x64 texture is filled with UpdateSubresource on the game's immediate context, only when the shown state changes.
+// Called on the game's render thread inside the second eye's Submit (under the proxy's lock), on a D3D11 device: the game's
+// own for a D3D11 game, a small private one on the game's adapter for a D3D12 game (an overlay texture does not have to match
+// the scene application's API). The 64x64 texture is filled with UpdateSubresource on that device's immediate context, only
+// when the shown state changes.
 // The overlay is created on the first frame that shows something. Any failure: logged once, the dot is off for this VR
 // session, recording is not affected. Quick mode (EyeCaptureMirror) has no dot: it records the compositor output, a dot
 // there would be in the video (user decision 2026-10-18).
@@ -25,7 +27,7 @@
 class OvrIndicator {
 public:
     explicit OvrIndicator(const IndicatorSettings& s) : s_(s) {}
-    // Per frame pair. get = the real DLL's VR_GetGenericInterface; dev = the game's device. Never throws; a structured
+    // Per frame pair. get = the real DLL's VR_GetGenericInterface; dev = the D3D11 device for the dot's texture. Never throws; a structured
     // exception inside the runtime's overlay calls disables the dot (logged) instead of reaching the capture.
     void Frame(PFN_VR_GetGenericInterface get, ID3D11Device* dev, IndShow show, double now);
     // Before VR_ShutdownInternal: destroys the overlay (the runtime would drop it with the connection anyway).
