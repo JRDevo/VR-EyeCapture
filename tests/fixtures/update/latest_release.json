@@ -1,0 +1,43 @@
+{
+  "url": "https://api.github.com/repos/JRDevo/VR-EyeCapture/releases/201234567",
+  "html_url": "https://github.com/JRDevo/VR-EyeCapture/releases/tag/v0.6.0",
+  "id": 201234567,
+  "author": {
+    "login": "JRDevo",
+    "id": 1234567,
+    "html_url": "https://github.com/JRDevo",
+    "type": "User"
+  },
+  "tag_name": "v0.6.0",
+  "target_commitish": "master",
+  "name": "VR EyeCapture v0.6.0",
+  "draft": false,
+  "prerelease": false,
+  "created_at": "2026-11-01T10:00:00Z",
+  "published_at": "2026-11-01T10:30:00Z",
+  "assets": [
+    {
+      "url": "https://api.github.com/repos/JRDevo/VR-EyeCapture/releases/assets/900000001",
+      "id": 900000001,
+      "name": "obs-eyecapture-v0.6.0.zip",
+      "label": null,
+      "content_type": "application/zip",
+      "state": "uploaded",
+      "size": 1048576,
+      "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "browser_download_url": "https://github.com/JRDevo/VR-EyeCapture/releases/download/v0.6.0/obs-eyecapture-v0.6.0.zip"
+    },
+    {
+      "url": "https://api.github.com/repos/JRDevo/VR-EyeCapture/releases/assets/900000002",
+      "id": 900000002,
+      "name": "VR-EyeCapture-Setup-v0.6.0.exe",
+      "label": null,
+      "content_type": "application/octet-stream",
+      "state": "uploaded",
+      "size": 8388608,
+      "digest": "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+      "browser_download_url": "https://github.com/JRDevo/VR-EyeCapture/releases/download/v0.6.0/VR-EyeCapture-Setup-v0.6.0.exe"
+    }
+  ],
+  "body": "First line of the release notes.\r\nSecond line with a \"quote\" and a unicode arrow →."
+}

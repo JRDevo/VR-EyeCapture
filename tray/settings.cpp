@@ -91,6 +91,7 @@ const Field kFields[] = {
      L"16:9 (recommended)|4:3|4:3, padded to 16:9 (8K tier, black side bars)|None (full eye)"},
     {L"log_level",         L"debug",           Kind::Combo, ID_LOGLEVEL,   L"none|error|warn|info|debug", L"Off|Errors|Warnings|Information|Debug"},
     {L"theme",             L"capture",         Kind::Combo, ID_THEME,      L"system|light|dark", L"Same as Windows|Light|Dark"},
+    {L"check_updates",     L"capture",         Kind::Check, ID_CHECKUPDATES, nullptr},
     {L"start_with_windows", L"capture",        Kind::Check, ID_AUTOSTART,  nullptr},   // last: the registry is applied after the file (DoSave)
 };
 
@@ -333,6 +334,7 @@ KeyValues FromConfig(const Config& c) {
     kv.emplace_back(L"audio_enabled", B(c.audioEnabled));
     kv.emplace_back(L"audio_device", c.audioDevice);
     kv.emplace_back(L"theme", c.uiTheme == 1 ? L"light" : c.uiTheme == 2 ? L"dark" : L"system");
+    kv.emplace_back(L"check_updates", B(c.checkUpdates));
     kv.emplace_back(L"start_with_windows", B(c.startWithWindows));
     kv.emplace_back(L"steamvr_mode", elog::Widen(SteamVrModeKey(c.steamvr.mode)));
     kv.emplace_back(L"post_mkv", B(c.postMkv));
@@ -514,10 +516,12 @@ std::function<void(const std::vector<std::wstring>&)> g_onSaved;
 std::function<void()> g_openSteamVr;      // SetOpenSteamVrHook
 QueueHooks          g_hooks;                // conversion worker callbacks (SetQueueHooks)
 ToolHooks           g_tools;                // the Advanced "Tools:" row (SetToolHooks)
+UpdateHooks         g_update;               // the Advanced "Updates:" row + the "update available" line (SetUpdateHooks)
 std::vector<unsigned long long> g_qIds;     // job ids of the waiting-list items, same order as the list box
 std::vector<std::wstring> g_qItems;         // their texts (the list is only rebuilt when this changes: no flicker)
 bool                g_qRunNow = false;      // the Pause button reads "Run now" (the running job waits for the hold)
 const UINT          WM_QUEUE_POKE = WM_APP + 20;   // NotifyQueueChanged -> refresh the queue view
+const UINT          WM_UPDATE_POKE = WM_APP + 21;  // NotifyUpdateChanged -> refresh the "update available" line
 const UINT_PTR      kQueueTimer = 5;        // 500 ms: refresh the queue view (progress / ETA) even without a poke
 std::vector<HWND>   g_dim;                  // static texts drawn in the grey hint colour
 std::vector<HWND>   g_footer;               // footer controls: kept at the bottom of the window while the content scrolls
@@ -776,6 +780,14 @@ const Help kHelp[] = {
                L"Changes when you click Save."},
     {ID_OPENINI, L"Opens config.ini in a text editor. It lists every setting, with comments."},
     {ID_DEFAULTS, L"Puts every field back to its default. Nothing is saved until you click Save."},
+    {ID_CHECKUPDATES, L"Check GitHub for a newer version (check_updates)." HELP_BR
+                      L"On (default): a few seconds after the app starts, and then once a day, it asks GitHub whether a newer "
+                      L"release exists -- one quick request, nothing is downloaded. When there is one you get a tray balloon and a line here." HELP_BR
+                      L"Downloading and installing only ever happen when you click to update. Off: it never checks on its own."},
+    {ID_UPDATENOW, L"Checks GitHub for a newer version right now. Works even when the automatic check is off." HELP_BR
+                   L"Nothing is downloaded by this -- it only looks."},
+    {ID_UPDATELINK, L"A newer version is available. Click \"Update now\" to download the installer from GitHub (its checksum is "
+                    L"verified) and run it; you will see the normal Windows (UAC) prompt. The same action is in the tray menu."},
     {ID_OPENSTEAMVR, L"Opens the SteamVR games window: tick the SteamVR games to record, or choose Quick mode. OpenXR games need nothing there."},
     {ID_SAVE, L"Saves the changes to config.ini. The window stays open. The next recording uses them."},
     {ID_MINIMIZE, L"Minimizes the window to the taskbar."},
@@ -1108,6 +1120,27 @@ void UpdateFpsWarning() {
 
 void UpdateLayoutPreview() {
     if (g_dlg && Ctl(ID_LAYOUTPREVIEW)) InvalidateRect(Ctl(ID_LAYOUTPREVIEW), nullptr, FALSE);
+}
+
+// The "update available" SysLink on the Advanced group's top edge and the "Check now" button. Reads the tray's update
+// state through g_update (no hook = no updater, e.g. settings_test: the line stays hidden and the button is greyed).
+void UpdateUpdateLine() {
+    if (!g_dlg) return;
+    HWND link = Ctl(ID_UPDATELINK);
+    HWND btn = Ctl(ID_UPDATENOW);
+    const UpdateState s = g_update.state ? g_update.state() : UpdateState();
+    if (btn) EnableWindow(btn, g_update.checkNow && !s.downloading);
+    if (link) {
+        std::wstring t;
+        if (s.downloading) t = L"Downloading the update...";
+        else if (s.available) t = L"VR EyeCapture " + s.versionText + L" is available.  <a>Update now</a>";
+        const bool show = !t.empty() && (bool)g_update.startUpdate;
+        wchar_t cur[256] = L"";
+        GetWindowTextW(link, cur, 256);
+        if (t != cur) SetWindowTextW(link, t.c_str());
+        const bool vis = (GetWindowLongW(link, GWL_STYLE) & WS_VISIBLE) != 0;
+        if (vis != show) ShowWindow(link, show ? SW_SHOWNA : SW_HIDE);
+    }
 }
 
 // ---- the logo at the top of the window (ID_LOGO, owner-drawn): the mark of scripts\make_logo.py (VR goggles, a 256-unit design box),
@@ -1941,6 +1974,7 @@ void CommandHandler(int id, int code) {
     case ID_CANCEL: TryClose(); break;
     case ID_MINIMIZE: ShowWindow(g_dlg, SW_MINIMIZE); break;
     case ID_OPENSTEAMVR: if (g_openSteamVr) g_openSteamVr(); break;
+    case ID_UPDATENOW: if (code == BN_CLICKED && g_update.checkNow) g_update.checkNow(); break;
     case ID_OPENLOG: if (code == BN_CLICKED && g_tools.openLog) g_tools.openLog(); break;
     case ID_REGLAYER: if (code == BN_CLICKED && g_tools.toggleReg) g_tools.toggleReg(); break;
     case ID_TAG3D:
@@ -2074,6 +2108,10 @@ LRESULT CALLBACK DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return DefWindowProcW(h, msg, wp, lp);
     case WM_NOTIFY: {
         const NMHDR* nh = (const NMHDR*)lp;
+        if (nh && nh->idFrom == ID_UPDATELINK && (nh->code == NM_CLICK || nh->code == NM_RETURN)) {
+            if (g_update.startUpdate) g_update.startUpdate();   // confirm + download + run (same as the tray menu item)
+            return 0;
+        }
         if (nh && nh->idFrom == ID_ABOUTLINK && (nh->code == NM_CLICK || nh->code == NM_RETURN)) {
             const NMLINK* nl = (const NMLINK*)lp;
             ShellExecuteW(nullptr, L"open", nl->item.szUrl, nullptr, nullptr, SW_SHOWNORMAL);
@@ -2104,7 +2142,7 @@ LRESULT CALLBACK DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         if (wp == kQueueTimer) {
-            if (!IsIconic(h)) { UpdateQueueView(); UpdateFpsWarning(); }
+            if (!IsIconic(h)) { UpdateQueueView(); UpdateFpsWarning(); UpdateUpdateLine(); }
             return 0;
         }
         if (wp == kFreeSpaceTimer) {   // one-shot: UpdateFreeSpace kills it
@@ -2144,6 +2182,9 @@ LRESULT CALLBACK DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_QUEUE_POKE:
         UpdateQueueView();
         UpdateFpsWarning();
+        return 0;
+    case WM_UPDATE_POKE:
+        UpdateUpdateLine();
         return 0;
     case WM_SIZE:
         if (wp != SIZE_MINIMIZED) Relayout();
@@ -2378,7 +2419,7 @@ int BuildControls(HWND dlg, Builder::Pass pass, int clientW, int clientH, int sc
     const int unitGap = 6;
     // column heights (rows): left Recording 7 + Video 5 + Stereo 3D 4; right Recording Indicator 4 + Export + Advanced 2. The
     // shorter column's groups get the difference (left: leftEx on Stereo 3D; right: spare, below).
-    const int kExportRows = 10, kRecordingRows = 7, kVideoRows = 5, kStereoRows = 4;
+    const int kExportRows = 10, kRecordingRows = 8, kVideoRows = 5, kStereoRows = 4;   // Recording's last row is "Updates:"
     const int leftH = groupH(kRecordingRows) + gap + groupH(kVideoRows) + gap + groupH(kStereoRows) + gap;
     const int rightH = groupH(4) + gap + groupH(kExportRows) + gap + groupH(3) + gap;
     const int leftEx = rightH > leftH ? rightH - leftH : 0;
@@ -2428,6 +2469,12 @@ int BuildControls(HWND dlg, Builder::Pass pass, int clientW, int clientH, int sc
 
     // ---- Recording
     b.Group(gx, y, gw, groupH(kRecordingRows), L"Recording");
+    {   // "update available" line on the group's top edge (right of the "Recording" title), hidden until a newer release is known
+        const int adtW = b.TextW(L"Recording") + 12;
+        HWND ul = b.Make(WC_LINK, L"", WS_TABSTOP | LWS_RIGHT, gx + 12 + adtW, y, gw - 24 - adtW, 16, ID_UPDATELINK);
+        b.Tip(ul, HelpText(ID_UPDATELINK));
+        if (b.pass == Builder::Pass::Create) ShowWindow(ul, SW_HIDE);
+    }
     int r = y + top;
     b.Label(lx, r, labelW, L"Hotkey:", ID_HOTKEY);
     b.Edit(ID_HOTKEY, cx, r, cw);
@@ -2461,6 +2508,12 @@ int BuildControls(HWND dlg, Builder::Pass pass, int clientW, int clientH, int sc
     r += pitch;
     b.Label(lx, r, labelW, L"Beeps:", ID_BEEPS);
     b.Check(ID_BEEPS, cx, r, L"Beep in the headset when recording starts / stops");
+    r += pitch;
+    b.Label(lx, r, labelW, L"Updates:", ID_CHECKUPDATES);
+    {   // check_updates + a "Check now" button (a manual check works even when the automatic one is off)
+        const int cuw = b.Check(ID_CHECKUPDATES, cx, r, L"Check for updates automatically");
+        b.Button(ID_UPDATENOW, cx + cuw + 12, r, b.ButtonW(L"Check now"), L"Check now");
+    }
     y += groupH(kRecordingRows) + gap;
 
     // ---- Video (the QP edit is greyed unless Rate control is Constant QP, the Bitrate drop-down greyed for it)
@@ -2968,9 +3021,14 @@ HWND DialogWindow() { return g_dlg; }
 void SetQueueHooks(const QueueHooks& hooks) { g_hooks = hooks; }
 void SetOpenSteamVrHook(std::function<void()> hook) { g_openSteamVr = std::move(hook); }
 void SetToolHooks(const ToolHooks& hooks) { g_tools = hooks; }
+void SetUpdateHooks(const UpdateHooks& hooks) { g_update = hooks; }
 
 void NotifyQueueChanged() {
     if (g_dlg) PostMessageW(g_dlg, WM_QUEUE_POKE, 0, 0);
+}
+
+void NotifyUpdateChanged() {
+    if (g_dlg) PostMessageW(g_dlg, WM_UPDATE_POKE, 0, 0);
 }
 
 void ShowDialog(const std::wstring& configPath, std::function<void(const std::vector<std::wstring>&)> onSaved) {
@@ -3053,6 +3111,7 @@ void ShowDialog(const std::wstring& configPath, std::function<void(const std::ve
         LoadFromFile();
         g_savedKv = ComparableValues();
         UpdateQueueView();
+        UpdateUpdateLine();
         CheckTextFit();
         ShowWindow(g_dlg, SW_SHOW);
         SetForegroundWindow(g_dlg);

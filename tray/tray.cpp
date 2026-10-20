@@ -63,6 +63,7 @@
 #include "settings.h"
 #include "shared_status.h"
 #include "steamvr_ui.h"
+#include "update.h"
 #include "openvr/openvr_hooks.h"   // EYECAP_HOME_REG_KEY / _VALUE, EYECAP_TEST_HOME_KEY_ENV
 
 namespace {
@@ -79,10 +80,13 @@ const UINT WM_STEAMVR_REPAIR = WM_APP + 10; // posted once at start: CHECK the S
                                             // clickable balloon when some need a repair -- the click opens the window)
 const UINT WM_UNREGISTER = WM_APP + 11;     // "Unregister from VR games..." (the app window's Tools button; tests post it)
 const UINT WM_REGISTER = WM_APP + 12;       // "Register for VR games..." (the app window's Tools button)
+const UINT WM_UPDATE_RESULT = WM_APP + 13;  // a background update check finished (lParam = heap UpdCheck*; wParam = manual?1:0)
+const UINT WM_UPDATE_DOWNLOADED = WM_APP + 14;  // an update download finished (lParam = heap UpdDownload*)
 const UINT kTimer = 1;
 const UINT kTipTimer = 2;     // one-shot: end of the "settings saved" tooltip
 enum : UINT { ID_TOGGLE = 100, ID_FOLDER, ID_CONVERT, ID_LOG, ID_SETTINGS, ID_CONFIG, ID_EXIT, ID_REGISTER, ID_UNREGISTER,
-               ID_CONVERT_PICK, ID_JOB_INFO, ID_JOB_PAUSE, ID_JOB_CANCEL, ID_TAG3D_SBS, ID_TAG3D_TB, ID_STEAMVR, ID_REMOVE };
+               ID_CONVERT_PICK, ID_JOB_INFO, ID_JOB_PAUSE, ID_JOB_CANCEL, ID_TAG3D_SBS, ID_TAG3D_TB, ID_STEAMVR, ID_REMOVE,
+               ID_UPDATE_GET, ID_UPDATE_CHECK };
 const wchar_t kAppTitle[] = L"VR EyeCapture";
 // tray icon frames (resource 101 + value); recording and converting alternate A / B (lens colours swapped) every 0.5 s
 enum : int { kIcoNoGame, kIcoReady, kIcoRecA, kIcoRecB, kIcoBusy, kIcoConvA, kIcoConvB, kIcoCount };
@@ -156,6 +160,29 @@ std::vector<Proc> g_producers;
 std::mutex&    g_tagM = *new std::mutex;
 std::deque<pp::Notice>& g_tagNotices = *new std::deque<pp::Notice>;
 std::atomic<bool> g_tagQuit{false};
+
+// ---- update checker (tray/update.h). Only while check_updates = 1 and never in test mode: one background check a few
+// seconds after start, then at most once every 24 h; a balloon once per new version; download / install only on a click.
+// g_updAvail / g_updInfo / g_updLastNotified / g_updDownloading are touched ONLY on the UI thread (so is g_updNextCheck);
+// the detached check / download threads read only g_updQuit and g_updChecking (atomics) before posting back to g_wnd.
+const ULONGLONG kUpdateStartDelayMs = 8000;                 // first check this long after start (UI never blocked)
+const ULONGLONG kUpdateIntervalMs = 24ull * 60 * 60 * 1000; // then at most once a day
+bool             g_updEnabled = true;             // check_updates (reloaded with the input bindings)
+std::wstring     g_updApiUrl;                     // kDefaultApiUrl, or XR_EYE_CAPTURE_UPDATE_URL for a test / mock
+std::atomic<bool> g_updChecking{false};           // a background check thread is running (one at a time)
+std::atomic<bool> g_updQuit{false};               // set in WM_DESTROY: a detached thread must not post to the dead window
+ULONGLONG        g_updNextCheck = 0;              // GetTickCount64 when the next automatic check may run (0 = not scheduled)
+bool             g_updAvail = false;              // a newer release is known (UI thread)
+upd::ReleaseInfo g_updInfo;                       // the newer release, valid while g_updAvail (UI thread)
+std::wstring     g_updLastNotified;               // version a balloon was last shown for (update_last_notified.txt)
+bool             g_updDownloading = false;        // a download is in progress (UI thread)
+// posted from the check thread to the UI thread
+struct UpdCheck { bool manual = false; bool networkOk = false; bool parsed = false; upd::ReleaseInfo info; std::wstring err; };
+// posted from the download thread to the UI thread
+struct UpdDownload { bool ok = false; std::wstring path; std::wstring dir; std::wstring err; std::wstring versionText; };
+void StartUpdateCheck(bool manual);    // begins a background check (defined below; used by the Settings hook and the timer)
+void StartUpdateDownload();            // confirm + download + verify + run the installer (user click only)
+std::wstring UpdateVersionText();      // "vX.Y.Z" of the known newer release ("" when none)
 
 // The tray-area icons: the logo mark with a status dot, one .ico per state (tray/icons, resources 101.. in tray/tray.rc,
 // made by scripts/make_logo.py), loaded at the small-icon size of the current DPI.
@@ -660,6 +687,10 @@ void ApplyInputBindings(const char* why) {
     if (cfg.steamvr.mode != g_steamvrMode) LOGI("tray: steamvr_mode = %s", SteamVrModeKey(cfg.steamvr.mode));
     g_steamvrMode = cfg.steamvr.enabled ? cfg.steamvr.mode : SteamVrMode::Off;
     g_steamvrDome = cfg.dome.projection != DomeProjection::Flat;
+    // update checker: cache check_updates and schedule the first automatic check once (never in test mode). A later toggle
+    // re-enables checking from the next scheduled time; the user can always use "Check for updates now".
+    g_updEnabled = cfg.checkUpdates;
+    if (g_updEnabled && !g_testMode && g_updNextCheck == 0) g_updNextCheck = GetTickCount64() + kUpdateStartDelayMs;
     static bool s_postWhenLogged = false;
     if (!s_postWhenLogged || cfg.postWhen != g_postWhen) {
         s_postWhenLogged = true;
@@ -1262,6 +1293,203 @@ void InstallQueueHooks() {
     t.toggleReg = [] { PostMessageW(g_wnd, RegOk() ? WM_UNREGISTER : WM_REGISTER, 0, 0); };   // posted: it may ask / show UAC
     settings::SetToolHooks(t);
     settings::SetOpenSteamVrHook([] { PostMessageW(g_wnd, WM_OPEN_STEAMVR, 0, 0); });   // posted (the window runs its own message loop, which must not nest in the Settings button handler); the Settings window's "SteamVR games..." button = the tray menu item
+    settings::UpdateHooks u;   // the app window's "Updates:" row + the "update available" line
+    u.state = [] { settings::UpdateState s; s.available = g_updAvail; s.downloading = g_updDownloading; s.versionText = UpdateVersionText(); return s; };
+    u.checkNow = [] { StartUpdateCheck(true); };       // runs even while check_updates = 0
+    u.startUpdate = [] { StartUpdateDownload(); };     // confirm + download + run
+    settings::SetUpdateHooks(u);
+}
+
+// ---- update checker: the once-per-version persistence, the background check and the one-click updater -----------------
+std::wstring UpdateLastNotifiedPath() { return UserDataDir(g_exeDir) + L"\\update_last_notified.txt"; }
+
+std::wstring ReadLastNotified() {
+    HANDLE h = CreateFileW(UpdateLastNotifiedPath().c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return std::wstring();
+    char b[128];
+    DWORD got = 0;
+    std::string s;
+    while (ReadFile(h, b, sizeof(b), &got, nullptr) && got) s.append(b, got);
+    CloseHandle(h);
+    while (!s.empty() && (s.back() == '\r' || s.back() == '\n' || s.back() == ' ' || s.back() == '\t')) s.pop_back();
+    size_t a = 0;
+    while (a < s.size() && (s[a] == ' ' || s[a] == '\t')) ++a;
+    return elog::Widen(s.substr(a));
+}
+
+void WriteLastNotified(const std::wstring& ver) {
+    const std::string s = elog::Narrow(ver);
+    HANDLE h = CreateFileW(UpdateLastNotifiedPath().c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return;
+    DWORD w = 0;
+    WriteFile(h, s.data(), (DWORD)s.size(), &w, nullptr);
+    CloseHandle(h);
+}
+
+std::wstring UpdateVersionText() {
+    return g_updAvail ? L"v" + elog::Widen(upd::VersionText(g_updInfo.version)) : std::wstring();
+}
+
+// Resolves the API URL once (env XR_EYE_CAPTURE_UPDATE_URL for a test / mock, else kDefaultApiUrl) and starts one
+// background check. UI is never blocked. A later balloon / menu line comes from WM_UPDATE_RESULT on the UI thread.
+void StartUpdateCheck(bool manual) {
+    if (g_updApiUrl.empty()) {
+        wchar_t ov[1024] = L"";
+        const DWORD n = GetEnvironmentVariableW(L"XR_EYE_CAPTURE_UPDATE_URL", ov, 1024);
+        g_updApiUrl = (n > 0 && n < 1024) ? ov : upd::kDefaultApiUrl;
+    }
+    if (g_updChecking.exchange(true)) { LOGI("tray: update check (%s): one is already running", manual ? "manual" : "auto"); return; }
+    if (!manual) g_updNextCheck = GetTickCount64() + kUpdateIntervalMs;
+    const std::wstring url = g_updApiUrl;
+    LOGI("tray: checking for updates (%s) at %s", manual ? "manual" : "auto", elog::Narrow(url).c_str());
+    std::thread([url, manual] {
+        UpdCheck* res = new UpdCheck();
+        res->manual = manual;
+        std::string body;
+        std::wstring err;
+        const std::wstring ua = L"VR-EyeCapture/" + elog::Widen(EYE_CAPTURE_VERSION);
+        int status = 0;
+        if (!upd::HttpGet(url, ua, body, err, 10000, &status)) {
+            res->err = err;
+        } else {
+            res->networkOk = true;
+            res->parsed = upd::ParseLatestRelease(body, upd::kAssetGlob, res->info);
+            if (!res->parsed) res->err = elog::Widen(res->info.error);
+        }
+        g_updChecking = false;
+        if (g_updQuit) { delete res; return; }
+        PostMessageW(g_wnd, WM_UPDATE_RESULT, manual ? 1 : 0, (LPARAM)res);
+    }).detach();
+}
+
+// WM_UPDATE_RESULT on the UI thread: owns `r`.
+void OnUpdateCheckResult(UpdCheck* r) {
+    const bool manual = r->manual;
+    const std::wstring own = elog::Widen(EYE_CAPTURE_VERSION);
+    if (!r->networkOk) {
+        LOGW("tray: update check failed: %s", elog::Narrow(r->err).c_str());
+        if (manual) Balloon(L"Update check failed", L"Could not reach GitHub to check for updates. Please try again later.", true);
+        delete r;
+        return;
+    }
+    if (!r->parsed || !r->info.ok) {
+        LOGI("tray: update check: no usable release (%s)", elog::Narrow(r->err).c_str());
+        if (manual) Balloon(L"No update", L"You already have the latest version (v" + own + L").", false);
+        delete r;
+        return;
+    }
+    upd::Version ownV;
+    const bool ownOk = upd::ParseVersion(EYE_CAPTURE_VERSION, ownV);
+    const bool newer = ownOk && upd::CompareVersions(r->info.version, ownV) > 0;
+    const std::wstring verNum = elog::Widen(upd::VersionText(r->info.version));
+    const std::wstring ver = L"v" + verNum;
+    if (!newer) {
+        LOGI("tray: update check: up to date (latest %s, own %s)", elog::Narrow(ver).c_str(), EYE_CAPTURE_VERSION);
+        g_updAvail = false;
+        if (manual) Balloon(L"No update", L"You already have the latest version (v" + own + L").", false);
+    } else {
+        g_updAvail = true;
+        g_updInfo = r->info;
+        LOGI("tray: update available: %s (own %s), asset %s", elog::Narrow(ver).c_str(), EYE_CAPTURE_VERSION, r->info.assetName.c_str());
+        if (verNum != g_updLastNotified) {   // balloon once per version (remembered in update_last_notified.txt, not the registry)
+            Balloon(L"Update available", L"VR EyeCapture " + ver + L" is available. Open VR EyeCapture or right-click the tray icon to update.", false);
+            g_updLastNotified = verNum;
+            WriteLastNotified(verNum);
+        } else if (manual) {   // a manual check still confirms what is available, without re-notifying automatically
+            Balloon(L"Update available", L"VR EyeCapture " + ver + L" is available. Right-click the tray icon to update.", false);
+        }
+    }
+    settings::NotifyUpdateChanged();
+    Refresh();
+    delete r;
+}
+
+// User click (tray menu "Update to vX...", or the app window line): confirm, download to %TEMP%\VR-EyeCapture-update,
+// verify the SHA-256 against the release digest, then run the installer. Nothing happens without the click.
+void StartUpdateDownload() {
+    if (!g_updAvail) { Balloon(L"No update", L"No newer version is known yet. Use \"Check for updates now\" first.", false); return; }
+    if (g_updDownloading) { Balloon(L"Update", L"An update download is already in progress.", false); return; }
+    const upd::ReleaseInfo info = g_updInfo;   // snapshot (UI thread; the check thread never writes g_updInfo)
+    const std::wstring ver = L"v" + elog::Widen(upd::VersionText(info.version));
+    const std::wstring own = elog::Widen(EYE_CAPTURE_VERSION);
+    const std::wstring notes = elog::Widen(info.htmlUrl);
+    // Open the release notes in the browser, but ONLY a real https://github.com/ link; a tampered response falls back to
+    // the project's hardcoded releases page, so ShellExecute can never be made to launch anything else.
+    auto openNotes = [&] {
+        const wchar_t* kReleases = L"https://github.com/JRDevo/VR-EyeCapture/releases";
+        ShellExecuteW(nullptr, L"open", upd::IsGithubUrl(info.htmlUrl) ? notes.c_str() : kReleases, nullptr, nullptr, SW_SHOWNORMAL);
+    };
+    if (!upd::IsAllowedDownloadHost(elog::Widen(info.assetUrl))) {
+        ShowError(L"The download link for this release is not a trusted GitHub address, so nothing was downloaded. "
+                  L"Please download the update from the GitHub releases page.");
+        openNotes();
+        return;
+    }
+    if (info.digestHex.empty()) {
+        ShowError(L"This release has no checksum, so a download could not be verified. "
+                  L"Please download the update from the GitHub releases page.");
+        openNotes();
+        return;
+    }
+    if (!Ask(L"VR EyeCapture " + ver + L" is available (you have v" + own + L").\n\nRelease notes:\n" + notes +
+             L"\n\nDownload the installer from GitHub and run it now? You will see the normal Windows (UAC) prompt.")) {
+        LOGI("tray: update to %s declined by the user", elog::Narrow(ver).c_str());
+        return;
+    }
+    wchar_t tmp[MAX_PATH] = L"";
+    GetTempPathW(MAX_PATH, tmp);
+    const std::wstring dir = std::wstring(tmp) + L"VR-EyeCapture-update";
+    const std::wstring dest = dir + L"\\" + elog::Widen(info.assetName);
+    g_updDownloading = true;
+    LOGI("tray: downloading update %s from %s", elog::Narrow(ver).c_str(), info.assetUrl.c_str());
+    Balloon(L"Downloading update", L"Downloading VR EyeCapture " + ver + L"...", false);
+    settings::NotifyUpdateChanged();
+    Refresh();
+    std::thread([info, dir, dest, ver] {
+        UpdDownload* r = new UpdDownload();
+        r->dir = dir;
+        r->versionText = ver;
+        SHCreateDirectoryExW(nullptr, dir.c_str(), nullptr);
+        std::wstring err;
+        const std::wstring ua = L"VR-EyeCapture/" + elog::Widen(EYE_CAPTURE_VERSION);
+        if (!upd::DownloadFile(elog::Widen(info.assetUrl), dest, ua, err)) {
+            r->err = err;
+        } else {
+            const std::string got = upd::Sha256Hex(dest);
+            if (got.empty() || _stricmp(got.c_str(), info.digestHex.c_str()) != 0) {
+                DeleteFileW(dest.c_str());
+                r->err = L"the downloaded file's checksum did not match the release (the file was deleted)";
+                LOGW("tray: update checksum mismatch: got '%s' want '%s' -- deleted", got.c_str(), info.digestHex.c_str());
+            } else {
+                r->ok = true;
+                r->path = dest;
+            }
+        }
+        if (g_updQuit) { delete r; return; }
+        PostMessageW(g_wnd, WM_UPDATE_DOWNLOADED, 0, (LPARAM)r);
+    }).detach();
+}
+
+// WM_UPDATE_DOWNLOADED on the UI thread: owns `r`.
+void OnUpdateDownloaded(UpdDownload* r) {
+    g_updDownloading = false;
+    if (r->ok) {
+        LOGI("tray: update downloaded and verified: %s", elog::Narrow(r->path).c_str());
+        Balloon(L"Update ready", L"VR EyeCapture " + r->versionText + L" downloaded. Starting the installer -- confirm the Windows prompt.", false);
+        const HINSTANCE h = ShellExecuteW(nullptr, L"open", r->path.c_str(), L"/SP-", r->dir.c_str(), SW_SHOWNORMAL);
+        if ((INT_PTR)h <= 32) {
+            LOGW("tray: could not start the installer %s (ShellExecute %lld)", elog::Narrow(r->path).c_str(), (long long)(INT_PTR)h);
+            ShowError(L"The update was downloaded but the installer could not be started. You can run it from:\n" + r->path);
+        } else {
+            LOGI("tray: installer started (the setup closes this tray with --quit)");
+        }
+    } else {
+        LOGW("tray: update download failed: %s", elog::Narrow(r->err).c_str());
+        ShowError(L"The update could not be downloaded:\n" + r->err + L"\n\nYou can download it from the GitHub releases page instead.");
+    }
+    settings::NotifyUpdateChanged();
+    Refresh();
+    delete r;
 }
 
 void ShowMenu() {
@@ -1303,6 +1531,12 @@ void ShowMenu() {
     // installed copy: the uninstaller (the same as Windows Settings > Apps > VR EyeCapture > Uninstall)
     if (IsInstalledCopy(g_exeDir) && GetFileAttributesW((g_exeDir + L"\\unins000.exe").c_str()) != INVALID_FILE_ATTRIBUTES)
         AppendMenuW(m, MF_STRING, ID_REMOVE, L"Remove VR EyeCapture from this PC...");
+    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+    if (g_updDownloading)
+        AppendMenuW(m, MF_STRING | MF_GRAYED, 0, L"Downloading update...");
+    else if (g_updAvail)
+        AppendMenuW(m, MF_STRING, ID_UPDATE_GET, (L"Update to " + UpdateVersionText() + L"...").c_str());
+    AppendMenuW(m, MF_STRING | (g_updChecking ? MF_GRAYED : 0), ID_UPDATE_CHECK, L"Check for updates now");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING, ID_EXIT, L"Exit");
     POINT pt;
@@ -1363,6 +1597,13 @@ void ShowMenu() {
     case ID_STEAMVR:
         OpenSteamVrGames();
         break;
+    case ID_UPDATE_GET:
+        StartUpdateDownload();
+        break;
+    case ID_UPDATE_CHECK:
+        Balloon(L"Checking for updates", L"Checking GitHub for a newer version...", false);
+        StartUpdateCheck(true);
+        break;
     case ID_REMOVE: {   // the uninstaller asks itself, closes this tray (--quit) and cleans up (--uninstall-cleanup)
         const std::wstring un = g_exeDir + L"\\unins000.exe";
         const HINSTANCE r = ShellExecuteW(nullptr, L"open", un.c_str(), nullptr, g_exeDir.c_str(), SW_SHOWNORMAL);
@@ -1386,6 +1627,8 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         if (g_regEnabled && !g_regBusy && GetTickCount64() - g_regQueried >= 10000) QueryReg(false);   // cheap registry read
         CheckConfigChanged();   // one GetFileAttributesEx: controller / wheel hotkeys follow config.ini edits
         if (GetTickCount64() - g_mirrorCheck >= 2000) { g_mirrorCheck = GetTickCount64(); MirrorTick(); }   // SteamVR quick mode
+        if (g_updEnabled && !g_testMode && !g_updChecking && g_updNextCheck && GetTickCount64() >= g_updNextCheck)
+            StartUpdateCheck(false);   // first run ~8 s after start, then once every 24 h (StartUpdateCheck reschedules)
         g_blinkOdd = !g_blinkOdd;
         Refresh();
         return 0;
@@ -1409,6 +1652,12 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     }
+    case WM_UPDATE_RESULT:
+        OnUpdateCheckResult((UpdCheck*)lp);
+        return 0;
+    case WM_UPDATE_DOWNLOADED:
+        OnUpdateDownloaded((UpdDownload*)lp);
+        return 0;
     case WM_OPEN_SETTINGS:
         OpenSettings();
         return 0;
@@ -1456,6 +1705,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_DESTROY:
         StopMirror("tray exit");
         g_tagQuit = true;
+        g_updQuit = true;   // a detached update check / download thread must not post to the destroyed window
         KillTimer(h, kTimer);
         g_pp.Stop();   // cancels a running ffmpeg (resumed first if held) and deletes its partial output
         ClearProducers();
@@ -1883,6 +2133,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
             Balloon(kAppTitle, L"Start with Windows still points to " + stale + L". Open Settings and tick Start with Windows again to fix it.", false);
         }
     }
+    g_updLastNotified = ReadLastNotified();   // the last release a balloon was shown for (so it shows once per version)
     // controller / wheel hotkeys (Pad: / Joy: bindings): the tray polls them and sends ECC_TOGGLE to the game
     ApplyInputBindings("start");
     InstallQueueHooks();   // before the window can open

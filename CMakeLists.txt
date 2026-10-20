@@ -123,9 +123,9 @@ target_link_options(EyeCaptureMirror PRIVATE "/MANIFESTUAC:level='asInvoker' uiA
 # src/openvr/openvr_hooks.cpp for the sidecar text and the home-key names.
 # tray/glass.cpp: the Windows 11 look (own-drawn controls, Mica) of both windows.
 add_executable(EyeCaptureTray WIN32 tray/tray.cpp tray/postprocess.cpp tray/settings.cpp tray/install.cpp tray/input.cpp
-    tray/steamvr_ui.cpp tray/steamvr_games.cpp tray/glass.cpp src/openvr/openvr_hooks.cpp tray/tray.rc)
+    tray/steamvr_ui.cpp tray/steamvr_games.cpp tray/glass.cpp tray/update.cpp src/openvr/openvr_hooks.cpp tray/tray.rc)
 target_compile_options(EyeCaptureTray PRIVATE ${EYE_WARN_FLAGS})
-target_link_libraries(EyeCaptureTray PRIVATE eye_capture_core comctl32 comdlg32 dinput8 dxguid advapi32 version)
+target_link_libraries(EyeCaptureTray PRIVATE eye_capture_core comctl32 comdlg32 dinput8 dxguid advapi32 version winhttp bcrypt)
 target_include_directories(EyeCaptureTray PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tray)
 # FileDescription "VR EyeCapture": the name Task Manager > Startup apps shows for the Run value
 eye_add_version_info(EyeCaptureTray APP "VR EyeCapture" "EyeCaptureTray.exe")
@@ -263,6 +263,16 @@ if (EYE_BUILD_TESTS)
     target_compile_options(head_smoothing_test PRIVATE ${EYE_WARN_FLAGS})
     target_link_libraries(head_smoothing_test PRIVATE eye_capture_core)
     target_include_directories(head_smoothing_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+
+    # Update checker logic unit test (CPU only): version parse / compare, release JSON parse (a fixture with a digest),
+    # the installer-asset wildcard and the download-host allow-list. No network (the WinHTTP half of tray/update.cpp is
+    # linked but not called). IsAllowedDownloadHost uses WinHttpCrackUrl, so winhttp is linked; the SHA-256 needs bcrypt.
+    add_executable(update_test tests/update_test.cpp tray/update.cpp)
+    target_compile_options(update_test PRIVATE ${EYE_WARN_FLAGS})
+    target_compile_definitions(update_test PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
+        EYE_TEST_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures")
+    target_include_directories(update_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tray ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(update_test PRIVATE winhttp bcrypt)
 
     # In-headset indicator logic unit test (CPU only).
     add_executable(indicator_test tests/indicator_test.cpp)

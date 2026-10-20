@@ -75,6 +75,22 @@ void SetToolHooks(const ToolHooks& hooks);
 // The worker changed state: refresh the queue view now (it also refreshes every 500 ms on its own). No-op when closed.
 void NotifyQueueChanged();
 
+// The Advanced "Updates:" row and the "update available" line. The tray owns the update checker (tray/update.h); the
+// window only reads its state and asks it to act. Unset hooks (settings_test without a tray) grey / hide their controls.
+struct UpdateState {
+    bool         available = false;     // a newer release is known
+    bool         downloading = false;   // a download is in progress
+    std::wstring versionText;           // "vX.Y.Z" of the newer release ("" when none)
+};
+struct UpdateHooks {
+    std::function<UpdateState()> state;        // current update state (for the checkbox row + the line)
+    std::function<void()>        checkNow;     // "Check now" button: start a manual check (works even with check_updates off)
+    std::function<void()>        startUpdate;  // the "update available" line / the menu item: confirm + download + run
+};
+void SetUpdateHooks(const UpdateHooks& hooks);
+// The update state changed (a check finished, a download started / ended): refresh the "update available" line. No-op when closed.
+void NotifyUpdateChanged();
+
 // Control IDs, so tests can drive the window through SendMessage.
 enum : int {
     ID_HOTKEY = 2001, ID_HOTKEY_PICK, ID_CODEC, ID_BITRATE, ID_MAXFPS, ID_OUTDIR, ID_BROWSE, ID_AUDIO, ID_AUDIODEV,
@@ -118,6 +134,9 @@ enum : int {
     , ID_OPENLOG, ID_TAG3D, ID_REGLAYER   // Advanced "Tools:" row (moved from the tray menu; SetToolHooks; appended)
     , ID_THEME                  // "Theme:" drop-down in the header, bound to [capture] theme = system|light|dark (appended)
     , ID_INDLIVE                // "Violet for OBS" check next to the indicator check, bound to [indicator] indicator_live (appended)
+    , ID_CHECKUPDATES           // "Check for updates automatically" check in the Advanced group, bound to [capture] check_updates (appended)
+    , ID_UPDATENOW              // "Check now" button in the Advanced group: a manual update check (not a config key; appended)
+    , ID_UPDATELINK             // SysLink on the Advanced group's top edge: "VR EyeCapture vX is available -- Update now" (hidden until available; appended)
 };
 // ID_QSTART reads "Start" and acts on every selected item of ID_QLIST (a multi-select list box: LB_SETSEL / LB_GETSELITEMS).
 extern const wchar_t* const kWindowTitle;

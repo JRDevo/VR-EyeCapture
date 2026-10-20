@@ -293,6 +293,8 @@ KeyResult ApplyKey(Config& c, const std::wstring& key, std::wstring val) {
         else if (l == L"light") c.uiTheme = 1;
         else if (l == L"dark") c.uiTheme = 2;
         else ok = false;
+    } else if (key == L"check_updates") {
+        if (ParseBool(val, b)) c.checkUpdates = b; else ok = false;
     } else if (key == L"swap_eyes") {
         if (ParseBool(val, b)) c.swapEyes = b; else ok = false;
     } else if (key == L"record_overlays") {

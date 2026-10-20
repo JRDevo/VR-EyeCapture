@@ -35,7 +35,7 @@ games with Direct3D 11.
 
 **In short:** a free, open-source **VR recorder** for Windows. It captures **stereoscopic 3D (side-by-side / SBS) gameplay** from a **Meta Quest 3** (Virtual Desktop or Link), a **SteamVR** headset or any other OpenXR runtime, straight from the game's own eye buffers, and prepares **YouTube 3D / VR180 uploads**. Any Direct3D 11 / 12 OpenXR game, and Direct3D 11 SteamVR (OpenVR) games.
 
-**Menu:** [Features](#features) · [What it looks like](#what-it-looks-like) · [Download](#-download) · [Requirements](#requirements) · [Install](#install) · [How it works](#how-it-works-start-the-tray-app-first) · [Record](#record) · [YouTube](#upload-to-youtube) · [Settings](#settings--configini) · [Indicator](#in-headset-indicator) · [Smoothing](#head-motion-smoothing) · [Dome mode](#vr180--vr360-dome-mode-experimental) · [OBS](#live-view-in-obs-experimental) · [SteamVR games](#steamvr-games-virtual-desktop--steamvr) · [Troubleshooting](#log-and-troubleshooting) · [Cost](#cost) · [With other mods](#with-other-mods) · [Build](#building-from-source) · [Report a problem](#reporting-a-problem-what-to-upload) · [License](#license-and-credits)
+**Menu:** [Features](#features) · [What it looks like](#what-it-looks-like) · [Download](#-download) · [Requirements](#requirements) · [Install](#install) · [How it works](#how-it-works-start-the-tray-app-first) · [Record](#record) · [YouTube](#upload-to-youtube) · [Settings](#settings--configini) · [Updates](#updates) · [Indicator](#in-headset-indicator) · [Smoothing](#head-motion-smoothing) · [Dome mode](#vr180--vr360-dome-mode-experimental) · [OBS](#live-view-in-obs-experimental) · [SteamVR games](#steamvr-games-virtual-desktop--steamvr) · [Troubleshooting](#log-and-troubleshooting) · [Cost](#cost) · [With other mods](#with-other-mods) · [Build](#building-from-source) · [Report a problem](#reporting-a-problem-what-to-upload) · [License](#license-and-credits)
 
 ## Features
 
@@ -146,6 +146,8 @@ conversion queue); **right-click** it for the menu.
 | **Open VR EyeCapture** (bold; same as left-click) | Opens the app window (below). |
 | *(moved to the app window)* | **Convert a recording...** (Export group), **Open config.ini** (footer), and in Advanced > **Tools:** **Open log**, **Tag as 3D...** (side by side / top / bottom: copies a video made elsewhere, e.g. an OBS recording, into `<name>_3D.mkv` with the 3D tag YouTube reads, without re-encoding), **Register for VR games...** / **Unregister from VR games...** (one administrator prompt; needed once, the installer does it). |
 | **SteamVR games...** | The SteamVR (OpenVR) games in your Steam library, each with a check box: tick to record it, untick to undo; **Enable all**, **Add a game by exe...** for other games ([SteamVR games](#steamvr-games-virtual-desktop--steamvr)). |
+| **Update to vX.Y.Z...** | Shown only when a newer version is on GitHub. Asks to confirm, then downloads the installer (its checksum is verified) and runs it; you see the normal Windows (UAC) prompt and the setup replaces the app and keeps your settings. See [Updates](#updates). |
+| **Check for updates now** | Checks GitHub for a newer version right away (nothing is downloaded by this). |
 | **Exit** | Closes the tray app. Games started after that are not recorded. A running conversion is cancelled (its half-written file is deleted) and a waiting one is dropped; the MP4 stays. |
 
 ### The app window (left-click the tray icon)
@@ -158,7 +160,7 @@ Point at any setting and the **Description** box at the bottom explains it. **Sa
 
 | Part | What is in it |
 |---|---|
-| **Recording** | **Hotkey**: the key that starts / stops a recording. **Capture...** records a key, mouse button, Xbox controller button or wheel button for you; **Add...** adds a further one. **Output folder** (**Browse...** picks a folder on any drive; the line below shows that drive's free space, e.g. "E: 812 GB free"). **Audio** (record system audio, and on the same line the **Device** to record; empty = the default playback device). **Overlays**: include overlay layers (menus, mod panels) in the video. **Beeps**: beep in the headset when a recording starts / stops (clear it if the beeps are heard in your recordings). |
+| **Recording** | **Hotkey**: the key that starts / stops a recording. **Capture...** records a key, mouse button, Xbox controller button or wheel button for you; **Add...** adds a further one. **Output folder** (**Browse...** picks a folder on any drive; the line below shows that drive's free space, e.g. "E: 812 GB free"). **Audio** (record system audio, and on the same line the **Device** to record; empty = the default playback device). **Overlays**: include overlay layers (menus, mod panels) in the video. **Beeps**: beep in the headset when a recording starts / stops (clear it if the beeps are heard in your recordings). **Updates**: check GitHub for a newer version automatically (see [Updates](#updates)), with a **Check now** button; when one is found, a line at the top of the window offers to update. |
 | **Video** | **Codec** (H.265 / HEVC is recommended; AV1 needs a GPU with an AV1 encoder, e.g. NVIDIA RTX 40 / 50, and falls back to HEVC without one) and, on the same line, the **Encoder preset** (Auto, Fastest, Fast, Balanced, Quality, Best quality: `quality_vs_speed`). **Bitrate**: Default (120 Mbit/s), 150, 200, 250 or 300 Mbit/s, with the file size per hour next to it (250 Mbit/s = about 113 GB per hour; suggested: 250 at 60 fps, 120 at 30 fps; a value set in config.ini shows as Custom; greyed for Constant QP). **Rate control**: VBR (default), CBR or Constant QP, with the **QP** field (0 = best, 51 = worst; only for Constant QP). **Resolution**: Native, 3840 px (4K), 2560 px (2K) or 1920 px (1080p) -- the width of the whole side-by-side video; smaller = less GPU work while recording and smaller files. **Frame rate limit** in fps (0 = unlimited, the game's own rate) and **Constant frame rate** (for video editors such as DaVinci Resolve). |
 | **Stereo 3D** | **Projection**: flat stereo (side by side, normal) or the experimental VR180 / VR360 dome. **Dome fill** and **Fade after**: dome mode only (greyed while Projection is Flat). **Options**: *Symmetric field of view* lines both eyes up so the 3D is comfortable (leave on), *Swap eyes* if left and right look swapped, *Level horizon (roll lock)* keeps the horizon level. **Head smoothing**: calms small head shakes (0 = off), with the **FOV scale** (field of view scale) next to it: zooms in a little to hide the edges. |
 | **Recording Indicator** | A small red dot that you see in the headset while recording, never in the video. Size, opacity and where it floats. **Violet for OBS**: the dot turns violet while OBS shows the live view and nothing is recorded (`indicator_live`). |
@@ -248,6 +250,36 @@ Command-line forms (from an administrator prompt): `EyeCaptureTray.exe --registe
 5 = no administrator rights); `EyeCaptureTray.exe --status` prints `registered=yes|no|stale` and `autostart=yes|no` among the status fields;
 `--quit` closes the running tray app of that folder and `--uninstall-cleanup` does the uninstaller's clean-up (both used by the setup).
 `scripts\install.ps1` / `uninstall.ps1` are only for building from source (see [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)).
+
+</details>
+
+<details>
+<summary>
+
+## Updates
+
+</summary>
+
+
+The tray app can tell you when a newer version is on the [Releases](https://github.com/JRDevo/VR-EyeCapture/releases) page,
+and update you with one click.
+
+- **Automatic check** (on by default; `check_updates = 1`, app window → Recording → **Updates**): a few seconds after the
+  tray app starts, and then at most once a day while it runs, it makes one HTTPS request to
+  `api.github.com/repos/JRDevo/VR-EyeCapture/releases/latest`. It only *reads* the latest release; nothing is downloaded.
+  Any failure is silent and only noted in `logs\tray.log`. Drafts and pre-releases are ignored. Turn it off with the
+  checkbox (or `check_updates = 0`); **Check for updates now** (tray menu) and **Check now** (app window) still work.
+- **When a newer version is found:** one tray balloon ("VR EyeCapture vX.Y.Z is available"), an **Update to vX.Y.Z...** item
+  in the tray menu, and a line at the top of the app window. The balloon appears once per version (it is remembered in a
+  small file next to the logs, never in the registry).
+- **Updating** happens only when **you** click. The app asks you to confirm (with a link to the release notes), then
+  downloads `VR-EyeCapture-Setup-v<version>.exe` from GitHub into `%TEMP%\VR-EyeCapture-update\`, **verifies its SHA-256
+  checksum** against the one GitHub publishes for the asset (if the checksum is missing or does not match, the file is
+  deleted and nothing is run), and starts the installer. You see the normal Windows (UAC) prompt; the setup closes the tray,
+  replaces the program and keeps your settings and recordings. Downloads come only from `github.com` /
+  `*.githubusercontent.com` over HTTPS.
+- You can always skip all of this and just download the installer yourself from the
+  [Releases](https://github.com/JRDevo/VR-EyeCapture/releases) page.
 
 </details>
 
@@ -503,6 +535,7 @@ projections are labelled "experimental" in the window.
 | `post_when` | `game_exit` | Tray app: when a finished recording is converted. `now` = right away; `session_end` = once no OpenXR session is live (a running conversion is paused while a VR session is live and resumed afterwards); `game_exit` = once the game process that made it has exited and no OpenXR game is live; `manual` = never on its own: recordings wait in the queue until you start them (app window: Conversions > Start / Start all, or Convert a recording...). "Convert last recording now" / "Convert a recording..." always run at once (next); app window "Add to queue..." entries always wait for Start, whatever `post_when` says. Re-read when `config.ini` changes (no tray restart). |
 | `ffmpeg_path` | *(empty)* = auto | Tray app: full path of `ffmpeg.exe`. Empty = `PATH`, then WinGet packages, then an `ffmpeg` folder next to the tray app. |
 | `start_with_windows` | `0` | `1` = start the tray app when you sign in (app window: Advanced → Start with Windows). While `1`, the tray restores its own Run value at start if it is missing or points to another folder; never one switched off in Task Manager. |
+| `check_updates` | `1` | Tray app: `1` (default) = check GitHub for a newer release a few seconds after start and then at most once a day; one balloon, a tray menu item and a line in the app window offer the one-click update (checksum-verified; nothing downloads or installs without your click). `0` = never check on its own. App window: Recording → **Updates**. See [Updates](#updates). |
 | `require_tray` | `1` | `1` = the layer is only active while `EyeCaptureTray.exe` is running (checked when the game creates its VR session). `0` = always active. |
 | `log_level` | `info` | `none` (no logging at all), `error`, `warn`, `info`, `debug`. |
 
