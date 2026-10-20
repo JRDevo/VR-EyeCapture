@@ -91,6 +91,7 @@ struct Config {
     bool         postMkv = true;         // post_mkv: remux (sbs_full) or re-encode (other layout_3d) the MP4 to <name>.mkv with the Matroska stereo_mode tag
     bool         keepMp4 = false;        // keep_mp4: keep the MP4 after a verified MKV (and flat) conversion
     bool         postFlat = false;       // post_flat: also write <name>_FLAT.mp4 (left eye, 16:9, 3840 wide)
+    bool         tag3d = true;           // tag_3d: 1 = write the st3d (+ sv3d for VR180 / VR360) 3D boxes into the MP4; 0 = a plain MP4 (easier in video editors)
     bool         recordForYoutube = false;  // record_for_youtube: the layer records straight in the YouTube layout (layout_3d, eye_crop, short side 4320): the tray only remuxes
     bool         postYt8k = false;       // post_yt8k: also write <name>_YT8K.mkv (flat SBS only; layout per layout_3d)
     unsigned     yt8kBitrateMbps = 150;  // yt8k_bitrate_mbps: 8K step NVENC -b:v (maxrate 4/3 x, bufsize 2x); 20..400

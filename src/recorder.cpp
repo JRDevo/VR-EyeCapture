@@ -767,10 +767,12 @@ void Recorder::Impl::Run() {
         // VR180: a quarter of the sphere cropped on each side (+-90 degrees covered); VR360: the full sphere.
         const bool v180 = s.dome.projection == DomeProjection::Vr180;
         const uint32_t bounds[4] = {0, 0, v180 ? 0x40000000u : 0u, v180 ? 0x40000000u : 0u};
-        PatchStereoSpherical(s.path, v180 ? 2 /*left-right*/ : 1 /*top-bottom*/, true, bounds, st3dReport);
+        if (s.tag3d) PatchStereoSpherical(s.path, v180 ? 2 /*left-right*/ : 1 /*top-bottom*/, true, bounds, st3dReport);
+        else st3dReport = "st3d+sv3d: off (tag_3d = 0)";
         WriteSidecar(file);
     } else if (fileOk) {
-        PatchSt3d(s.path, yt && ytTb ? 1 /*top-bottom*/ : 2 /*left-right*/, st3dReport);
+        if (s.tag3d) PatchSt3d(s.path, yt && ytTb ? 1 /*top-bottom*/ : 2 /*left-right*/, st3dReport);
+        else st3dReport = "st3d: off (tag_3d = 0)";
         if (yt) WriteSidecar(file);   // record_for_youtube: tells the tray the file is already in the YouTube layout
     } else {
         DeleteFileW(s.path.c_str());

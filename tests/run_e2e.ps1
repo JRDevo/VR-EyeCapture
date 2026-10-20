@@ -157,6 +157,31 @@ if ($runOk -and $indOnFile) {
 $results += [pscustomobject]@{ api = 'd3d11'; layout = 'two, no indicator'; run = $runOk; verify = $verOk }
 }
 
+# ---- tag_3d = 0: a plain MP4 -- no st3d box (ffprobe shows no Stereo 3D side data), the log says so; the default file has it ----
+if (-not $OnlyOverlays) {
+$out = Join-Path $root 'build\e2e_out\d3d11_two_notag'
+if (Test-Path $out) { Remove-Item -Recurse -Force $out }
+Write-Host "`n=== d3d11 / two, tag_3d = 0" -ForegroundColor Cyan
+$env:XR_EYE_CAPTURE_CONFIG = 'projection=flat;tag_3d=0'
+$o = & $exe --api d3d11 --layout two --seconds 6 --record 4 --out-dir $out 2>&1 | Out-String
+if ($null -ne $prevCfg) { $env:XR_EYE_CAPTURE_CONFIG = $prevCfg } else { Remove-Item Env:\XR_EYE_CAPTURE_CONFIG -ErrorAction SilentlyContinue }
+$m = [regex]::Match($o, 'E2E_OUTPUT=(.+)')
+$runOk = ($LASTEXITCODE -eq 0) -and $m.Success
+$verOk = $false
+if ($runOk -and $indOnFile) {
+    $ffprobeExe = Join-Path (Split-Path $ffmpegExe) 'ffprobe.exe'
+    $sdOff = & $ffprobeExe -v error -select_streams v:0 -show_entries stream_side_data -of compact $m.Groups[1].Value.Trim() 2>&1 | Out-String
+    $sdOn = & $ffprobeExe -v error -select_streams v:0 -show_entries stream_side_data -of compact $indOnFile 2>&1 | Out-String
+    $logTxt = Get-Content (Join-Path $out 'eye_capture.log') -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+    $verOk = ($sdOff -notmatch 'Stereo 3D') -and ($sdOn -match 'Stereo 3D') -and ([string]$logTxt -match 'st3d: off \(tag_3d = 0\)') -and
+             ([string]$logTxt -match 'recording summary: OK')
+    Write-Host ("  Stereo 3D side data: tag_3d = 0 {0}, default {1}; log 'st3d: off (tag_3d = 0)' {2} -> {3}" -f
+        ($sdOff -match 'Stereo 3D'), ($sdOn -match 'Stereo 3D'), ([string]$logTxt -match 'st3d: off \(tag_3d = 0\)'),
+        $(if ($verOk) { 'ok: a plain MP4' } else { 'FAIL' })) -ForegroundColor $(if ($verOk) { 'Green' } else { 'Red' })
+} else { Write-Host '  run failed or no default recording to compare' -ForegroundColor Red }
+$results += [pscustomobject]@{ api = 'd3d11'; layout = 'two, tag_3d = 0'; run = $runOk; verify = $verOk }
+}
+
 # ---- overlays (record_overlays): quad / cylinder layers composited into the recording ----
 # Mock: head at (0, 1.6, 0) with identity orientation, eyes at x -0.032 / +0.032, fov +-0.8 rad, 1920x1080 per eye.
 function OvPx($x, $y, $z, $eye) {   # projection-space point -> pixel (x in the SBS frame, y)

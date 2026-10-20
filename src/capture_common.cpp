@@ -137,6 +137,7 @@ void FillRecorderSettings(const Config& c, const EyeView& L, const EyeView& R, u
     rs.head = c.head;
     rs.dome = c.dome;
     rs.youtube = c.recordForYoutube;   // record_for_youtube: render the YouTube layout (layout_3d, eye_crop) directly
+    rs.tag3d = c.tag3d;
     rs.layout3d = c.layout3d;
     rs.eyeCrop = c.eyeCrop;
     rs.startFovValid = L.hasPose && R.hasPose;
@@ -183,6 +184,7 @@ std::string ApplyReloadedConfig(Config& c, const Config& n, bool* outputChanged)
     note("constant_frame_rate", B(c.constantFrameRate), B(n.constantFrameRate));
     note("max_width", U(c.maxWidth), U(n.maxWidth));
     note("record_for_youtube", B(c.recordForYoutube), B(n.recordForYoutube));
+    note("tag_3d", B(c.tag3d), B(n.tag3d));
     note("layout_3d", YtPackingKey(c.layout3d), YtPackingKey(n.layout3d));
     note("eye_crop", YtCropKey(c.eyeCrop), YtCropKey(n.eyeCrop));
     note("gamma", c.gamma == GammaMode::Auto ? "auto" : c.gamma == GammaMode::Srgb ? "srgb" : "linear",
@@ -212,6 +214,7 @@ std::string ApplyReloadedConfig(Config& c, const Config& n, bool* outputChanged)
     c.rateControl = n.rateControl; c.qp = n.qp; c.qualityVsSpeed = n.qualityVsSpeed; c.constantFrameRate = n.constantFrameRate;
     c.beeps = n.beeps;
     c.maxWidth = n.maxWidth; c.gamma = n.gamma; c.swapEyes = n.swapEyes; c.recordOverlays = n.recordOverlays;
+    c.tag3d = n.tag3d;
     c.recordForYoutube = n.recordForYoutube; c.layout3d = n.layout3d; c.eyeCrop = n.eyeCrop;   // record_for_youtube layout
     c.audioEnabled = n.audioEnabled;
     c.audioDevice = n.audioDevice; c.head = n.head; c.dome = n.dome; c.logLevel = n.logLevel;
