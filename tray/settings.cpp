@@ -42,8 +42,8 @@ const Field kFields[] = {
     {L"output_dir",        L"capture",         Kind::Edit,  ID_OUTDIR,     nullptr},
     {L"codec",             L"capture",         Kind::Combo, ID_CODEC,      L"hevc|h264|av1",
      L"H.265 / HEVC (recommended)|H.264 / AVC|AV1 (hardware: RTX 40 / 50)"},
-    {L"bitrate_mbps",      L"capture",         Kind::Combo, ID_BITRATE,    L"0|150|200|250|300",
-     L"Default (120 Mbit/s)|150 Mbit/s|200 Mbit/s|250 Mbit/s|300 Mbit/s", L"Custom (%s Mbit/s)"},
+    {L"bitrate_mbps",      L"capture",         Kind::Combo, ID_BITRATE,    L"0|150|200|250|300|350|400|450|500",
+     L"Default (120 Mbit/s)|150 Mbit/s|200 Mbit/s|250 Mbit/s|300 Mbit/s|350 Mbit/s|400 Mbit/s|450 Mbit/s|500 Mbit/s", L"Custom (%s Mbit/s)"},
     {L"rate_control",      L"capture",         Kind::Combo, ID_RATECONTROL, L"vbr|cbr|qp",
      L"VBR (default)|CBR (constant bitrate)|Constant QP (quality)"},
     {L"qp",                L"capture",         Kind::Edit,  ID_QP,         nullptr},
@@ -58,6 +58,7 @@ const Field kFields[] = {
     {L"swap_eyes",         L"capture",         Kind::Check, ID_SWAP,       nullptr},
     {L"record_overlays",   L"capture",         Kind::Check, ID_OVERLAYS,   nullptr},
     {L"record_for_youtube", L"capture",        Kind::Check, ID_RECORDYT,   nullptr},
+    {L"tag_3d",            L"capture",         Kind::Check, ID_TAG3DMP4,   nullptr},
     {L"symmetric_fov",     L"head_smoothing",  Kind::Check, ID_SYMFOV,     nullptr},
     {L"head_smoothing",    L"head_smoothing",  Kind::Track, ID_SMOOTH,     nullptr},
     {L"roll_lock",         L"head_smoothing",  Kind::Check, ID_ROLL,       nullptr},
@@ -314,6 +315,7 @@ KeyValues FromConfig(const Config& c) {
     kv.emplace_back(L"swap_eyes", B(c.swapEyes));
     kv.emplace_back(L"record_overlays", B(c.recordOverlays));
     kv.emplace_back(L"record_for_youtube", B(c.recordForYoutube));
+    kv.emplace_back(L"tag_3d", B(c.tag3d));
     kv.emplace_back(L"symmetric_fov", B(c.head.symmetricFov));
     kv.emplace_back(L"head_smoothing", FloatText(c.head.smoothing));
     kv.emplace_back(L"roll_lock", B(c.head.rollLock));
@@ -589,7 +591,9 @@ const Help kHelp[] = {
     {ID_BITRATE, L"How much data per second the video gets. More = a sharper picture (most visible in fast motion) and bigger files." HELP_BR
                  L"• Default: 120 Mbit/s for HEVC, 80 Mbit/s for H.264 and AV1."
                  HELP_LI L"Suggested: 250 Mbit/s at 60 fps or more; the default at 30 fps."
-                 HELP_LI L"One hour of recording: 120 Mbit/s = about 54 GB, 150 = 68 GB, 200 = 90 GB, 250 = 113 GB, 300 = 135 GB." HELP_BR
+                 HELP_LI L"One hour of recording: 120 Mbit/s = about 54 GB, 150 = 68 GB, 200 = 90 GB, 250 = 113 GB, 300 = 135 GB, "
+                 L"400 = 180 GB, 500 = 225 GB."
+                 HELP_LI L"350 to 500 Mbit/s: for VR180 / VR360, where you see more detail. Needs a fast GPU (RTX 40 / 50) and a fast disk." HELP_BR
                  L"A value from config.ini that is not in the list shows as Custom and is kept."},
     {ID_BITRATEHINT, L"The size of one hour of recording at this bitrate (video only; sound adds about 0.1 GB)."},
     {ID_YT8KBITRATE, L"How much data per second the 8K 3D MKV gets (only when YouTube output makes the 8K file)." HELP_BR
@@ -705,6 +709,9 @@ const Help kHelp[] = {
                 HELP_LI L"With 'Record directly in the YouTube layout' the recording already is that file: its 3D MKV is a quick copy." HELP_BR
                 L"Upload the .mkv file named in the notification. Files are never overwritten: a new one gets \" (2)\" in its name. "
                 L"Crop and AV1 add tags to the name (_4x3, _full, _AV1)."},
+    {ID_TAG3DMP4, L"Writes the 3D tag (and the VR180 / VR360 tag) into the recorded MP4, so players and YouTube show it in 3D." HELP_BR
+                  L"Clear it to get a plain MP4. Video editors (for example DaVinci Resolve) open a plain MP4 more easily." HELP_BR
+                  L"The 3D MKV still gets its own 3D tag. To add the tag to a plain MP4 later, use Tag as 3D... in Advanced."},
     {ID_RECORDYT, L"Records straight into the YouTube layout, so nothing is re-encoded afterwards." HELP_BR
                   L"• Each frame is written in the Output layout, with Eye crop applied, 4320 px on the short side (Quest 3 at 16:9: 7680x4320)."
                   HELP_LI L"The tray only copies it into the 3D MKV (seconds). Upload that MKV."
@@ -2630,6 +2637,9 @@ int BuildControls(HWND dlg, Builder::Pass pass, int clientW, int clientH, int sc
     r += pitch;
     b.Label(lx, r, labelW, L"Recording:", ID_RECORDYT);
     b.Check(ID_RECORDYT, cx, r, L"Record directly in the YouTube layout (no re-encode)");
+    r += pitch;
+    b.Label(lx, r, labelW, L"3D tag:", ID_TAG3DMP4);
+    b.Check(ID_TAG3DMP4, cx, r, L"Write the 3D tag into the recorded MP4");
     r += pitch;
     {   // below the preview: the whole control column (Convert = add and start now; Add to queue = add and wait for Start)
         const int bw = (cw - 8) / 2;

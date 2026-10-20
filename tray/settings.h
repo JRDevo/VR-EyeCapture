@@ -118,6 +118,7 @@ enum : int {
     , ID_OPENLOG, ID_TAG3D, ID_REGLAYER   // Advanced "Tools:" row (moved from the tray menu; SetToolHooks; appended)
     , ID_THEME                  // "Theme:" drop-down in the header, bound to [capture] theme = system|light|dark (appended)
     , ID_INDLIVE                // "Violet for OBS" check next to the indicator check, bound to [indicator] indicator_live (appended)
+    , ID_TAG3DMP4               // "Write the 3D tag into the MP4" check in the Export group, bound to [capture] tag_3d (appended)
 };
 // ID_QSTART reads "Start" and acts on every selected item of ID_QLIST (a multi-select list box: LB_SETSEL / LB_GETSELITEMS).
 extern const wchar_t* const kWindowTitle;

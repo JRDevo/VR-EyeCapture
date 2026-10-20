@@ -305,6 +305,8 @@ KeyResult ApplyKey(Config& c, const std::wstring& key, std::wstring val) {
         if (ParseBool(val, b)) c.keepMp4 = b; else ok = false;
     } else if (key == L"post_flat") {
         if (ParseBool(val, b)) c.postFlat = b; else ok = false;
+    } else if (key == L"tag_3d") {
+        if (ParseBool(val, b)) c.tag3d = b; else ok = false;
     } else if (key == L"record_for_youtube") {
         if (ParseBool(val, b)) c.recordForYoutube = b; else ok = false;
     } else if (key == L"yt8k_bitrate_mbps") {

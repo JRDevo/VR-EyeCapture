@@ -50,6 +50,7 @@ struct RecorderSettings {
     // both eyes cropped (eyeCrop), scaled (short side 4320; XR_EYE_CAPTURE_TEST_YT_SHORT overrides it) and packed (layout3d)
     // into the recorded frame; st3d top-bottom / left-right and a <name>.json sidecar ("youtube":1) so the tray only remuxes.
     bool         youtube = false;
+    bool         tag3d = true;       // tag_3d: false = no st3d / sv3d boxes (a plain MP4; the sidecar is still written)
     Layout3d     layout3d = Layout3d::TbHalf;
     EyeCrop      eyeCrop = EyeCrop::Wide169;
     // The two views' fov (angleLeft, angleRight, angleUp, angleDown) and image sizes at record start: symmetric_fov

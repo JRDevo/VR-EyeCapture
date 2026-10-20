@@ -585,6 +585,34 @@ int TestSave(const std::wstring& path) {
                   "record_for_youtube back to 0: changed in place ('record_for_youtube 1->0')");
             DeleteFileW(pr4.c_str());
         }
+        // 14b. tag_3d: default 1; missing + 1 leaves the file alone; 0 is appended to [capture]; 1 again in place
+        {
+            Config def;
+            Check(def.tag3d, "tag_3d defaults to 1");
+            const std::wstring pt = path + L".tag3d-test.ini";
+            { std::ofstream f(pt, std::ios::binary); f << "[capture]\r\nswap_eyes = 0\r\n"; }
+            Config n;
+            ParseHotkey(kDefaultHotkey, n.hotkey);
+            settings::SaveResult r1;
+            Check(settings::SaveSettingsToFile(pt, n, r1) && ReadAll(pt) == "[capture]\r\nswap_eyes = 0\r\n",
+                  "missing tag_3d + default 1: the file is left alone");
+            n.tag3d = false;
+            settings::SaveResult r2;
+            const bool ok2 = settings::SaveSettingsToFile(pt, n, r2);
+            Config back;
+            std::vector<std::wstring> prb;
+            ParseConfigFile(pt, back, prb);
+            Check(ok2 && r2.changed.size() == 1 && prb.empty() && !back.tag3d &&
+                      ReadAll(pt) == "[capture]\r\nswap_eyes = 0\r\ntag_3d = 0\r\n",
+                  "tag_3d = 0: appended to [capture] and read back as off");
+            n.tag3d = true;
+            settings::SaveResult r3;
+            const bool ok3 = settings::SaveSettingsToFile(pt, n, r3);
+            ParseConfigFile(pt, back, prb);
+            Check(ok3 && r3.changed.size() == 1 && r3.changed[0] == L"tag_3d 0->1" && back.tag3d,
+                  "tag_3d back to 1: changed in place ('tag_3d 0->1')");
+            DeleteFileW(pt.c_str());
+        }
         Check(VideoCodecDefaultMbps(VideoCodec::Av1) == 80 && VideoCodecDefaultMbps(VideoCodec::Hevc) == 120 &&
                   VideoCodecDefaultMbps(VideoCodec::H264) == 80 && VideoCodecMaxSide(VideoCodec::Av1) == 8192 &&
                   VideoCodecMaxSide(VideoCodec::H264) == 4096,
@@ -797,7 +825,7 @@ int TestDrive(DWORD pid, bool leaveSlider) {
         const std::wstring hint0 = GetEdit(d, settings::ID_BITRATEHINT);
         printf("    Bitrate drop-down: %d items, selected %d '%s', hint '%s'\n", (int)SendMessageW(br, CB_GETCOUNT, 0, 0), sel, N(item).c_str(),
                N(hint0).c_str());
-        Check(br && SendMessageW(br, CB_GETCOUNT, 0, 0) == 5 && sel == 0 && wcscmp(item, L"Default (120 Mbit/s)") == 0 &&
+        Check(br && SendMessageW(br, CB_GETCOUNT, 0, 0) == 9 && sel == 0 && wcscmp(item, L"Default (120 Mbit/s)") == 0 &&
                   hint0 == L"about 54 GB per hour",
               "Bitrate drop-down shows bitrate_mbps = 0 as 'Default (120 Mbit/s)', hint 'about 54 GB per hour'");
         // "Codec" drop-down: 3 items, loaded hevc; pick AV1 (item 2): the Default hint follows the AV1 default (80 Mbit/s)
@@ -815,7 +843,7 @@ int TestDrive(DWORD pid, bool leaveSlider) {
         {
             wchar_t i0[64] = L"";
             SendMessageW(br, CB_GETLBTEXT, 0, (LPARAM)i0);
-            Check(wcscmp(i0, L"Default (80 Mbit/s)") == 0 && SendMessageW(br, CB_GETCOUNT, 0, 0) == 5 && SendMessageW(br, CB_GETCURSEL, 0, 0) == 0,
+            Check(wcscmp(i0, L"Default (80 Mbit/s)") == 0 && SendMessageW(br, CB_GETCOUNT, 0, 0) == 9 && SendMessageW(br, CB_GETCURSEL, 0, 0) == 0,
                   "Codec AV1: the Bitrate drop-down's first item reads 'Default (80 Mbit/s)', still selected");
         }
         SendMessageW(br, CB_SETCURSEL, 3, 0);
