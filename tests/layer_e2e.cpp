@@ -426,6 +426,7 @@ int main(int argc, char** argv) {
     QueryPerformanceFrequency(&efFreq);
     double efMax = 0;
     uint32_t efMaxFrame = 0, efSlow = 0, efSlowLate = 0;   // late: after the first second (90 frames)
+    unsigned long long vaMax = 0, vaTotal = 0;             // E2E_ADDRESS_SPACE (sampled every 45 frames)
     std::vector<PatRect> pat;
     for (uint32_t f = 0; f < frames; ++f) {
         XrFrameState fs{XR_TYPE_FRAME_STATE};
@@ -696,9 +697,19 @@ int main(int argc, char** argv) {
             ++efSlow;
             if (f >= 90) ++efSlowLate;
         }
+        if (f % 45 == 0) {   // the process's used address space (what matters for a 32-bit game: 2 GB without LAA)
+            MEMORYSTATUSEX ms{sizeof(ms)};
+            if (GlobalMemoryStatusEx(&ms)) {
+                const unsigned long long used = ms.ullTotalVirtual - ms.ullAvailVirtual;
+                if (used > vaMax) vaMax = used;
+                vaTotal = ms.ullTotalVirtual;
+            }
+        }
     }
     printf("E2E_ENDFRAME max %.2f ms (frame %u), over 4 ms on %u of %u frames (%u after the first second)\n", efMax, efMaxFrame,
            efSlow, frames, efSlowLate);
+    printf("E2E_ADDRESS_SPACE max used %.1f MB of %.0f MB (%u-bit process)\n", vaMax / 1048576.0, vaTotal / 1048576.0,
+           (unsigned)(sizeof(void*) * 8));
 
     // ---- teardown (the layer finalizes in xrDestroySession if still recording) ----
     if (d3d12) { queue->Signal(fence.Get(), ++fenceVal); fence->SetEventOnCompletion(fenceVal, evt); WaitForSingleObject(evt, 5000); }

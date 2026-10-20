@@ -24,12 +24,22 @@ FetchContent_Declare(openxr_sdk
 FetchContent_MakeAvailable(openxr_sdk)
 
 set(EYE_WARN_FLAGS /W3 /permissive- /Zc:__cplusplus /utf-8)
+
+# A 32-bit configure (cmake -B build32 -A Win32) builds ONLY the 32-bit layer eye_capture32.dll and its tests (32-bit
+# OpenXR games, docs/X86_DESIGN.md); everything else -- the tray, the helper EyeCaptureRecorder.exe that records for the
+# 32-bit layer, the SteamVR proxy, the OBS plugin -- is 64-bit and comes from the normal x64 configure (build).
+if (CMAKE_SIZEOF_VOID_P EQUAL 4)
+    set(EYE_X86 ON)
+else()
+    set(EYE_X86 OFF)
+endif()
 # CI sets EYE_WERROR=ON: any compiler warning in OUR sources fails the build (the OpenXR SDK targets are not affected).
 option(EYE_WERROR "Treat compiler warnings in our sources as errors (/WX)" OFF)
 if (EYE_WERROR)
     list(APPEND EYE_WARN_FLAGS /WX)
 endif()
 
+if (NOT EYE_X86)
 # --- core: everything the layer and the encoder self-test share (recorder, audio, copy, st3d, log, config) ---
 add_library(eye_capture_core STATIC
     src/log.cpp
@@ -57,6 +67,7 @@ target_compile_definitions(eye_capture_core PUBLIC
 target_compile_options(eye_capture_core PRIVATE ${EYE_WARN_FLAGS})
 target_link_libraries(eye_capture_core PUBLIC
     d3d11 d3d12 dxgi d3dcompiler mfplat mfreadwrite mfuuid ole32 strmiids shell32 uuid winmm OpenXR::headers)
+endif()
 
 # Version information resource (CompanyName, ProductName, FileDescription, versions from project(VERSION)) for every binary we
 # ship, so the files identify themselves in Explorer / antivirus tools. kind = APP or DLL.
@@ -75,6 +86,78 @@ function(eye_add_version_info target kind description original)
     target_sources(${target} PRIVATE ${CMAKE_BINARY_DIR}/version_${target}.rc)
 endfunction()
 
+# Manifest of a layer DLL (library_path is relative to the manifest): <json> next to the DLL.
+set(EYE_LAYER_NAME "XR_APILAYER_JRDEVO_eye_capture")
+function(eye_layer_manifest target json dll)
+    set(EYE_LAYER_DLL "${dll}")
+    configure_file(${CMAKE_SOURCE_DIR}/src/${EYE_LAYER_NAME}.json.in ${CMAKE_BINARY_DIR}/${json} @ONLY)
+    add_custom_command(TARGET ${target} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_BINARY_DIR}/${json} $<TARGET_FILE_DIR:${target}>/${json})
+endfunction()
+
+if (EYE_X86)
+    # --- 32-bit: eye_capture32.dll + XR_APILAYER_JRDEVO_eye_capture32.json (registered in the 32-bit registry view,
+    # HKLM\SOFTWARE\WOW6432Node\Khronos\OpenXR\1\ApiLayers\Implicit). src/layer.cpp unchanged on a small core: its Recorder
+    # is src/recorder_remote.cpp (the eyes go to the 64-bit EyeCaptureRecorder.exe); no Media Foundation / WASAPI /
+    # re-projection / live share in the game's 2 GB address space. Static CRT: no x86 VC++ redistributable needed.
+    add_library(eye_capture_core32 STATIC
+        src/log.cpp
+        src/config.cpp
+        src/hotkey.cpp
+        src/frame_source.cpp
+        src/source_d3d11.cpp
+        src/source_vulkan.cpp
+        src/head_smoothing.cpp
+        src/dome.cpp
+        src/indicator.cpp
+        src/overlay.cpp
+        src/control.cpp
+        src/capture_common.cpp
+        src/recorder_remote.cpp
+        src/x86_layer_stubs.cpp)
+    target_include_directories(eye_capture_core32 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_compile_definitions(eye_capture_core32 PUBLIC
+        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX EYE_REMOTE_RECORDER
+        EYE_CAPTURE_VERSION="${PROJECT_VERSION}")
+    target_compile_options(eye_capture_core32 PRIVATE ${EYE_WARN_FLAGS})
+    target_link_libraries(eye_capture_core32 PUBLIC d3d11 dxgi d3dcompiler ole32 shell32 uuid winmm OpenXR::headers)
+    set_property(TARGET eye_capture_core32 PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
+    add_library(eye_capture32 SHARED src/layer.cpp)
+    target_compile_options(eye_capture32 PRIVATE ${EYE_WARN_FLAGS})
+    target_link_libraries(eye_capture32 PRIVATE eye_capture_core32 OpenXR::headers delayimp)
+    target_compile_definitions(eye_capture32 PRIVATE XR_USE_PLATFORM_WIN32 XR_USE_GRAPHICS_API_D3D11 XR_USE_GRAPHICS_API_D3D12)
+    set_property(TARGET eye_capture32 PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    # the overlay compositor's shader compiler is never used in a 32-bit game: not even loaded
+    target_link_options(eye_capture32 PRIVATE /DELAYLOAD:d3dcompiler_47.dll)
+    eye_add_version_info(eye_capture32 DLL "VR EyeCapture OpenXR API layer (32-bit games)" "eye_capture32.dll")
+    eye_layer_manifest(eye_capture32 ${EYE_LAYER_NAME}32.json eye_capture32.dll)
+
+    option(EYE_BUILD_TESTS "Build the 32-bit tests (mock runtime + layer_e2e through the 32-bit OpenXR loader)" ON)
+    if (EYE_BUILD_TESTS)
+        # The mock runtime and the frame-loop app of tests/run_e2e.ps1 as 32-bit builds: tests/run_x86.ps1 drives the
+        # 32-bit layer through the real 32-bit OpenXR loader with them (no headset).
+        add_library(mock_runtime SHARED tests/mock_runtime.cpp)
+        target_compile_options(mock_runtime PRIVATE ${EYE_WARN_FLAGS})
+        target_link_libraries(mock_runtime PRIVATE OpenXR::headers d3d11 d3d12 dxgi)
+        target_include_directories(mock_runtime PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+        target_compile_definitions(mock_runtime PRIVATE XR_USE_PLATFORM_WIN32 XR_USE_GRAPHICS_API_D3D11 XR_USE_GRAPHICS_API_D3D12 NOMINMAX)
+        configure_file(${CMAKE_CURRENT_SOURCE_DIR}/tests/mock_runtime.json.in ${CMAKE_CURRENT_BINARY_DIR}/mock_runtime.json COPYONLY)
+        add_custom_command(TARGET mock_runtime POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    ${CMAKE_CURRENT_BINARY_DIR}/mock_runtime.json $<TARGET_FILE_DIR:mock_runtime>/mock_runtime.json)
+        add_executable(layer_e2e tests/layer_e2e.cpp)
+        target_compile_options(layer_e2e PRIVATE ${EYE_WARN_FLAGS})
+        target_link_libraries(layer_e2e PRIVATE OpenXR::openxr_loader OpenXR::headers d3d11 d3d12 dxgi d3dcompiler)
+        target_include_directories(layer_e2e PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+        target_compile_definitions(layer_e2e PRIVATE XR_USE_PLATFORM_WIN32 XR_USE_GRAPHICS_API_D3D11 XR_USE_GRAPHICS_API_D3D12 UNICODE _UNICODE NOMINMAX)
+        add_dependencies(layer_e2e mock_runtime eye_capture32)
+        add_custom_command(TARGET layer_e2e POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:OpenXR::openxr_loader> $<TARGET_FILE_DIR:layer_e2e>)
+    endif()
+    return()   # nothing else is 32-bit
+endif()
+
 # --- the API layer DLL ---
 add_library(eye_capture SHARED
     src/layer.cpp)
@@ -83,14 +166,15 @@ target_link_libraries(eye_capture PRIVATE eye_capture_core OpenXR::headers)
 target_compile_definitions(eye_capture PRIVATE XR_USE_PLATFORM_WIN32 XR_USE_GRAPHICS_API_D3D11 XR_USE_GRAPHICS_API_D3D12)
 eye_add_version_info(eye_capture DLL "VR EyeCapture OpenXR API layer" "eye_capture.dll")
 
-# Manifest next to the DLL (library_path is relative to the manifest).
-set(EYE_LAYER_NAME "XR_APILAYER_JRDEVO_eye_capture")
-configure_file(${CMAKE_CURRENT_SOURCE_DIR}/src/${EYE_LAYER_NAME}.json.in
-               ${CMAKE_CURRENT_BINARY_DIR}/${EYE_LAYER_NAME}.json @ONLY)
-add_custom_command(TARGET eye_capture POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            ${CMAKE_CURRENT_BINARY_DIR}/${EYE_LAYER_NAME}.json
-            $<TARGET_FILE_DIR:eye_capture>/${EYE_LAYER_NAME}.json)
+eye_layer_manifest(eye_capture ${EYE_LAYER_NAME}.json eye_capture.dll)
+
+# --- EyeCaptureRecorder.exe (src/recorder_helper.cpp): records for the 32-bit layer eye_capture32.dll (32-bit OpenXR
+# games, docs/X86_DESIGN.md). The tray starts it when a 32-bit game's layer creates its block (Local\OpenXR-EyeCapture-X86).
+add_executable(EyeCaptureRecorder WIN32 src/recorder_helper.cpp)
+target_compile_options(EyeCaptureRecorder PRIVATE ${EYE_WARN_FLAGS})
+target_link_libraries(EyeCaptureRecorder PRIVATE eye_capture_core)
+eye_add_version_info(EyeCaptureRecorder APP "VR EyeCapture recorder for 32-bit games" "EyeCaptureRecorder.exe")
+target_link_options(EyeCaptureRecorder PRIVATE "/MANIFESTUAC:level='asInvoker' uiAccess='false'")
 
 # --- SteamVR (OpenVR) proxy: openvr_api.dll (src/openvr/, docs/STEAMVR_DESIGN.md) ---
 # Placed by the tray's "SteamVR games" Enable where a game's Valve openvr_api.dll was (that one is renamed

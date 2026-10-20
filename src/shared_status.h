@@ -7,6 +7,7 @@
 // the tray shows "no game" when the owner is gone.
 #pragma once
 #include <windows.h>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -60,6 +61,11 @@ struct EyeCapShared {
     uint32_t cmdTargetPid;
     uint32_t cmd;               // EyeCapCmd
 };
+
+// The 32-bit layer (eye_capture32.dll, 32-bit games) talks to the 64-bit tray through this block: the layout must be the
+// same in both builds (MSVC aligns the 8-byte fields to 8 in x86 structs as well).
+static_assert(offsetof(EyeCapShared, framesWritten) == 32 && offsetof(EyeCapShared, game) == 64, "EyeCapShared layout");
+static_assert(offsetof(EyeCapShared, cmdSeq) == 2816 && sizeof(EyeCapShared) == 2832, "EyeCapShared layout");
 
 // Opens (or creates) the block. Returns nullptr on failure. Close with UnmapViewOfFile + CloseHandle(*mapping).
 // `name` is only changed by tests (a private block so a test tray / status simulator never touch a real game's status).

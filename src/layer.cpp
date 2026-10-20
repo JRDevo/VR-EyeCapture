@@ -53,6 +53,17 @@
 
 namespace {
 
+#ifdef EYE_REMOTE_RECORDER
+// The 32-bit layer eye_capture32.dll (32-bit games, docs/X86_DESIGN.md): this file is compiled unchanged on top of
+// src/recorder_remote.cpp, whose Recorder hands the eye images to the 64-bit EyeCaptureRecorder.exe. Only the projection
+// layer's eyes go there: overlay layers are not collected, the OBS live share is a stub (src/x86_layer_stubs.cpp).
+constexpr bool kOverlaysSupported = false;
+#define LAYER_BITS " (32-bit: recordings are made by EyeCaptureRecorder.exe)"
+#else
+constexpr bool kOverlaysSupported = true;
+#define LAYER_BITS ""
+#endif
+
 // ------------------------------------------------------------------------------------------------ state
 
 struct InstanceData {
@@ -173,7 +184,7 @@ void InitProcess() {
     elog::SetMirror(g_cfg.outputDir + L"\\eye_capture.log");
     wchar_t exe[MAX_PATH] = L"";
     GetModuleFileNameW(nullptr, exe, MAX_PATH);
-    LOGI("==== " LAYER_NAME " v%s loaded into %s (pid %lu)", EYE_CAPTURE_VERSION, elog::Narrow(exe).c_str(),
+    LOGI("==== " LAYER_NAME " v%s" LAYER_BITS " loaded into %s (pid %lu)", EYE_CAPTURE_VERSION, elog::Narrow(exe).c_str(),
          (unsigned long)GetCurrentProcessId());
     LogCaptureConfig("layer dll folder", g_dllDir, g_cfg);
     if (g_autoRecordSec > 0) LOGI("XR_EYE_CAPTURE_AUTORECORD=%.1f s: recording starts at the first frame", g_autoRecordSec);
@@ -721,13 +732,17 @@ void CaptureImpl(SessionData* sd, const XrFrameEndInfo* info) {
     OverlayFrame ovf;
     const OverlayFrame* ovp = nullptr;
     if (info->layerCount > 1 && (recording || (sd->live && sd->live->WantsOverlays()))) {
-        if (g_cfg.recordOverlays) {
+        if (g_cfg.recordOverlays && kOverlaysSupported) {
             CollectOverlays(sd, info, projIdx, proj, g_cfg.swapEyes, ovf);
             if (ovf.n) ovp = &ovf;
         } else if (!sd->loggedOvOff) {
             sd->loggedOvOff = true;
-            LOGI("overlay: record_overlays = 0 -- the %u other layer(s) of this frame (panels / overlays) are not recorded",
-                 info->layerCount - 1);
+            if (!kOverlaysSupported)
+                LOGI("overlay: 32-bit game -- the %u other layer(s) of this frame (panels / overlays) are not recorded (only the "
+                     "projection layer's eyes go to EyeCaptureRecorder.exe)", info->layerCount - 1);
+            else
+                LOGI("overlay: record_overlays = 0 -- the %u other layer(s) of this frame (panels / overlays) are not recorded",
+                     info->layerCount - 1);
         }
     }
     if (recording) sd->rec->SubmitFrame(VideoClock(sd, info->displayTime), eyes[0], eyes[1], (int64_t)info->displayTime, ovp);
@@ -1281,6 +1296,9 @@ CaptureSnapshot Snapshot() {
         s.rec = g_active->rec->Status();
         if (g_startRequested.load() && s.rec.state == RecState::Failed) s.rec.state = RecState::Idle;   // a new start is pending
         s.api = elog::Widen(GfxApiName(g_active->api));
+#ifdef EYE_REMOTE_RECORDER
+        s.api += L" (32-bit)";   // the tray shows it (status block api[16])
+#endif
         s.runtime = elog::Widen(g_active->inst->runtimeName);
     }
     return s;
@@ -1406,6 +1424,11 @@ XrResult XRAPI_CALL Layer_CreateApiLayerInstance(const XrInstanceCreateInfo* inf
 } // namespace
 
 // ------------------------------------------------------------------------------------------------ export
+
+#if defined(_M_IX86)
+// 32-bit: XRAPI_CALL is __stdcall, whose exported name is decorated (_name@12); the loader asks for the plain name.
+#pragma comment(linker, "/EXPORT:xrNegotiateLoaderApiLayerInterface=_xrNegotiateLoaderApiLayerInterface@12")
+#endif
 
 extern "C" __declspec(dllexport) XrResult XRAPI_CALL xrNegotiateLoaderApiLayerInterface(const XrNegotiateLoaderInfo* loaderInfo,
                                                                                          const char* layerName,

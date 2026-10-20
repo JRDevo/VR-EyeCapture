@@ -170,6 +170,43 @@ public:
         free_.Reset();
     }
 
+    bool OpenRemoteRing(const HANDLE* tex, UINT count, HANDLE ready, HANDLE free, ComPtr<ID3D11Fence>* freeOut) override {
+        if (freeOut) freeOut->Reset();
+        gameTex_.clear();
+        ready_.Reset();
+        free_.Reset();
+        bool ok = tex && count > 0 && ready && free;
+        HRESULT hr = S_OK;
+        for (UINT i = 0; i < count; ++i) {
+            ComPtr<ID3D11Texture2D> t;
+            if (ok && tex[i] && FAILED(hr = dev1_->OpenSharedResource1(tex[i], IID_PPV_ARGS(&t)))) {
+                LOGE("D3D11 source: OpenSharedResource1(remote ring %u) on the game device failed hr=0x%08lx", i, (unsigned long)hr);
+                ok = false;
+            }
+            if (tex && tex[i]) CloseHandle(tex[i]);
+            if (ok) gameTex_.push_back(t);
+        }
+        if (ok && FAILED(hr = dev5_->OpenSharedFence(ready, IID_PPV_ARGS(&ready_)))) {
+            LOGE("D3D11 source: OpenSharedFence(remote ready) failed hr=0x%08lx", (unsigned long)hr);
+            ok = false;
+        }
+        if (ok && FAILED(hr = dev5_->OpenSharedFence(free, IID_PPV_ARGS(&free_)))) {
+            LOGE("D3D11 source: OpenSharedFence(remote free) failed hr=0x%08lx", (unsigned long)hr);
+            ok = false;
+        }
+        if (ready) CloseHandle(ready);
+        if (free) CloseHandle(free);
+        if (!ok) {
+            gameTex_.clear();
+            ready_.Reset();
+            free_.Reset();
+            return false;
+        }
+        readyValue_.store(0);
+        if (freeOut) *freeOut = free_;
+        return true;
+    }
+
     void ForgetSwapchain(const void* key) override {
         for (auto it = resolve_.begin(); it != resolve_.end();)
             it = (it->first.first == key) ? resolve_.erase(it) : std::next(it);
