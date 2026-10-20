@@ -185,7 +185,9 @@ try {
 
     Write-Host '-- Enable all'
     $r = Svr @('enableall', 'answers=Yes')
-    Step 'Enable all: asks for Second VR only, lists AC (anti-cheat), OC and Old as skipped' ($r.text -match 'BOX: Enable SteamVR recording for these games\?\|\|Close the games and SteamVR first\.\|\|\u2022 Second VR\|\|Skipped:\|\u2022 AC Game: anti-cheat.*\|\u2022 OC Game: OpenComposite.*\|\u2022 Old Game: 32-bit')
+    # the list bullet is U+2022; matched with [^|]* (the list items are pipe-delimited) because the \u2022 regex escape is not
+    # honoured here and the driver's UTF-8 bullet may decode to several chars when PowerShell captures its stdout
+    Step 'Enable all: asks for Second VR only, lists AC (anti-cheat), OC and Old as skipped' ($r.text -match 'BOX: Enable SteamVR recording for these games\?\|\|Close the games and SteamVR first\.\|\|[^|]*Second VR\|\|Skipped:\|[^|]*AC Game: anti-cheat[^|]*\|[^|]*OC Game: OpenComposite[^|]*\|[^|]*Old Game: 32-bit')
     Step 'Enable all: Second VR On (proxy in place), AC Game still Off, no result box' ((Hash (Join-Path $s 'openvr_api.dll')) -eq $hProxy -and (Row $r 'Second VR') -match '\| On \|' -and (Row $r 'AC Game') -match '\| Off \|' -and $r.text -notmatch 'BOX: SteamVR recording enabled for')
 
     Write-Host '-- tick OC Game (OpenComposite)'
@@ -242,7 +244,9 @@ try {
     Step 'Disable Exe Game: original back, row gone (not a Steam game)' ((Hash (Join-Path $x 'openvr_api.dll')) -eq $hValve -and (Row $r 'Exe Game') -eq '' -and $r.rows.Count -eq 5)
     Step 'Home key kept while games are still enabled' ((Get-ItemProperty -Path "HKCU:\$homeKey" -Name Home -ErrorAction SilentlyContinue).Home -eq $t)
     $r = Svr @('disableall', 'answers=No')
-    Step 'Disable all, answered No: the confirmation lists OC Game and Second VR; nothing changed' ($r.text -match 'BOX: Disable SteamVR recording for all 2 game\(s\)\?\|\|Close the games and SteamVR first\.\|\|\u2022 OC Game\|\u2022 Second VR\|' -and (Hash (Join-Path $s 'openvr_api.dll')) -eq $hProxy -and (Hash (Join-Path $o 'openvr_api.dll')) -eq $hProxy -and $r.text -match 'BUTTONS: .*disableall=1')
+    # the list bullet is U+2022; matched with [^|]* (the list items are pipe-delimited) because the \u2022 regex escape is not
+    # honoured here and the driver's UTF-8 bullet may decode to several chars when PowerShell captures its stdout
+    Step 'Disable all, answered No: the confirmation lists OC Game and Second VR; nothing changed' ($r.text -match 'BOX: Disable SteamVR recording for all 2 game\(s\)\?\|\|Close the games and SteamVR first\.\|\|[^|]*OC Game\|[^|]*Second VR\|' -and (Hash (Join-Path $s 'openvr_api.dll')) -eq $hProxy -and (Hash (Join-Path $o 'openvr_api.dll')) -eq $hProxy -and $r.text -match 'BUTTONS: .*disableall=1')
     [System.IO.File]::WriteAllText($askFile, "Yes`r`nYes`r`n", $utf8)
     $null = Svr @('unregister')
     $log = LogText
