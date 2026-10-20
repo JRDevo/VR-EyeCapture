@@ -41,8 +41,11 @@ $cfg = (Get-Content (Join-Path $root 'config.ini') -Raw) -replace '(?m)^projecti
 foreach ($k in 'constant_frame_rate = 0', 'beeps = 1', 'codec = hevc') { if ($cfg -notmatch ('(?m)^' + $k.Split(' ')[0] + ' =')) { $cfg = $cfg -replace '(?m)^\[capture\][ \t]*(\r?\n)', "[capture]`$1$k`$1" } }
 Set-Content $ini $cfg -NoNewline -Encoding utf8
 $old = @{}
-foreach ($n in 'APPDATA', 'XR_EYE_CAPTURE_REQUIRE_TRAY', 'XR_EYE_CAPTURE_TRAY_IPC', 'XR_EYE_CAPTURE_AUTORECORD2', 'XR_EYE_CAPTURE_CONFIG') { $old[$n] = [Environment]::GetEnvironmentVariable($n) }
+foreach ($n in 'APPDATA', 'XR_EYE_CAPTURE_REQUIRE_TRAY', 'XR_EYE_CAPTURE_TRAY_IPC', 'XR_EYE_CAPTURE_AUTORECORD2', 'XR_EYE_CAPTURE_CONFIG', 'DISABLE_XR_APILAYER_DIENERTECH_VECTORXR') { $old[$n] = [Environment]::GetEnvironmentVariable($n) }
 try {
+    # Disable a foreign implicit OpenXR layer (e.g. DienerTech VectorXR) that would otherwise be inserted into the
+    # loader's chain and break the mock runtime; the real runtime is untouched and this is restored in finally.
+    $env:DISABLE_XR_APILAYER_DIENERTECH_VECTORXR = '1'
     $env:APPDATA = Join-Path $b 'appdata'; $env:XR_EYE_CAPTURE_REQUIRE_TRAY = '0'; $env:XR_EYE_CAPTURE_TRAY_IPC = '0'; $env:XR_EYE_CAPTURE_AUTORECORD2 = '3'
     Remove-Item Env:\XR_EYE_CAPTURE_CONFIG -ErrorAction SilentlyContinue
     $out = Join-Path $b 'out'

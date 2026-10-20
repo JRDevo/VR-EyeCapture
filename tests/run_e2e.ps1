@@ -48,6 +48,10 @@ if ($BuildLayer) {
 $appDataTest = Join-Path $root 'build\e2e_appdata'
 New-Item -ItemType Directory -Force $appDataTest | Out-Null
 $env:APPDATA = $appDataTest
+# The mock runtime implements only the subset these tests use: a foreign implicit API layer that the loader inserts into
+# the chain (e.g. DienerTech VectorXR on this PC) can break it. Disable it for these processes; the real runtime is not
+# touched (these run as a child process, so the setting does not leak back to the parent shell).
+$env:DISABLE_XR_APILAYER_DIENERTECH_VECTORXR = '1'
 $exe = Join-Path $bin 'layer_e2e.exe'
 if (-not (Test-Path $exe)) { throw "build first: $exe" }
 $results = @()

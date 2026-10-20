@@ -51,6 +51,10 @@ if ($BuildLayer) {   # the same mechanism as run_e2e.ps1 -BuildLayer: nothing is
     Write-Host "-BuildLayer: testing $bin\eye_capture.dll (registered copy disabled for these processes)" -ForegroundColor Yellow
 }
 if (-not (Test-Path $exe)) { throw "build first: $exe" }
+# The mock runtime implements only the subset these tests use: a foreign implicit API layer that the loader inserts into
+# the chain (e.g. DienerTech VectorXR on this PC) can break it. Disable it for these processes; the real runtime is not
+# touched (these run as a child process, so the setting does not leak back to the parent shell).
+$env:DISABLE_XR_APILAYER_DIENERTECH_VECTORXR = '1'
 if (-not $FfmpegDir) {
     $cand = Get-ChildItem "$env:LOCALAPPDATA\Microsoft\WinGet\Packages" -Filter ffprobe.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($cand) { $FfmpegDir = $cand.DirectoryName } else {

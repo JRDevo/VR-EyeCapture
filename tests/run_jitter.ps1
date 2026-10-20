@@ -70,6 +70,18 @@ if ($BuildLayer) {   # the same mechanism as run_e2e.ps1 -BuildLayer: nothing is
     Write-Host "-BuildLayer: testing $bin\eye_capture.dll (registered copy disabled for these processes)" -ForegroundColor Yellow
 }
 if (-not (Test-Path $exe)) { throw "build first: $exe" }
+# The OpenXR mock runtime implements only the subset these tests use: a foreign implicit API layer that the loader
+# inserts into the chain (e.g. DienerTech VectorXR on this PC) can break it. Disable that layer for these processes;
+# the user's real runtime is untouched (restored at the end). Add more DISABLE_XR_APILAYER_* here if others surface.
+$prevVectorXr = $env:DISABLE_XR_APILAYER_DIENERTECH_VECTORXR
+$env:DISABLE_XR_APILAYER_DIENERTECH_VECTORXR = '1'
+# Every layer copy reads %APPDATA%\VR EyeCapture\config.ini first (config.cpp ConfigPath): on a PC with the installed
+# app that is the user's own config (codec, size, layout), so the checks below would test it instead of the defaults.
+# An empty APPDATA for these processes -> the config next to the DLL (or the defaults). The real APPDATA is restored below.
+$prevAppData = $env:APPDATA
+$appDataTest = Join-Path $root 'build\jitter_appdata'
+New-Item -ItemType Directory -Force $appDataTest | Out-Null
+$env:APPDATA = $appDataTest
 if (-not $FfmpegDir) {
     $cand = Get-ChildItem "$env:LOCALAPPDATA\Microsoft\WinGet\Packages" -Filter ffprobe.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($cand) { $FfmpegDir = $cand.DirectoryName } else {
@@ -289,6 +301,8 @@ foreach ($c in $cases) {
 if ($null -ne $prevTray) { $env:XR_EYE_CAPTURE_REQUIRE_TRAY = $prevTray } else { Remove-Item Env:\XR_EYE_CAPTURE_REQUIRE_TRAY -ErrorAction SilentlyContinue }
 if ($null -ne $prevCfg) { $env:XR_EYE_CAPTURE_CONFIG = $prevCfg } else { Remove-Item Env:\XR_EYE_CAPTURE_CONFIG -ErrorAction SilentlyContinue }
 if ($null -ne $prevIpc) { $env:XR_EYE_CAPTURE_TRAY_IPC = $prevIpc } else { Remove-Item Env:\XR_EYE_CAPTURE_TRAY_IPC -ErrorAction SilentlyContinue }
+if ($null -ne $prevAppData) { $env:APPDATA = $prevAppData } else { Remove-Item Env:\APPDATA -ErrorAction SilentlyContinue }
+if ($null -ne $prevVectorXr) { $env:DISABLE_XR_APILAYER_DIENERTECH_VECTORXR = $prevVectorXr } else { Remove-Item Env:\DISABLE_XR_APILAYER_DIENERTECH_VECTORXR -ErrorAction SilentlyContinue }
 
 function JitterStd($rows) {
     $j = @($rows | Where-Object { $_.t -ge 1.0 -and $_.t -le 3.9 -and -not [double]::IsNaN($_.x) })

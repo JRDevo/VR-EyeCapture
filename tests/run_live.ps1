@@ -66,6 +66,17 @@ if (-not $InstalledLayer) {
     $env:XR_ENABLE_API_LAYERS = 'XR_APILAYER_JRDEVO_eye_capture'
     Write-Host "testing $bin\eye_capture.dll (registered copy disabled for these processes)" -ForegroundColor Yellow
 }
+# The OpenXR mock runtime implements only the subset these tests use: a foreign implicit API layer that the loader
+# inserts into the chain (e.g. DienerTech VectorXR on this PC) can break it. Disable that layer for these processes
+# (the real runtime is not touched; these run as a child process so the setting does not leak to the parent shell).
+$env:DISABLE_XR_APILAYER_DIENERTECH_VECTORXR = '1'
+# Every layer copy reads %APPDATA%\VR EyeCapture\config.ini first (config.cpp ConfigPath): on a PC with the installed
+# app that is the user's own config (codec, size, layout), so the checks below could read it instead of the pinned
+# defaults. An empty APPDATA for these processes -> the config next to the DLL (or the defaults). Real APPDATA untouched
+# (child process). The per-case XR_EYE_CAPTURE_CONFIG still pins everything the checks depend on.
+$appDataTest = Join-Path $root 'build\live_appdata'
+New-Item -ItemType Directory -Force $appDataTest | Out-Null
+$env:APPDATA = $appDataTest
 # armed without a tray, nothing published to a running tray, no recording
 $env:XR_EYE_CAPTURE_REQUIRE_TRAY = '0'
 $env:XR_EYE_CAPTURE_TRAY_IPC = '0'

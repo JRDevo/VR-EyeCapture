@@ -711,7 +711,9 @@ if (Want 'mirror_yields_to_openxr_game') {
     $m = Get-Content (Join-Path $bin 'XR_APILAYER_JRDEVO_eye_capture.json') -Raw | ConvertFrom-Json
     $m.api_layer.library_path = (Join-Path $bin 'eye_capture.dll')
     $m | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $lp 'XR_APILAYER_JRDEVO_eye_capture.json') -Encoding ascii
-    $lenv = @{ DISABLE_XR_APILAYER_JRDEVO_eye_capture = '1'; XR_API_LAYER_PATH = $lp; XR_ENABLE_API_LAYERS = 'XR_APILAYER_JRDEVO_eye_capture' }
+    # DISABLE_XR_APILAYER_DIENERTECH_VECTORXR: keep a foreign implicit OpenXR layer (e.g. DienerTech VectorXR) out of this
+    # layer_e2e game's loader chain so it does not break the mock runtime; set and cleared with the other per-child vars below.
+    $lenv = @{ DISABLE_XR_APILAYER_JRDEVO_eye_capture = '1'; XR_API_LAYER_PATH = $lp; XR_ENABLE_API_LAYERS = 'XR_APILAYER_JRDEVO_eye_capture'; DISABLE_XR_APILAYER_DIENERTECH_VECTORXR = '1' }
     foreach ($k in $lenv.Keys) { [Environment]::SetEnvironmentVariable($k, $lenv[$k]) }
     $env:XR_EYE_CAPTURE_CONFIG = $rawCfg
     $xrP = Start-Process $layerExe -ArgumentList '--api', 'd3d11', '--layout', 'two', '--seconds', '12', '--record', '0', '--out-dir', "`"$(Join-Path $outRoot 'mirror_openxr_game_game')`"" -PassThru -WindowStyle Hidden
