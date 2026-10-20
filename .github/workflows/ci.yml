@@ -49,6 +49,14 @@ jobs:
       - name: Build Release
         run: cmake --build build --config Release --parallel
 
+      # 32-bit OpenXR games (docs/X86_DESIGN.md): the 32-bit layer eye_capture32.dll and its 32-bit test programs (mock
+      # runtime + layer_e2e) from a second, Win32 configure. Built only: tests\run_x86.ps1 needs a GPU / hardware encoder.
+      - name: Configure (Visual Studio 17 2022, Win32 -- the 32-bit layer, warnings are errors)
+        run: cmake -B build32 -S . -G "Visual Studio 17 2022" -A Win32 -DEYE_WERROR=ON
+
+      - name: Build Release (Win32)
+        run: cmake --build build32 --config Release --parallel
+
       # openvr_hook_test / steamvr_install_test: the SteamVR proxy's helpers and the tray's SteamVR games library (a fake
       # game tree in %TEMP%, mock_openvr.dll as the Valve DLL; the HKCU test key only, never a real game folder).
       - name: Unit tests (CPU only)

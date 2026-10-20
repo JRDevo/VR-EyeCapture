@@ -9,16 +9,31 @@ namespace {
 
 const wchar_t kJsonName[] = L"XR_APILAYER_JRDEVO_eye_capture.json";
 const wchar_t kDllName[] = L"eye_capture.dll";
+// 32-bit OpenXR games (docs/X86_DESIGN.md): the 32-bit loader reads the 32-bit registry view (HKLM\SOFTWARE\WOW6432Node\...)
+const wchar_t kJsonName32[] = L"XR_APILAYER_JRDEVO_eye_capture32.json";
+const wchar_t kDllName32[] = L"eye_capture32.dll";
 const wchar_t kImplicitKey[] = L"SOFTWARE\\Khronos\\OpenXR\\1\\ApiLayers\\Implicit";
-// 64-bit registry view explicitly: the games are 64-bit and their loader reads the 64-bit view.
+// 64-bit registry view explicitly: 64-bit games and their loader read the 64-bit view; the 32-bit layer goes to the 32-bit one.
 const REGSAM kView = KEY_WOW64_64KEY;
+const REGSAM kView32 = KEY_WOW64_32KEY;
 
 struct Root {
     HKEY hive;
     std::wstring sub;
 };
 Root g_lm{HKEY_LOCAL_MACHINE, kImplicitKey};
-Root g_cu{HKEY_CURRENT_USER, kImplicitKey};
+Root g_lm32{HKEY_LOCAL_MACHINE, kImplicitKey};   // opened with kView32
+Root g_cu{HKEY_CURRENT_USER, kImplicitKey};     // HKCU\Software is shared by both views: both json names are checked there
+
+// One layer flavour: the 64-bit layer in the 64-bit view, the 32-bit layer in the 32-bit view.
+struct Flavor {
+    const wchar_t* json;
+    const wchar_t* dll;
+    const Root* lm;
+    REGSAM view;
+};
+const Flavor kF64{kJsonName, kDllName, &g_lm, kView};
+const Flavor kF32{kJsonName32, kDllName32, &g_lm32, kView32};
 
 const wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 const wchar_t kRunValue[] = L"VR EyeCapture";
@@ -54,7 +69,7 @@ std::wstring FileNameOf(const std::wstring& p) {
     return k == std::wstring::npos ? p : p.substr(k + 1);
 }
 
-bool IsOurName(const std::wstring& valueName) { return _wcsicmp(FileNameOf(valueName).c_str(), kJsonName) == 0; }
+bool IsOurName(const std::wstring& valueName, const wchar_t* json) { return _wcsicmp(FileNameOf(valueName).c_str(), json) == 0; }
 
 // Full path, lower case: for comparing a registered value name with ours.
 std::wstring Norm(const std::wstring& p) {
@@ -100,11 +115,11 @@ struct Entry {
     DWORD value = 0xFFFFFFFF;   // the DWORD when type == REG_DWORD
 };
 
-// Every value of the root whose file name is ours. A missing key = empty list (ERROR_SUCCESS).
-LSTATUS ListOurs(const Root& r, std::vector<Entry>& out) {
+// Every value of the root whose file name is `json`. A missing key = empty list (ERROR_SUCCESS).
+LSTATUS ListOurs(const Root& r, REGSAM view, const wchar_t* json, std::vector<Entry>& out) {
     out.clear();
     HKEY k = nullptr;
-    LSTATUS e = RegOpenKeyExW(r.hive, r.sub.c_str(), 0, KEY_QUERY_VALUE | kView, &k);
+    LSTATUS e = RegOpenKeyExW(r.hive, r.sub.c_str(), 0, KEY_QUERY_VALUE | view, &k);
     if (e == ERROR_FILE_NOT_FOUND) return ERROR_SUCCESS;
     if (e != ERROR_SUCCESS) return e;
     DWORD count = 0, maxName = 0;
@@ -125,7 +140,7 @@ LSTATUS ListOurs(const Root& r, std::vector<Entry>& out) {
             if (q != ERROR_SUCCESS) continue;
             Entry en;
             en.name.assign(name.data(), len);
-            if (!IsOurName(en.name)) continue;
+            if (!IsOurName(en.name, json)) continue;
             en.type = type;
             if (type == REG_DWORD && size == sizeof(DWORD)) memcpy(&en.value, data, sizeof(DWORD));
             out.push_back(en);
@@ -145,21 +160,107 @@ std::wstring Win32Text(LSTATUS e) {
     return s + L" (error " + std::to_wstring(e) + L")";
 }
 
-bool Fail(const std::wstring& what, const Root& r, LSTATUS e, std::wstring& err, long* winErr) {
+bool Fail(const std::wstring& what, const Root& r, LSTATUS e, std::wstring& err, long* winErr, REGSAM view = kView) {
     if (winErr) *winErr = (long)e;
+    const std::wstring where = RootText(r) + (view == kView32 ? L" (32-bit view)" : L"");
     if (e == ERROR_ACCESS_DENIED)
-        err = what + L" " + RootText(r) + L": needs administrator rights";
+        err = what + L" " + where + L": needs administrator rights";
     else
-        err = what + L" " + RootText(r) + L": " + Win32Text(e);
+        err = what + L" " + where + L": " + Win32Text(e);
     return false;
+}
+
+std::wstring ValueName(const std::wstring& exeDir, const wchar_t* json) { return ExeDirFull(exeDir) + L"\\" + json; }
+
+// One flavour's HKLM state (Registered / NotRegistered / StalePath) and the registered path.
+State QueryOne(const Flavor& f, const std::wstring& exeDir, std::wstring& path) {
+    const std::wstring ours = ValueName(exeDir, f.json);
+    const std::wstring oursNorm = Norm(ours);
+    std::vector<Entry> lm;
+    ListOurs(*f.lm, f.view, f.json, lm);   // unreadable = treated as empty
+    bool haveOurs = false;
+    std::wstring other;
+    for (const Entry& e : lm) {
+        if (Norm(e.name) == oursNorm) {
+            if (e.type == REG_DWORD && e.value == 0) haveOurs = true;   // non-zero = disabled by the loader rules
+        } else if (other.empty()) {
+            other = e.name;
+        }
+    }
+    path.clear();
+    if (!other.empty()) { path = other; return State::StalePath; }
+    if (haveOurs) { path = ours; return State::Registered; }
+    return State::NotRegistered;
+}
+
+// <exeDir>\json = 0 in the flavour's HKLM view, every other same-name value there removed, verified.
+bool RegisterOne(const Flavor& f, const std::wstring& exeDir, std::wstring& err, long* winErr) {
+    const std::wstring ours = ValueName(exeDir, f.json);
+    std::vector<Entry> lm;
+    LSTATUS e = ListOurs(*f.lm, f.view, f.json, lm);
+    if (e != ERROR_SUCCESS) return Fail(L"cannot read", *f.lm, e, err, winErr, f.view);
+    std::vector<std::wstring> remove;
+    bool haveOurs = false;
+    for (const Entry& en : lm) {
+        if (en.name == ours && en.type == REG_DWORD && en.value == 0) haveOurs = true;
+        else if (en.name != ours) remove.push_back(en.name);   // stale folder, duplicate, or a case variant of ours
+    }
+    if (haveOurs && remove.empty()) return true;   // already exactly right: no write access needed
+    HKEY k = nullptr;
+    e = RegCreateKeyExW(f.lm->hive, f.lm->sub.c_str(), 0, nullptr, 0, KEY_QUERY_VALUE | KEY_SET_VALUE | f.view, nullptr, &k, nullptr);
+    if (e != ERROR_SUCCESS) return Fail(L"cannot open", *f.lm, e, err, winErr, f.view);
+    for (const std::wstring& n : remove) {
+        e = RegDeleteValueW(k, n.c_str());
+        if (e != ERROR_SUCCESS && e != ERROR_FILE_NOT_FOUND) { RegCloseKey(k); return Fail(L"cannot remove " + n + L" from", *f.lm, e, err, winErr, f.view); }
+    }
+    const DWORD zero = 0;
+    e = RegSetValueExW(k, ours.c_str(), 0, REG_DWORD, (const BYTE*)&zero, sizeof(zero));
+    RegCloseKey(k);
+    if (e != ERROR_SUCCESS) return Fail(L"cannot write " + ours + L" to", *f.lm, e, err, winErr, f.view);
+    // verify
+    e = ListOurs(*f.lm, f.view, f.json, lm);
+    if (e != ERROR_SUCCESS || lm.size() != 1 || lm[0].name != ours || lm[0].type != REG_DWORD || lm[0].value != 0) {
+        if (winErr) *winErr = e != ERROR_SUCCESS ? (long)e : (long)ERROR_INVALID_DATA;
+        err = L"verification failed: " + RootText(*f.lm) + (f.view == kView32 ? L" (32-bit view)" : L"") +
+              L" does not hold exactly " + ours + L" = 0";
+        return false;
+    }
+    return true;
+}
+
+// Every same-name value of the flavour removed from its HKLM view, verified.
+bool UnregisterOne(const Flavor& f, std::wstring& err, long* winErr) {
+    std::vector<Entry> lm;
+    LSTATUS e = ListOurs(*f.lm, f.view, f.json, lm);
+    if (e != ERROR_SUCCESS) return Fail(L"cannot read", *f.lm, e, err, winErr, f.view);
+    if (lm.empty()) return true;
+    HKEY k = nullptr;
+    e = RegOpenKeyExW(f.lm->hive, f.lm->sub.c_str(), 0, KEY_QUERY_VALUE | KEY_SET_VALUE | f.view, &k);
+    if (e != ERROR_SUCCESS) return Fail(L"cannot open", *f.lm, e, err, winErr, f.view);
+    for (const Entry& en : lm) {
+        e = RegDeleteValueW(k, en.name.c_str());
+        if (e != ERROR_SUCCESS && e != ERROR_FILE_NOT_FOUND) { RegCloseKey(k); return Fail(L"cannot remove " + en.name + L" from", *f.lm, e, err, winErr, f.view); }
+    }
+    RegCloseKey(k);
+    e = ListOurs(*f.lm, f.view, f.json, lm);
+    if (e != ERROR_SUCCESS || !lm.empty()) {
+        if (winErr) *winErr = e != ERROR_SUCCESS ? (long)e : (long)ERROR_INVALID_DATA;
+        err = L"verification failed: a " + std::wstring(f.json) + L" value is still in " + RootText(*f.lm) +
+              (f.view == kView32 ? L" (32-bit view)" : L"");
+        return false;
+    }
+    return true;
 }
 
 } // namespace
 
 const wchar_t* JsonName() { return kJsonName; }
 const wchar_t* DllName() { return kDllName; }
+const wchar_t* JsonName32() { return kJsonName32; }
+const wchar_t* DllName32() { return kDllName32; }
 
-std::wstring OurValueName(const std::wstring& exeDir) { return ExeDirFull(exeDir) + L"\\" + kJsonName; }
+std::wstring OurValueName(const std::wstring& exeDir) { return ValueName(exeDir, kJsonName); }
+std::wstring OurValueName32(const std::wstring& exeDir) { return ValueName(exeDir, kJsonName32); }
 
 const char* StateText(State s) {
     switch (s) {
@@ -172,10 +273,11 @@ const char* StateText(State s) {
 }
 
 void SetTestRoots(const std::wstring& lmPath, const std::wstring& cuPath) {
-    Root lm{HKEY_LOCAL_MACHINE, kImplicitKey}, cu{HKEY_CURRENT_USER, kImplicitKey};
-    if (!lmPath.empty()) ParseRoot(lmPath, lm);
+    Root lm{HKEY_LOCAL_MACHINE, kImplicitKey}, lm32{HKEY_LOCAL_MACHINE, kImplicitKey}, cu{HKEY_CURRENT_USER, kImplicitKey};
+    if (!lmPath.empty()) { ParseRoot(lmPath, lm); ParseRoot(lmPath + L"32", lm32); }
     if (!cuPath.empty()) ParseRoot(cuPath, cu);
     g_lm = lm;
+    g_lm32 = lm32;
     g_cu = cu;
 }
 
@@ -183,28 +285,18 @@ Status Query(const std::wstring& exeDir) {
     Status s;
     const std::wstring dir = ExeDirFull(exeDir);
     s.filesPresent = FileExists(dir + L"\\" + kJsonName) && FileExists(dir + L"\\" + kDllName);
-    const std::wstring ours = OurValueName(exeDir);
-    const std::wstring oursNorm = Norm(ours);
-    std::vector<Entry> lm, cu;
-    ListOurs(g_lm, lm);   // unreadable = treated as empty
-    bool haveOurs = false;
-    std::wstring other;
-    for (const Entry& e : lm) {
-        if (Norm(e.name) == oursNorm) {
-            if (e.type == REG_DWORD && e.value == 0) haveOurs = true;   // non-zero = disabled by the loader rules
-        } else if (other.empty()) {
-            other = e.name;
-        }
+    s.files32Present = FileExists(dir + L"\\" + kJsonName32) && FileExists(dir + L"\\" + kDllName32);
+    s.state = s.state64 = QueryOne(kF64, exeDir, s.registeredPath);
+    s.state32 = QueryOne(kF32, exeDir, s.registeredPath32);
+    std::vector<Entry> cu, cu32;
+    ListOurs(g_cu, kView, kJsonName, cu);
+    ListOurs(g_cu, kView, kJsonName32, cu32);
+    s.hkcuDuplicate = !cu.empty() || !cu32.empty();
+    // combined: with the 32-bit files here, "registered" means both layers
+    if (s.state == State::Registered && s.files32Present && s.state32 != State::Registered) {
+        s.state = s.state32;
+        s.registeredPath = s.registeredPath32;
     }
-    if (!other.empty()) {
-        s.state = State::StalePath;
-        s.registeredPath = other;
-    } else if (haveOurs) {
-        s.state = State::Registered;
-        s.registeredPath = ours;
-    }
-    ListOurs(g_cu, cu);
-    s.hkcuDuplicate = !cu.empty();
     if (s.state == State::Registered && s.hkcuDuplicate) s.state = State::DuplicateHkcu;
     return s;
 }
@@ -218,35 +310,10 @@ bool Register(const std::wstring& exeDir, std::wstring& err, long* winErr) {
         err = std::wstring(kDllName) + L" / " + kJsonName + L" not found next to EyeCaptureTray.exe (" + dir + L")";
         return false;
     }
-    const std::wstring ours = OurValueName(exeDir);
-    std::vector<Entry> lm;
-    LSTATUS e = ListOurs(g_lm, lm);
-    if (e != ERROR_SUCCESS) return Fail(L"cannot read", g_lm, e, err, winErr);
-    std::vector<std::wstring> remove;
-    bool haveOurs = false;
-    for (const Entry& en : lm) {
-        if (en.name == ours && en.type == REG_DWORD && en.value == 0) haveOurs = true;
-        else if (en.name != ours) remove.push_back(en.name);   // stale folder, duplicate, or a case variant of ours
-    }
-    if (haveOurs && remove.empty()) return true;   // already exactly right: no write access needed
-    HKEY k = nullptr;
-    e = RegCreateKeyExW(g_lm.hive, g_lm.sub.c_str(), 0, nullptr, 0, KEY_QUERY_VALUE | KEY_SET_VALUE | kView, nullptr, &k, nullptr);
-    if (e != ERROR_SUCCESS) return Fail(L"cannot open", g_lm, e, err, winErr);
-    for (const std::wstring& n : remove) {
-        e = RegDeleteValueW(k, n.c_str());
-        if (e != ERROR_SUCCESS && e != ERROR_FILE_NOT_FOUND) { RegCloseKey(k); return Fail(L"cannot remove " + n + L" from", g_lm, e, err, winErr); }
-    }
-    const DWORD zero = 0;
-    e = RegSetValueExW(k, ours.c_str(), 0, REG_DWORD, (const BYTE*)&zero, sizeof(zero));
-    RegCloseKey(k);
-    if (e != ERROR_SUCCESS) return Fail(L"cannot write " + ours + L" to", g_lm, e, err, winErr);
-    // verify
-    e = ListOurs(g_lm, lm);
-    if (e != ERROR_SUCCESS || lm.size() != 1 || lm[0].name != ours || lm[0].type != REG_DWORD || lm[0].value != 0) {
-        if (winErr) *winErr = e != ERROR_SUCCESS ? (long)e : (long)ERROR_INVALID_DATA;
-        err = L"verification failed: " + RootText(g_lm) + L" does not hold exactly " + ours + L" = 0";
+    if (!RegisterOne(kF64, exeDir, err, winErr)) return false;
+    // 32-bit games: only when the 32-bit layer ships next to the exe (a developer build without build32 leaves that view alone)
+    if (FileExists(dir + L"\\" + kJsonName32) && FileExists(dir + L"\\" + kDllName32) && !RegisterOne(kF32, exeDir, err, winErr))
         return false;
-    }
     return true;
 }
 
@@ -254,25 +321,15 @@ bool Unregister(const std::wstring& exeDir, std::wstring& err, long* winErr) {
     (void)exeDir;   // every same-name value goes, whichever folder it points at
     err.clear();
     if (winErr) *winErr = 0;
-    std::vector<Entry> lm;
-    LSTATUS e = ListOurs(g_lm, lm);
-    if (e != ERROR_SUCCESS) return Fail(L"cannot read", g_lm, e, err, winErr);
-    if (lm.empty()) return true;
-    HKEY k = nullptr;
-    e = RegOpenKeyExW(g_lm.hive, g_lm.sub.c_str(), 0, KEY_QUERY_VALUE | KEY_SET_VALUE | kView, &k);
-    if (e != ERROR_SUCCESS) return Fail(L"cannot open", g_lm, e, err, winErr);
-    for (const Entry& en : lm) {
-        e = RegDeleteValueW(k, en.name.c_str());
-        if (e != ERROR_SUCCESS && e != ERROR_FILE_NOT_FOUND) { RegCloseKey(k); return Fail(L"cannot remove " + en.name + L" from", g_lm, e, err, winErr); }
+    std::wstring err32;
+    long win32 = 0;
+    const bool ok64 = UnregisterOne(kF64, err, winErr);
+    const bool ok32 = UnregisterOne(kF32, err32, &win32);   // also when the 64-bit part failed: as much as possible goes
+    if (!ok32) {
+        if (ok64 && winErr) *winErr = win32;
+        err = err.empty() ? err32 : err + L"; " + err32;
     }
-    RegCloseKey(k);
-    e = ListOurs(g_lm, lm);
-    if (e != ERROR_SUCCESS || !lm.empty()) {
-        if (winErr) *winErr = e != ERROR_SUCCESS ? (long)e : (long)ERROR_INVALID_DATA;
-        err = L"verification failed: a " + std::wstring(kJsonName) + L" value is still in " + RootText(g_lm);
-        return false;
-    }
-    return true;
+    return ok64 && ok32;
 }
 
 const wchar_t* AutostartValueName() { return kRunValue; }
@@ -400,8 +457,11 @@ bool SetAutostart(bool on, const std::wstring& exeDir, std::wstring& err) {
 }
 
 int RemoveHkcuDuplicates() {
-    std::vector<Entry> cu;
-    if (ListOurs(g_cu, cu) != ERROR_SUCCESS || cu.empty()) return 0;
+    std::vector<Entry> cu, cu32;
+    if (ListOurs(g_cu, kView, kJsonName, cu) != ERROR_SUCCESS) cu.clear();
+    if (ListOurs(g_cu, kView, kJsonName32, cu32) != ERROR_SUCCESS) cu32.clear();
+    cu.insert(cu.end(), cu32.begin(), cu32.end());
+    if (cu.empty()) return 0;
     HKEY k = nullptr;
     if (RegOpenKeyExW(g_cu.hive, g_cu.sub.c_str(), 0, KEY_QUERY_VALUE | KEY_SET_VALUE | kView, &k) != ERROR_SUCCESS) return 0;
     int removed = 0;

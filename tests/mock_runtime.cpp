@@ -421,6 +421,10 @@ XrResult XRAPI_CALL GetInstanceProcAddr(XrInstance, const char* name, PFN_xrVoid
 }
 } // namespace
 
+#if defined(_M_IX86)
+// 32-bit build (tests/run_x86.ps1): __stdcall exports are decorated (_name@8); the loader asks for the plain name.
+#pragma comment(linker, "/EXPORT:xrNegotiateLoaderRuntimeInterface=_xrNegotiateLoaderRuntimeInterface@8")
+#endif
 extern "C" __declspec(dllexport) XrResult XRAPI_CALL xrNegotiateLoaderRuntimeInterface(const XrNegotiateLoaderInfo* li,
                                                                                         XrNegotiateRuntimeRequest* req) {
     if (!li || !req || li->structType != XR_LOADER_INTERFACE_STRUCT_LOADER_INFO) return XR_ERROR_INITIALIZATION_FAILED;

@@ -4,13 +4,17 @@
 ;   - the files of the stage folder (the program, steamvr\openvr_api.dll, the commented config.ini template, README, licences)
 ;     plus installed.txt, the marker that makes the program keep the user's data outside the read-only program folder
 ;     (config %APPDATA%\VR EyeCapture, logs and lists %LOCALAPPDATA%\VR EyeCapture, recordings <Videos>\VR EyeCapture);
-;   - a Start menu entry; the OpenXR layer registration (EyeCaptureTray.exe --register, HKLM, while the installer is elevated);
+;   - a Start menu entry; the OpenXR layer registration (EyeCaptureTray.exe --register, HKLM, while the installer is elevated):
+;     the 64-bit layer (eye_capture.dll) in the 64-bit registry view and, for 32-bit OpenXR games, the 32-bit layer
+;     (eye_capture32.dll + XR_APILAYER_JRDEVO_eye_capture32.json) in the 32-bit view (HKLM\SOFTWARE\WOW6432Node\Khronos\...;
+;     tray/install.cpp). Its recordings are made by EyeCaptureRecorder.exe (64-bit), which the tray starts per 32-bit game;
 ;   - a "Start VR EyeCapture with Windows" task (on by default): EyeCaptureTray.exe --autostart on / off as the signed-in
 ;     user (start_with_windows in that user's config.ini + the HKCU Run value, the same switch as in the app window);
 ;   - "Start VR EyeCapture now" at the end (as the signed-in user, not elevated).
 ; Uninstall (Windows Settings > Apps, or the tray menu "Remove VR EyeCapture from this PC..."):
 ;   EyeCaptureTray.exe --quit (closes the running tray of this folder), --uninstall-cleanup (the original openvr_api.dll back
-;   in every SteamVR game the user enabled, HKCU Home value, Start with Windows Run value, HKLM layer registration), the
+;   in every SteamVR game the user enabled, HKCU Home value, Start with Windows Run value, HKLM layer registrations: 64-bit
+;   and 32-bit view), the
 ;   files; then two questions, both No by default: delete the settings and logs? delete the recordings in Videos\VR EyeCapture?
 ; An update installs over the old version: the running tray is closed first (--quit of the installed copy).
 

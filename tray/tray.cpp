@@ -65,6 +65,7 @@
 #include "steamvr_ui.h"
 #include "update.h"
 #include "openvr/openvr_hooks.h"   // EYECAP_HOME_REG_KEY / _VALUE, EYECAP_TEST_HOME_KEY_ENV
+#include "x86_share_proto.h"       // 32-bit games: the block of the 32-bit layer (X86Tick)
 
 namespace {
 const UINT WM_TRAY = WM_APP + 1;
@@ -135,6 +136,20 @@ const DWORD    kMirrorExitBusy = 3;
 const DWORD    kMirrorExitNoSteamVr = 4;
 const ULONGLONG kMirrorBusyRetryMs = 10000;
 ULONGLONG      g_mirrorRetryAt = 0;
+// 32-bit OpenXR games (docs/X86_DESIGN.md): EyeCaptureRecorder.exe runs while a 32-bit game's layer (eye_capture32.dll) holds
+// its block Local\OpenXR-EyeCapture-X86 with an active session (X86Tick, every 2 s: one OpenFileMappingW, no process scan).
+HANDLE         g_x86Proc = nullptr;
+DWORD          g_x86ProcPid = 0;
+DWORD          g_x86Game = 0;                          // the game pid the running helper serves
+HANDLE         g_x86Quit = nullptr;                    // <block>-Quit (manual reset): set = the helper finalizes and exits
+ULONGLONG      g_x86Check = 0;
+ULONGLONG      g_x86RetryAt = 0;
+ULONGLONG      g_x86IdleSince = 0;                     // the block has no active game while the helper still runs
+std::deque<ULONGLONG> g_x86Fails;                      // failed exits within a minute: 3 = no relaunch for that game
+bool           g_x86Blocked = false;
+DWORD          g_x86BlockedGame = 0;
+DWORD          g_x86LastGame = 0;                      // logged once per game process
+const DWORD    kX86ExitBusy = 3;                       // another EyeCaptureRecorder holds <block>-Recorder: not a failure
 // A balloon that does something when clicked (NIN_BALLOONUSERCLICK). Any later balloon replaces it (SetBalloon).
 enum class BalloonAction { None, OpenSteamVr };
 BalloonAction  g_balloonAction = BalloonAction::None;
@@ -437,9 +452,11 @@ void PollPending() {
 bool RegOk() { return g_reg.state == install::State::Registered || g_reg.state == install::State::DuplicateHkcu; }
 
 void LogRegStatus(const char* prefix) {
-    LOGI("tray: %s: %s%s%s%s%s", prefix, install::StateText(g_reg.state), g_reg.registeredPath.empty() ? "" : " (",
+    LOGI("tray: %s: %s%s%s%s%s | 32-bit games: %s%s", prefix, install::StateText(g_reg.state), g_reg.registeredPath.empty() ? "" : " (",
          elog::Narrow(g_reg.registeredPath).c_str(), g_reg.registeredPath.empty() ? "" : ")",
-         g_reg.filesPresent ? "" : "; eye_capture.dll / json NOT next to the exe");
+         g_reg.filesPresent ? "" : "; eye_capture.dll / json NOT next to the exe",
+         g_reg.files32Present ? install::StateText(g_reg.state32) : "eye_capture32.dll / json not next to the exe (not registered)",
+         g_reg.files32Present && g_reg.state32 == install::State::StalePath ? (" (" + elog::Narrow(g_reg.registeredPath32) + ")").c_str() : "");
 }
 
 // Cheap registry read. Logs only when the state changed (or always when `force`).
@@ -448,7 +465,8 @@ void QueryReg(bool force) {
     g_reg = install::Query(g_exeDir);
     g_regQueried = GetTickCount64();
     if (force || g_reg.state != prev.state || g_reg.registeredPath != prev.registeredPath ||
-        g_reg.filesPresent != prev.filesPresent || g_reg.hkcuDuplicate != prev.hkcuDuplicate)
+        g_reg.filesPresent != prev.filesPresent || g_reg.hkcuDuplicate != prev.hkcuDuplicate ||
+        g_reg.state32 != prev.state32 || g_reg.files32Present != prev.files32Present)
         LogRegStatus("registration");
 }
 
@@ -854,6 +872,114 @@ void MirrorTick() {
         Balloon(L"SteamVR quick mode", L"Quick mode records flat side-by-side only: VR180 / VR360 needs per-game recording (tray menu -> SteamVR games...).", false);
 }
 
+// ---- 32-bit OpenXR games: EyeCaptureRecorder.exe (src/recorder_helper.cpp) while a 32-bit game's layer holds its block.
+// The 32-bit layer creates Local\OpenXR-EyeCapture-X86 when its first armed session gets a recorder and sets producerActive
+// to 0 when the last one ends; the helper exits on its own then (and when the game exits). The tray only starts it, reaps it
+// and, as a last resort, sets <block>-Quit when it outlives its game by 10 s. Exiting the tray does NOT stop it: a running
+// recording continues, like one inside a 64-bit game. A test-mode tray only watches XR_EYE_CAPTURE_TEST_X86_SHM.
+std::wstring X86HelperExe() {
+    for (const wchar_t* rel : {L"\\EyeCaptureRecorder.exe", L"\\build\\Release\\EyeCaptureRecorder.exe"}) {
+        const std::wstring p = g_exeDir + rel;
+        if (GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES) return p;
+    }
+    return std::wstring();
+}
+
+void X86Tick() {
+    if (g_testMode && GetEnvironmentVariableW(EYECAP_X86_TEST_SHM_ENV, nullptr, 0) == 0) return;   // tests: never the real block
+    const ULONGLONG now = GetTickCount64();
+    if (g_x86Proc && WaitForSingleObject(g_x86Proc, 0) == WAIT_OBJECT_0) {
+        DWORD code = 0;
+        GetExitCodeProcess(g_x86Proc, &code);
+        CloseHandle(g_x86Proc);
+        g_x86Proc = nullptr;
+        if (code == kX86ExitBusy) {
+            g_x86RetryAt = now + 10000;
+            LOGI("tray: 32-bit games: EyeCaptureRecorder (pid %lu) exited (code 3: another EyeCaptureRecorder serves the game) -- "
+                 "tried again in 10 s", (unsigned long)g_x86ProcPid);
+        } else {
+            LOGI("tray: 32-bit games: EyeCaptureRecorder (pid %lu) exited (code %lu)", (unsigned long)g_x86ProcPid, code);
+        }
+        if (code != 0 && code != kX86ExitBusy) {
+            g_x86Fails.push_back(now);
+            while (!g_x86Fails.empty() && now - g_x86Fails.front() > 60000) g_x86Fails.pop_front();
+            if (g_x86Fails.size() >= 3 && !g_x86Blocked) {
+                g_x86Blocked = true;
+                g_x86BlockedGame = g_x86Game;
+                LOGW("tray: 32-bit games: EyeCaptureRecorder failed 3 times within a minute -- not started again for this game "
+                     "(pid %lu; see logs\\eye_capture.log)", (unsigned long)g_x86Game);
+                Balloon(L"32-bit game", L"The recorder for 32-bit games keeps failing, so this game cannot be recorded. See "
+                                        L"logs\\eye_capture.log.", true);
+            }
+        }
+        g_x86ProcPid = 0;
+    }
+    wchar_t name[128];
+    EyeCapX86BlockName(name, 128);
+    DWORD game = 0;
+    LONG active = 0;
+    wchar_t gameName[65] = {};
+    if (HANDLE m = OpenFileMappingW(FILE_MAP_READ, FALSE, name)) {
+        if (auto* b = (const EyeCapX86*)MapViewOfFile(m, FILE_MAP_READ, 0, 0, sizeof(EyeCapX86))) {
+            if (b->magic == EYECAP_X86_MAGIC && b->version == EYECAP_X86_VERSION) {
+                game = (DWORD)b->producerPid;
+                active = b->producerActive;
+                memcpy(gameName, (const void*)b->game, sizeof(b->game));
+            }
+            UnmapViewOfFile(b);
+        }
+        CloseHandle(m);
+    }
+    const bool gameLive = game && active > 0 && EyeCapProcessAlive(game);
+    if (g_x86Blocked && game != g_x86BlockedGame) { g_x86Blocked = false; g_x86Fails.clear(); }
+    if (!gameLive) {
+        if (g_x86Proc) {   // it exits on its own within a second; after 10 s it is asked to
+            if (!g_x86IdleSince) g_x86IdleSince = now;
+            else if (now > g_x86IdleSince + 10000 && g_x86Quit) {
+                LOGW("tray: 32-bit games: EyeCaptureRecorder (pid %lu) still runs 10 s after its game ended -- asking it to quit",
+                     (unsigned long)g_x86ProcPid);
+                SetEvent(g_x86Quit);
+                g_x86IdleSince = now + 50000;   // asked again a minute later at most
+            }
+        }
+        return;
+    }
+    g_x86IdleSince = 0;
+    if (g_x86LastGame != game) {
+        g_x86LastGame = game;
+        LOGI("tray: 32-bit games: %s (pid %lu) is a 32-bit OpenXR game -- its recordings are made by EyeCaptureRecorder.exe",
+             elog::Narrow(gameName).c_str(), (unsigned long)game);
+    }
+    if (g_x86Proc || g_x86Blocked || now < g_x86RetryAt) return;
+    const std::wstring exe = X86HelperExe();
+    if (exe.empty()) {
+        static bool logged = false;
+        if (!logged) {
+            logged = true;
+            LOGW("tray: 32-bit games: EyeCaptureRecorder.exe not found next to the tray app -- 32-bit games cannot be recorded");
+            Balloon(L"32-bit game", L"EyeCaptureRecorder.exe is missing next to EyeCaptureTray.exe: 32-bit games cannot be "
+                                    L"recorded. Reinstall VR EyeCapture.", true);
+        }
+        return;
+    }
+    if (!g_x86Quit) g_x86Quit = CreateEventW(nullptr, TRUE, FALSE, (std::wstring(name) + EYECAP_X86_QUIT_SUFFIX).c_str());
+    if (g_x86Quit) ResetEvent(g_x86Quit);
+    std::wstring cmd = L"\"" + exe + L"\" --home \"" + g_exeDir + L"\"";
+    STARTUPINFOW si{sizeof(si)};
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessW(exe.c_str(), &cmd[0], nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, g_exeDir.c_str(), &si, &pi)) {
+        LOGE("tray: 32-bit games: cannot start %s (error %lu)", elog::Narrow(exe).c_str(), GetLastError());
+        g_x86RetryAt = now + 10000;
+        return;
+    }
+    CloseHandle(pi.hThread);
+    g_x86Proc = pi.hProcess;
+    g_x86ProcPid = pi.dwProcessId;
+    g_x86Game = game;
+    LOGI("tray: 32-bit games: started %s (pid %lu) for %s (pid %lu)", elog::Narrow(exe).c_str(), pi.dwProcessId,
+         elog::Narrow(gameName).c_str(), (unsigned long)game);
+}
+
 void OpenSettings() {
     if (settings::DialogWindow()) { settings::ShowDialog(L"", nullptr); return; }
     settings::ShowDialog(SettingsPath(), OnSettingsSaved);
@@ -999,7 +1125,13 @@ void RegisterFlow(bool fromStart) {
         return;
     }
     std::wstring q;
-    if (g_reg.state == install::State::StalePath) {
+    // only the 32-bit layer is missing (an update from a version without it): say so
+    const bool only32 = g_reg.state64 == install::State::Registered && g_reg.files32Present && g_reg.state32 != install::State::Registered;
+    if (only32 && g_reg.state == install::State::NotRegistered) {
+        q = L"VR EyeCapture can now also record 32-bit OpenXR games, but that part is not registered yet.\n\nRegister it now? "
+            L"Windows will ask for administrator rights once.";
+        if (fromStart) q += L"\n\n(Later: right-click the tray icon -> Register for VR games.)";
+    } else if (g_reg.state == install::State::StalePath) {
         q = L"VR EyeCapture is registered for OpenXR games from another folder:\n" + g_reg.registeredPath +
             L"\n\nRe-register it from this folder? Windows will ask for administrator rights once.";
     } else {
@@ -1627,6 +1759,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         if (g_regEnabled && !g_regBusy && GetTickCount64() - g_regQueried >= 10000) QueryReg(false);   // cheap registry read
         CheckConfigChanged();   // one GetFileAttributesEx: controller / wheel hotkeys follow config.ini edits
         if (GetTickCount64() - g_mirrorCheck >= 2000) { g_mirrorCheck = GetTickCount64(); MirrorTick(); }   // SteamVR quick mode
+        if (GetTickCount64() - g_x86Check >= 2000) { g_x86Check = GetTickCount64(); X86Tick(); }   // 32-bit OpenXR games
         if (g_updEnabled && !g_testMode && !g_updChecking && g_updNextCheck && GetTickCount64() >= g_updNextCheck)
             StartUpdateCheck(false);   // first run ~8 s after start, then once every 24 h (StartUpdateCheck reschedules)
         g_blinkOdd = !g_blinkOdd;
@@ -1704,6 +1837,11 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_DESTROY:
         StopMirror("tray exit");
+        if (g_x86Proc) {   // not stopped: a running recording of a 32-bit game continues (like one inside a 64-bit game)
+            LOGI("tray: exit -- EyeCaptureRecorder (pid %lu) keeps serving its 32-bit game until that ends", (unsigned long)g_x86ProcPid);
+            CloseHandle(g_x86Proc);
+            g_x86Proc = nullptr;
+        }
         g_tagQuit = true;
         g_updQuit = true;   // a detached update check / download thread must not post to the destroyed window
         KillTimer(h, kTimer);
@@ -1760,8 +1898,13 @@ int RunRegCli(const std::wstring& arg) {
         CliPrint(L"error: " + err);
         return winErr == ERROR_ACCESS_DENIED ? 5 : 1;
     }
-    const std::wstring msg = reg ? L"registered: " + install::OurValueName(g_exeDir) + L" = 0 (HKLM OpenXR implicit layers)"
-                                 : std::wstring(L"unregistered: no ") + install::JsonName() + L" value left (HKLM OpenXR implicit layers)";
+    const install::Status after = install::Query(g_exeDir);
+    std::wstring msg = reg ? L"registered: " + install::OurValueName(g_exeDir) + L" = 0 (HKLM OpenXR implicit layers)"
+                           : std::wstring(L"unregistered: no ") + install::JsonName() + L" / " + install::JsonName32() +
+                                 L" value left (HKLM OpenXR implicit layers, 64- and 32-bit views)";
+    if (reg)
+        msg += after.files32Present ? L"; 32-bit games: " + install::OurValueName32(g_exeDir) + L" = 0 (32-bit view)"
+                                    : std::wstring(L"; 32-bit games: ") + install::DllName32() + L" not next to the exe -- not registered";
     LOGI("tray: %s", elog::Narrow(msg).c_str());
     CliPrint(msg);
     return 0;
@@ -1966,6 +2109,10 @@ int RunCli(const std::wstring& arg) {
               : rs.state == install::State::NotRegistered ? L" registered=no" : L" registered=yes";
         if (rs.hkcuDuplicate) text += L" hkcu_duplicate=yes";
         if (!rs.filesPresent) text += L" files=missing";
+        // the 32-bit layer alone (32-bit games; nofiles = eye_capture32.dll / its json not next to the exe)
+        text += !rs.files32Present ? L" registered32=nofiles"
+              : rs.state32 == install::State::StalePath ? L" registered32=stale"
+              : rs.state32 == install::State::NotRegistered ? L" registered32=no" : L" registered32=yes";
         text += install::AutostartEnabled() ? L" autostart=yes" : L" autostart=no";
     }
     print(text);

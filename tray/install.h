@@ -11,6 +11,10 @@
 //   - HKCU duplicates are removed by the NON-elevated tray itself (RemoveHkcuDuplicates): the elevated process may run
 //     as a different account, so its HKCU is not the user's.
 // Writing HKLM needs administrator rights: the tray runs itself elevated with --register / --unregister.
+// 32-bit OpenXR games (docs/X86_DESIGN.md): the 32-bit layer eye_capture32.dll + XR_APILAYER_JRDEVO_eye_capture32.json is
+// registered by the same rules in the 32-bit registry view (KEY_WOW64_32KEY = HKLM\SOFTWARE\WOW6432Node\Khronos\...), which
+// is what the 32-bit OpenXR loader reads; Register does it when those two files are next to the exe, Unregister always
+// removes it, RemoveHkcuDuplicates removes HKCU copies of either json (HKCU\Software is the same key for both views).
 //
 // "Start with Windows" (optional, off by default) is a per-user registry state; the user's CHOICE is also the config.ini key
 // start_with_windows (src/config.h), which lets the tray restore its own value at start (tray.cpp, see below):
@@ -42,10 +46,18 @@ enum class State {
 };
 
 struct Status {
+    // Combined: Registered / DuplicateHkcu only when the 64-bit layer is registered AND -- when its files are next to the
+    // exe -- the 32-bit one too; otherwise the state of the part that is missing (registeredPath = that part's value).
     State state = State::NotRegistered;
     std::wstring registeredPath;   // Registered / DuplicateHkcu: ours; StalePath: the first value from another folder
-    bool hkcuDuplicate = false;    // a same-name value exists in HKCU (whatever the HKLM state)
+    bool hkcuDuplicate = false;    // a same-name value (64- or 32-bit json) exists in HKCU (whatever the HKLM state)
     bool filesPresent = false;     // the json and eye_capture.dll are next to the exe
+    // 32-bit OpenXR games (docs/X86_DESIGN.md): XR_APILAYER_JRDEVO_eye_capture32.json + eye_capture32.dll, registered in the
+    // 32-bit registry view (HKLM\SOFTWARE\WOW6432Node\Khronos\OpenXR\1\ApiLayers\Implicit), the one the 32-bit loader reads.
+    bool files32Present = false;
+    State state64 = State::NotRegistered;   // Registered / NotRegistered / StalePath of the 64-bit json alone (no HKCU)
+    State state32 = State::NotRegistered;   // Registered / NotRegistered / StalePath of the 32-bit json alone
+    std::wstring registeredPath32;
 };
 
 // Read-only. exeDir = the folder of EyeCaptureTray.exe (where the json and eye_capture.dll must be).
@@ -54,14 +66,18 @@ Status Query(const std::wstring& exeDir);
 // Writes HKLM (needs admin): adds <exeDir>\json = 0 and removes every other same-name value from HKLM. When nothing has
 // to change it succeeds without opening the key for writing. False + err on failure; *winErr (optional) gets the
 // Win32 error (ERROR_ACCESS_DENIED -> err says "needs administrator rights", ERROR_FILE_NOT_FOUND -> files missing).
+// The same for the 32-bit layer in the 32-bit view when eye_capture32.dll + its json are next to the exe (skipped -- the
+// 32-bit view untouched -- when they are not).
 bool Register(const std::wstring& exeDir, std::wstring& err, long* winErr = nullptr);
-// Removes every same-name value from HKLM (succeeds without admin when there is nothing to remove).
+// Removes every same-name value (64-bit json from the 64-bit view, 32-bit json from the 32-bit view) from HKLM (succeeds
+// without admin when there is nothing to remove).
 bool Unregister(const std::wstring& exeDir, std::wstring& err, long* winErr = nullptr);
-// No admin: removes same-name values from the CURRENT user's HKCU. Returns how many were removed.
+// No admin: removes same-name values (both json names) from the CURRENT user's HKCU. Returns how many were removed.
 int RemoveHkcuDuplicates();
 
 // Tests: replace the two roots (default HKLM / HKCU \SOFTWARE\Khronos\OpenXR\1\ApiLayers\Implicit) with keys given as
-// "HKCU\\Software\\OpenXR-EyeCapture-Test\\LM" (prefix HKCU\ or HKLM\). Empty strings restore the defaults.
+// "HKCU\\Software\\OpenXR-EyeCapture-Test\\LM" (prefix HKCU\ or HKLM\). Empty strings restore the defaults. The 32-bit
+// view's HKLM root becomes <lmPath>32 (HKCU\Software is not redirected between the views, so it needs a key of its own).
 void SetTestRoots(const std::wstring& lmPath, const std::wstring& cuPath);
 
 // ---- Start with Windows (HKCU Run key, see the header comment) ----
@@ -95,6 +111,10 @@ void SetAutostartTestKey(const std::wstring& hkcuSubkey);
 
 const wchar_t* JsonName();   // "XR_APILAYER_JRDEVO_eye_capture.json"
 const wchar_t* DllName();    // "eye_capture.dll"
+const wchar_t* JsonName32(); // "XR_APILAYER_JRDEVO_eye_capture32.json"
+const wchar_t* DllName32();  // "eye_capture32.dll"
+// The value name Register writes for the 32-bit layer: <full path of exeDir>\<32-bit json name>.
+std::wstring OurValueName32(const std::wstring& exeDir);
 // The value name Register writes for exeDir: <full path of exeDir>\<json name>.
 std::wstring OurValueName(const std::wstring& exeDir);
 // "registered" / "not registered" / "registered from another folder" / "registered (+ HKCU duplicate)".

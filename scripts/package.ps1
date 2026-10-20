@@ -8,6 +8,8 @@
         steamvr\openvr_api.dll (the SteamVR proxy -- never loose in the root: the tray's "SteamVR games" copies it into a
         game folder), EyeCaptureMirror.exe for the SteamVR quick mode (it loads SteamVR's own openvr_api.dll from the
         user's SteamVR install; no Valve binary is shipped),
+        32-bit OpenXR games (docs/X86_DESIGN.md): eye_capture32.dll + XR_APILAYER_JRDEVO_eye_capture32.json from a second,
+        Win32 configure (build32) and the 64-bit EyeCaptureRecorder.exe that records for it,
         scripts\make_mkv.ps1, scripts\make_thumbnail.ps1 (+ scripts\thumbnail_overlay.png), README.md, THIRD_PARTY.md
         and installed.txt (the marker: the installed copy keeps the user's data in %APPDATA% / %LOCALAPPDATA% / Videos,
         config.h IsInstalledCopy).
@@ -51,10 +53,17 @@ if (-not $cmake) { Fail 'cmake not found on PATH or under Visual Studio 2022' }
 
 & $cmake -B $buildDir -S $root -G 'Visual Studio 17 2022' -A x64 -DEYE_BUILD_OBS_PLUGIN=ON
 if ($LASTEXITCODE -ne 0) { Fail "cmake configure failed ($LASTEXITCODE)" }
-& $cmake --build $buildDir --config Release --target eye_capture EyeCaptureTray openvr_proxy EyeCaptureMirror obs-eyecapture
+& $cmake --build $buildDir --config Release --target eye_capture EyeCaptureTray openvr_proxy EyeCaptureMirror EyeCaptureRecorder obs-eyecapture
 if ($LASTEXITCODE -ne 0) { Fail "cmake build failed ($LASTEXITCODE)" }
+# the 32-bit layer for 32-bit OpenXR games: a second configure for Win32 (it builds nothing else)
+$buildDir32 = Join-Path $root 'build32'
+& $cmake -B $buildDir32 -S $root -G 'Visual Studio 17 2022' -A Win32
+if ($LASTEXITCODE -ne 0) { Fail "cmake configure (Win32) failed ($LASTEXITCODE)" }
+& $cmake --build $buildDir32 --config Release --target eye_capture32
+if ($LASTEXITCODE -ne 0) { Fail "cmake build (Win32) failed ($LASTEXITCODE)" }
 
 $rel = Join-Path $buildDir 'Release'
+$rel32 = Join-Path $buildDir32 'Release'
 $stageName = "VR-EyeCapture-v$version"
 $stage = Join-Path $distDir $stageName
 $setup = Join-Path $distDir "VR-EyeCapture-Setup-v$version.exe"
@@ -68,6 +77,9 @@ $files = @(
     @{ src = (Join-Path $rel 'EyeCaptureTray.exe'); name = 'EyeCaptureTray.exe' },
     @{ src = (Join-Path $rel 'openvr_api.dll'); name = 'steamvr\openvr_api.dll' },
     @{ src = (Join-Path $rel 'EyeCaptureMirror.exe'); name = 'EyeCaptureMirror.exe' },
+    @{ src = (Join-Path $rel 'EyeCaptureRecorder.exe'); name = 'EyeCaptureRecorder.exe' },
+    @{ src = (Join-Path $rel32 'eye_capture32.dll'); name = 'eye_capture32.dll' },
+    @{ src = (Join-Path $rel32 'XR_APILAYER_JRDEVO_eye_capture32.json'); name = 'XR_APILAYER_JRDEVO_eye_capture32.json' },
     @{ src = (Join-Path $root 'config.ini'); name = 'config.ini' },
     @{ src = (Join-Path $root 'README.md'); name = 'README.md' },
     @{ src = (Join-Path $root 'THIRD_PARTY.md'); name = 'THIRD_PARTY.md' },

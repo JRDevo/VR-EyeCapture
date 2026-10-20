@@ -2,7 +2,7 @@
     "file_format_version": "1.0.0",
     "api_layer": {
         "name": "@EYE_LAYER_NAME@",
-        "library_path": "./eye_capture.dll",
+        "library_path": "./@EYE_LAYER_DLL@",
         "api_version": "1.0",
         "implementation_version": "1",
         "description": "Stereo recorder for any OpenXR game: both eye images to a side-by-side 3D MP4 (hotkey or tray toggled).",

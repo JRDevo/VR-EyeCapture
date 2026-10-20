@@ -108,6 +108,19 @@ public:
     virtual void DestroyRing() = 0;
     // Game thread: a swapchain was destroyed; drop caches keyed on it.
     virtual void ForgetSwapchain(const void* swapchainKey) = 0;
+    // 32-bit games (src/recorder_remote.cpp, docs/X86_DESIGN.md): the game side of a ring that ANOTHER process made
+    // (EyeCaptureRecorder.exe). tex[count] / ready / free are NT handles valid in this process; they are consumed (closed
+    // here) whatever the result. Afterwards CopyEyes copies into these textures and signals `ready` (values 1, 2, ...), and
+    // DestroyRing releases them. *freeOut = this device's view of the `free` fence: the caller checks GetCompletedValue
+    // before it reuses a slot (no GPU wait on another process). Not on the encoder worker: a link thread of the caller.
+    // false = not supported by this graphics API, or a failure (logged).
+    virtual bool OpenRemoteRing(const HANDLE* tex, UINT count, HANDLE ready, HANDLE free, ComPtr<ID3D11Fence>* freeOut) {
+        for (UINT i = 0; i < count; ++i) if (tex && tex[i]) CloseHandle(tex[i]);
+        if (ready) CloseHandle(ready);
+        if (free) CloseHandle(free);
+        if (freeOut) freeOut->Reset();
+        return false;
+    }
 };
 
 // Factories. They log and return nullptr when the device lacks what capture needs (e.g. shared fences).

@@ -1,4 +1,5 @@
 /build/
+/build32/
 /dist/
 /captures/
 /logs/
@@ -14,6 +15,10 @@ CMakeSettings.json
 /EyeCaptureTray.exe
 /steamvr/
 /EyeCaptureMirror.exe
+/EyeCaptureRecorder.exe
+/eye_capture32.dll
+/eye_capture32.pdb
+/XR_APILAYER_JRDEVO_eye_capture32.json
 
 # The tray's list of SteamVR games where the proxy is enabled (tray/steamvr_games.h), next to EyeCaptureTray.exe
 /steamvr_games.ini

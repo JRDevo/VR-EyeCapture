@@ -34,6 +34,7 @@ std::string ReadText(const std::wstring& p) {
 
 const wchar_t kBase[] = L"Software\\OpenXR-EyeCapture-Test";
 const wchar_t kLm[] = L"Software\\OpenXR-EyeCapture-Test\\LM";
+const wchar_t kLm32[] = L"Software\\OpenXR-EyeCapture-Test\\LM32";   // the 32-bit view's root that SetTestRoots(kLm, ...) derives
 const wchar_t kCu[] = L"Software\\OpenXR-EyeCapture-Test\\CU";
 const wchar_t kRo[] = L"Software\\OpenXR-EyeCapture-Test\\RO";
 const wchar_t kUnrelated[] = L"C:\\Program Files\\Other Vendor\\other_layer.json";
@@ -71,6 +72,15 @@ int CountSameName(const std::vector<Val>& vs) {
         const size_t k = v.name.find_last_of(L"\\/");
         const std::wstring f = k == std::wstring::npos ? v.name : v.name.substr(k + 1);
         if (_wcsicmp(f.c_str(), install::JsonName()) == 0) ++n;
+    }
+    return n;
+}
+int CountSameName32(const std::vector<Val>& vs) {
+    int n = 0;
+    for (const Val& v : vs) {
+        const size_t k = v.name.find_last_of(L"\\/");
+        const std::wstring f = k == std::wstring::npos ? v.name : v.name.substr(k + 1);
+        if (_wcsicmp(f.c_str(), install::JsonName32()) == 0) ++n;
     }
     return n;
 }
@@ -456,11 +466,74 @@ int RunAll() {
     install::SetAutostartTestKey(L"");
     RegDeleteKeyW(HKEY_CURRENT_USER, L"Software\\OpenXR-EyeCapture-Test\\RunApproved");
 
+    printf("12. the 32-bit layer (32-bit games): eye_capture32.dll + its json in the 32-bit view (test root <LM>32)\n");
+    std::wstring both;
+    {
+        Roots(kLm);
+        RegDeleteTreeW(HKEY_CURRENT_USER, kLm);
+        RegDeleteTreeW(HKEY_CURRENT_USER, kLm32);
+        both = ScratchDir(L"Both", true, true);
+        MakeFile(both + L"\\" + install::JsonName32());
+        MakeFile(both + L"\\" + install::DllName32());
+        const std::wstring ours64 = install::OurValueName(both), ours32 = install::OurValueName32(both);
+        Check(ours32 == both + L"\\XR_APILAYER_JRDEVO_eye_capture32.json", "OurValueName32 = <dir>\\XR_APILAYER_JRDEVO_eye_capture32.json");
+        SetDword(kLm32, kUnrelated, 0);
+        s = install::Query(both);
+        Check(s.filesPresent && s.files32Present, "Query: both file pairs present");
+        Check(s.state == install::State::NotRegistered && s.state32 == install::State::NotRegistered, "Query: nothing registered");
+        Check(install::Register(both, err, &we), "Register succeeds");
+        std::vector<Val> l64 = Values(kLm), l32 = Values(kLm32);
+        Check(CountSameName(l64) == 1 && Has(l64, ours64) && CountSameName32(l64) == 0, "64-bit view: only the 64-bit json");
+        bool zero32 = false;
+        for (const Val& v : l32) if (v.name == ours32 && v.type == REG_DWORD && v.value == 0) zero32 = true;
+        Check(zero32 && CountSameName32(l32) == 1 && CountSameName(l32) == 0, "32-bit view: <dir>\\json32 = DWORD 0, nothing else of ours");
+        Check(Has(l32, kUnrelated), "32-bit view: unrelated value untouched");
+        s = install::Query(both);
+        Check(s.state == install::State::Registered && s.state64 == install::State::Registered && s.state32 == install::State::Registered,
+              "Query: Registered (both)");
+        // an update from a version without the 32-bit layer: the 64-bit one registered, the 32-bit one not
+        RegDeleteKeyValueW(HKEY_CURRENT_USER, kLm32, ours32.c_str());
+        s = install::Query(both);
+        Check(s.state == install::State::NotRegistered && s.state64 == install::State::Registered && s.state32 == install::State::NotRegistered,
+              "only the 32-bit part missing: combined NotRegistered, state64 Registered (the tray asks to register)");
+        // a stale 32-bit registration from another folder
+        const std::wstring stale32 = L"D:\\Old Folder\\" + std::wstring(install::JsonName32());
+        SetDword(kLm32, stale32, 0);
+        s = install::Query(both);
+        Check(s.state == install::State::StalePath && s.registeredPath == stale32 && s.state32 == install::State::StalePath,
+              "stale 32-bit value: StalePath, registeredPath = it");
+        Check(install::Register(both, err, &we), "Register succeeds");
+        l32 = Values(kLm32);
+        Check(CountSameName32(l32) == 1 && Has(l32, ours32) && !Has(l32, stale32), "stale 32-bit value replaced by ours");
+        Check(install::Query(both).state == install::State::Registered, "Query: Registered again");
+        // a folder WITHOUT the 32-bit files: Register leaves the 32-bit view alone, Query ignores it
+        Check(install::Register(a, err, &we), "Register (64-bit files only) succeeds");
+        l32 = Values(kLm32);
+        Check(Has(l32, ours32) && CountSameName32(l32) == 1, "... the 32-bit view is untouched");
+        s = install::Query(a);
+        Check(!s.files32Present && s.state == install::State::Registered, "... Query(64-bit-only folder): Registered (32-bit not required)");
+        // HKCU copies of the 32-bit json are duplicates too
+        Check(install::Register(both, err, &we), "Register (both) again");
+        SetDword(kCu, ours32, 0);
+        s = install::Query(both);
+        Check(s.hkcuDuplicate && s.state == install::State::DuplicateHkcu, "HKCU copy of the 32-bit json: DuplicateHkcu");
+        Check(install::RemoveHkcuDuplicates() == 1 && CountSameName32(Values(kCu)) == 0, "RemoveHkcuDuplicates removes it");
+        // Unregister: both views
+        SetDword(kLm32, stale32, 0);
+        Check(install::Unregister(both, err, &we), "Unregister succeeds");
+        Check(CountSameName(Values(kLm)) == 0 && CountSameName32(Values(kLm32)) == 0, "no value of ours left in either view");
+        Check(Has(Values(kLm32), kUnrelated), "32-bit view: unrelated value untouched");
+        s = install::Query(both);
+        Check(s.state == install::State::NotRegistered && s.state32 == install::State::NotRegistered, "Query: NotRegistered (both)");
+    }
+
     install::SetTestRoots(L"", L"");
     Cleanup();
-    for (const std::wstring& d : {a, missing, jsonOnly}) {
+    for (const std::wstring& d : {a, missing, jsonOnly, both}) {
         DeleteFileW((d + L"\\" + install::JsonName()).c_str());
         DeleteFileW((d + L"\\" + install::DllName()).c_str());
+        DeleteFileW((d + L"\\" + install::JsonName32()).c_str());
+        DeleteFileW((d + L"\\" + install::DllName32()).c_str());
         RemoveDirectoryW(d.c_str());
     }
     RemoveDirectoryW(a.substr(0, a.find_last_of(L'\\')).c_str());
