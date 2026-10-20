@@ -2,6 +2,8 @@
 #include "openvr_capture.h"
 #include <windows.h>
 #include <d3d11.h>
+#include <d3d12.h>
+#include <dxgi1_4.h>
 #include <shlobj.h>
 #include <atomic>
 #include <cmath>
@@ -72,14 +74,21 @@ struct OvrState {
     const SystemVersion* sysVer = nullptr;
     bool                 sysTried = false;
     float                displayHz = 0;
-    // capture
+    // capture: the graphics API of the first recorded Submit (D3D11: the game's device; D3D12: the game's device + the queue
+    // of its D3D12TextureData_t -- the copies run on that queue, like the compositor's own)
+    GfxApi                        api = GfxApi::None;
     std::unique_ptr<IFrameSource> src;
     std::unique_ptr<Recorder>     rec;
     std::unique_ptr<LiveShare>    live;
     ComPtr<ID3D11Device>          dev;
-    // the in-headset dot (openvr_indicator.h): created at the first pair of a VR session while vr_indicator = steamvr_indicator = 1
+    ComPtr<ID3D12Device>          dev12;
+    ComPtr<ID3D12CommandQueue>    queue12;
+    // the in-headset dot (openvr_indicator.h): created at the first pair of a VR session while vr_indicator = steamvr_indicator = 1.
+    // Its 64x64 texture lives on a D3D11 device: the game's (D3D11) or a small private one on the game's adapter (D3D12).
     std::unique_ptr<OvrIndicator> ind;
     IndicatorTracker              indTracker;
+    ComPtr<ID3D11Device>          indDev;
+    bool                          indDevTried = false;
     bool     srcFailed = false, faulted = false;
     std::map<void*, TexInfo> tex;      // per submitted texture pointer (no destroy event in OpenVR)
     uint64_t texUse = 0;
@@ -94,7 +103,8 @@ struct OvrState {
     int  layoutLogs = 0;
     bool loggedType = false, loggedLens = false, loggedFlipV = false, loggedFlipU = false, loggedArray = false,
          loggedOneEye = false, loggedQi = false, loggedDevice = false, loggedNoSys = false, loggedNoPose = false,
-         loggedPoseFrom = false, loggedDepth = false, loggedSubmitErr = false, secondProxy = false;
+         loggedPoseFrom = false, loggedDepth = false, loggedSubmitErr = false, secondProxy = false, loggedQueue = false,
+         loggedNodeMask = false, loggedApiMix = false, loggedNotTex2d = false;
     // autorecord (XR_EYE_CAPTURE_AUTORECORD)
     bool    autoDone = false;
     int64_t autoStopAt = 0;
@@ -133,6 +143,10 @@ void* g_fnRealTable[kCompositorVersionCount];
 
 std::string Narrow(const std::wstring& w) { return elog::Narrow(w); }
 
+// "SteamVR D3D11" / "SteamVR D3D12": the API shown in the tray / status and the record start line.
+const char* ApiLabel() { return g.api == GfxApi::D3D12 ? "SteamVR D3D12" : "SteamVR D3D11"; }
+ID3D11Device* IndicatorDevice();   // below, with the frame sources
+
 // ------------------------------------------------------------------------------------------------ control hooks
 
 CaptureSnapshot Snapshot() {
@@ -144,7 +158,7 @@ CaptureSnapshot Snapshot() {
         s.capable = true;
         s.rec = g.rec->Status();
         if (g_startRequested.load() && s.rec.state == RecState::Failed) s.rec.state = RecState::Idle;   // a new start is pending
-        s.api = L"SteamVR D3D11";
+        s.api = g.api == GfxApi::D3D12 ? L"SteamVR D3D12" : L"SteamVR D3D11";
         s.runtime = L"SteamVR";
     }
     return s;
@@ -261,8 +275,8 @@ void StartRecording(const EyeView& L, const EyeView& R, bool srgb) {
     rs.path = g.cfg.outputDir + L"\\" + name;
     FillRecorderSettings(g.cfg, L, R, fps, rs);
     const UINT W = L.w + R.w, H = L.h > R.h ? L.h : R.h;
-    LOGI("record: start %s | SteamVR D3D11 | %ux%u SBS (eyes %ux%u + %ux%u) | %u fps from %s (display %.1f Hz, measured %.2f) | %s",
-         Narrow(rs.path).c_str(), W, H, L.w, L.h, R.w, R.h, fps, fpsFrom, g.displayHz,
+    LOGI("record: start %s | %s | %ux%u SBS (eyes %ux%u + %ux%u) | %u fps from %s (display %.1f Hz, measured %.2f) | %s",
+         Narrow(rs.path).c_str(), ApiLabel(), W, H, L.w, L.h, R.w, R.h, fps, fpsFrom, g.displayHz,
          g.period.periodNs > 0 ? 1e9 / g.period.periodNs : 0.0, srgb ? "sRGB-encoded" : "linear");
     if (!g.rec->Start(g.src.get(), rs, W, H, L.w, stage, srgb))
         LOGW("record: previous recording still finalizing -- start ignored");
@@ -324,12 +338,29 @@ void CapturePair() {
         if (g.indTracker.NeedsMessage(st)) msg = g.rec->Status().message;
         const double now = (double)QpcNow100ns() * 1e-7;
         const bool live = g.cfg.indicator.live && g.live && g.live->Active();
-        g.ind->Frame(g.realGet, g.dev.Get(), g.indTracker.Update(st, msg, now, live), now);
+        g.ind->Frame(g.realGet, IndicatorDevice(), g.indTracker.Update(st, msg, now, live), now);
     }
 }
 
+// Under g_lock: the recorder (+ live share) once a frame source exists.
+void MakeRecorder(const LiveShareParams& lp) {
+    g.rec = std::make_unique<Recorder>();
+    if (g.cfg.liveShare) g.live = std::make_unique<LiveShare>(lp);
+}
+
+// Under g_lock: one graphics API per run -- the first one that was recorded (a game never mixes them; logged once if it does).
+bool SameApi(GfxApi a) {
+    if (g.api == GfxApi::None || g.api == a) return true;
+    if (!g.loggedApiMix) {
+        g.loggedApiMix = true;
+        LOGW("steamvr: a %s texture was submitted after %s ones -- only the first API is recorded", GfxApiName(a), GfxApiName(g.api));
+    }
+    return false;
+}
+
 // Under g_lock: the frame source / recorder on the game's device at the first armed D3D11 Submit.
-bool EnsureSource(ID3D11Texture2D* t) {
+bool EnsureSource11(ID3D11Texture2D* t) {
+    if (!SameApi(GfxApi::D3D11)) return false;
     ComPtr<ID3D11Device> dev;
     t->GetDevice(&dev);
     if (g.src) {
@@ -346,36 +377,125 @@ bool EnsureSource(ID3D11Texture2D* t) {
         LOGE("steamvr: no D3D11 frame source on the game's device -- capture disabled for this run");
         return false;
     }
+    g.api = GfxApi::D3D11;
     g.dev = dev;
-    g.rec = std::make_unique<Recorder>();
-    if (g.cfg.liveShare) {
-        LiveShareParams lp;
-        lp.api = GfxApi::D3D11;
-        lp.dev11 = dev.Get();
-        lp.game = g.exeName;
-        lp.shmName = g.liveShm;
-        g.live = std::make_unique<LiveShare>(lp);
-    }
+    LiveShareParams lp;
+    lp.api = GfxApi::D3D11;
+    lp.dev11 = dev.Get();
+    lp.game = g.exeName;
+    lp.shmName = g.liveShm;
+    MakeRecorder(lp);
     LOGI("steamvr: capture AVAILABLE on the game's D3D11 device (first Submit)");
     return true;
 }
 
+// Under g_lock: the frame source / recorder at the first armed D3D12 Submit -- on the resource's device and on the queue the
+// game hands to the compositor (D3D12TextureData_t::m_pCommandQueue): the copies are recorded into our own command list and
+// executed on that queue after the game's rendering, exactly where the compositor reads the texture; no CPU wait.
+bool EnsureSource12(ID3D12Resource* res, ID3D12CommandQueue* queue) {
+    if (!SameApi(GfxApi::D3D12)) return false;
+    ComPtr<ID3D12Device> dev;
+    if (FAILED(res->GetDevice(IID_PPV_ARGS(&dev))) || !dev) {
+        if (!g.loggedQi) { g.loggedQi = true; LOGW("steamvr: D3D12 resource %p has no device -- not recorded", (void*)res); }
+        return false;
+    }
+    if (g.src) {
+        if (dev.Get() != g.dev12.Get()) {
+            if (!g.loggedDevice) {
+                g.loggedDevice = true;
+                LOGW("steamvr: a texture from another D3D12 device was submitted -- only the first device is recorded");
+            }
+            return false;
+        }
+        if (queue != g.queue12.Get()) {
+            if (!g.loggedQueue) {
+                g.loggedQueue = true;
+                LOGW("steamvr: a D3D12 Submit names another command queue (%p, recording on %p) -- those eyes are not recorded "
+                     "(a copy on a queue the texture was not rendered on would not be ordered after the rendering)",
+                     (void*)queue, (void*)g.queue12.Get());
+            }
+            return false;
+        }
+        return true;
+    }
+    if (g.srcFailed) return false;
+    const D3D12_COMMAND_QUEUE_DESC qd = queue->GetDesc();
+    if (qd.Type != D3D12_COMMAND_LIST_TYPE_DIRECT) {
+        // a compute / copy queue cannot take the eye texture out of PIXEL_SHADER_RESOURCE (nor resolve MSAA)
+        g.srcFailed = true;
+        LOGE("steamvr: the game submits its D3D12 eye textures with a %s queue (type %d), not a direct queue -- capture disabled "
+             "for this run", qd.Type == D3D12_COMMAND_LIST_TYPE_COMPUTE ? "compute" : "copy/other", (int)qd.Type);
+        return false;
+    }
+    g.src = CreateD3D12FrameSource(dev.Get(), queue);
+    if (!g.src) {
+        g.srcFailed = true;
+        LOGE("steamvr: no D3D12 frame source on the game's device -- capture disabled for this run");
+        return false;
+    }
+    g.api = GfxApi::D3D12;
+    g.dev12 = dev;
+    g.queue12 = queue;
+    LiveShareParams lp;
+    lp.api = GfxApi::D3D12;
+    lp.dev12 = dev.Get();
+    lp.queue12 = queue;
+    lp.game = g.exeName;
+    lp.shmName = g.liveShm;
+    MakeRecorder(lp);
+    LOGI("steamvr: capture AVAILABLE on the game's D3D12 device, copies on its direct queue %p (first Submit; eye textures "
+         "taken as PIXEL_SHADER_RESOURCE and left in it)", (void*)queue);
+    return true;
+}
+
+// Under g_lock: the D3D11 device the dot's texture lives on -- the game's own (D3D11), or a small private device on the D3D12
+// game's adapter (an IVROverlay texture is independent of the scene application's API; nothing runs on the game's queue).
+ID3D11Device* IndicatorDevice() {
+    if (g.api == GfxApi::D3D11) return g.dev.Get();
+    if (g.api != GfxApi::D3D12 || !g.dev12) return nullptr;
+    if (g.indDevTried) return g.indDev.Get();
+    g.indDevTried = true;
+    const LUID luid = g.dev12->GetAdapterLuid();
+    ComPtr<IDXGIFactory4> f;
+    ComPtr<IDXGIAdapter1> ad;
+    if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&f))) || FAILED(f->EnumAdapterByLuid(luid, IID_PPV_ARGS(&ad)))) {
+        LOGW("indicator: the D3D12 game's adapter was not found -- no dot");
+        return nullptr;
+    }
+    const D3D_FEATURE_LEVEL fl[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
+    const HRESULT hr = D3D11CreateDevice(ad.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT, fl,
+                                         (UINT)(sizeof(fl) / sizeof(fl[0])), D3D11_SDK_VERSION, &g.indDev, nullptr, nullptr);
+    if (FAILED(hr)) {
+        LOGW("indicator: D3D11CreateDevice on the D3D12 game's adapter failed hr=0x%08lx -- no dot", (unsigned long)hr);
+        g.indDev.Reset();
+        return nullptr;
+    }
+    LOGI("indicator: D3D12 game -- the dot's texture lives on a small private D3D11 device on the same adapter");
+    return g.indDev.Get();
+}
+
+// What LookupTexture needs of a submitted texture (D3D11_TEXTURE2D_DESC / D3D12_RESOURCE_DESC).
+struct TexDesc {
+    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+    uint32_t width = 0, height = 0, arraySize = 1, mips = 1, samples = 1;
+    int32_t d3d12State = -1;   // D3D12: the hand-off state (SwapchainInfo::d3d12State)
+    char extra[96] = "";       // API-specific part of the log line
+};
+
 // Under g_lock. The texture's cached description (ForgetSwapchain when a pointer we saw comes back different).
-TexInfo* LookupTexture(ID3D11Texture2D* t, bool srgb) {
-    D3D11_TEXTURE2D_DESC d{};
-    t->GetDesc(&d);
-    const DXGI_FORMAT typed = TypedCaptureFormat(d.Format, srgb);
+TexInfo* LookupTexture(void* t, const TexDesc& d, bool srgb) {
+    const DXGI_FORMAT typed = TypedCaptureFormat(d.format, srgb);
     auto it = g.tex.find(t);
     if (it != g.tex.end()) {
         TexInfo& ti = it->second;
-        if (ti.texFormat == d.Format && ti.info.format == (int64_t)typed && ti.info.width == d.Width &&
-            ti.info.height == d.Height && ti.info.arraySize == d.ArraySize && ti.info.sampleCount == d.SampleDesc.Count &&
-            ti.info.mipCount == d.MipLevels) {
+        if (ti.texFormat == d.format && ti.info.format == (int64_t)typed && ti.info.width == d.width &&
+            ti.info.height == d.height && ti.info.arraySize == d.arraySize && ti.info.sampleCount == d.samples &&
+            ti.info.mipCount == d.mips && ti.info.d3d12State == d.d3d12State) {
             ti.lastUse = ++g.texUse;
             return &ti;
         }
-        LOGI("steamvr: texture %p changed (now %ux%u %s array %u samples %u) -- its caches are dropped", (void*)t, d.Width,
-             d.Height, DxgiFormatName(d.Format), d.ArraySize, d.SampleDesc.Count);
+        LOGI("steamvr: texture %p changed (now %ux%u %s array %u samples %u) -- its caches are dropped", t, d.width, d.height,
+             DxgiFormatName(d.format), d.arraySize, d.samples);
         if (g.src) g.src->ForgetSwapchain(t);
         for (PendingEye& p : g.pend)   // a pending eye must not keep pointing at the erased description
             if (p.have && p.v.swapchainKey == (const void*)t) p.have = false;
@@ -393,19 +513,87 @@ TexInfo* LookupTexture(ID3D11Texture2D* t, bool srgb) {
         }
     }
     TexInfo& ti = g.tex[t];
-    ti.texFormat = d.Format;
+    ti.texFormat = d.format;
     ti.info.format = (int64_t)typed;
-    ti.info.width = d.Width;
-    ti.info.height = d.Height;
-    ti.info.arraySize = d.ArraySize ? d.ArraySize : 1;
-    ti.info.mipCount = d.MipLevels ? d.MipLevels : 1;
-    ti.info.sampleCount = d.SampleDesc.Count ? d.SampleDesc.Count : 1;
+    ti.info.width = d.width;
+    ti.info.height = d.height;
+    ti.info.arraySize = d.arraySize ? d.arraySize : 1;
+    ti.info.mipCount = d.mips ? d.mips : 1;
+    ti.info.sampleCount = d.samples ? d.samples : 1;
     ti.info.faceCount = 1;
+    ti.info.d3d12State = d.d3d12State;
     ti.lastUse = ++g.texUse;
-    LOGI("steamvr: texture %p: %ux%u %s (captured as %s) array %u mips %u samples %u bind 0x%x misc 0x%x%s", (void*)t, d.Width,
-         d.Height, DxgiFormatName(d.Format), DxgiFormatName(typed), d.ArraySize, d.MipLevels, d.SampleDesc.Count, d.BindFlags,
-         d.MiscFlags, (d.MiscFlags & D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX) ? " (KEYED MUTEX: watch for stale frames)" : "");
+    LOGI("steamvr: texture %p: %ux%u %s (captured as %s) array %u mips %u samples %u %s", t, d.width, d.height,
+         DxgiFormatName(d.format), DxgiFormatName(typed), d.arraySize, d.mips, d.samples, d.extra);
     return &ti;
+}
+
+// Under g_lock: the submitted texture -> the image to copy + its description; false = not recorded (logged once).
+bool ResolveSubmittedTexture(const vr::Texture_t* tex, void** image, TexDesc* d) {
+    if (tex->eType == vr::TextureType_DirectX) {
+        IUnknown* unk = static_cast<IUnknown*>(tex->handle);
+        ComPtr<ID3D11Texture2D> t2d;
+        if (FAILED(unk->QueryInterface(IID_PPV_ARGS(&t2d))) || !t2d) {
+            if (!g.loggedQi) { g.loggedQi = true; LOGW("steamvr: Submit handle %p is not an ID3D11Texture2D -- not recorded", tex->handle); }
+            return false;
+        }
+        if (!EnsureSource11(t2d.Get())) return false;
+        D3D11_TEXTURE2D_DESC td{};
+        t2d->GetDesc(&td);
+        d->format = td.Format;
+        d->width = td.Width;
+        d->height = td.Height;
+        d->arraySize = td.ArraySize;
+        d->mips = td.MipLevels;
+        d->samples = td.SampleDesc.Count;
+        snprintf(d->extra, sizeof d->extra, "D3D11 bind 0x%x misc 0x%x%s", td.BindFlags, td.MiscFlags,
+                 (td.MiscFlags & D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX) ? " (KEYED MUTEX: watch for stale frames)" : "");
+        *image = tex->handle;   // the ID3D11Texture2D itself
+        return true;
+    }
+    // TextureType_DirectX12: handle = the game's D3D12TextureData_t (often on its stack: read now, never kept)
+    const vr::D3D12TextureData_t* td = static_cast<const vr::D3D12TextureData_t*>(tex->handle);
+    if (!td->m_pResource || !td->m_pCommandQueue) {
+        if (!g.loggedQi) {
+            g.loggedQi = true;
+            LOGW("steamvr: D3D12 Submit with resource %p / queue %p -- not recorded", (void*)td->m_pResource, (void*)td->m_pCommandQueue);
+        }
+        return false;
+    }
+    ComPtr<ID3D12Resource> res;
+    ComPtr<ID3D12CommandQueue> q;
+    if (FAILED(reinterpret_cast<IUnknown*>(td->m_pResource)->QueryInterface(IID_PPV_ARGS(&res))) || !res ||
+        FAILED(reinterpret_cast<IUnknown*>(td->m_pCommandQueue)->QueryInterface(IID_PPV_ARGS(&q))) || !q) {
+        if (!g.loggedQi) {
+            g.loggedQi = true;
+            LOGW("steamvr: D3D12 Submit: %p / %p are not an ID3D12Resource / ID3D12CommandQueue -- not recorded",
+                 (void*)td->m_pResource, (void*)td->m_pCommandQueue);
+        }
+        return false;
+    }
+    if (td->m_nNodeMask > 1 && !g.loggedNodeMask) {
+        g.loggedNodeMask = true;
+        LOGW("steamvr: D3D12 Submit with node mask 0x%x (multi-GPU linked adapter) -- recorded on the queue's node", td->m_nNodeMask);
+    }
+    const D3D12_RESOURCE_DESC rd = res->GetDesc();
+    if (rd.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D) {
+        if (!g.loggedNotTex2d) {
+            g.loggedNotTex2d = true;
+            LOGW("steamvr: D3D12 Submit of a resource with dimension %d (not a 2D texture) -- not recorded", (int)rd.Dimension);
+        }
+        return false;
+    }
+    if (!EnsureSource12(res.Get(), q.Get())) return false;
+    d->format = rd.Format;
+    d->width = (uint32_t)rd.Width;
+    d->height = rd.Height;
+    d->arraySize = rd.DepthOrArraySize;
+    d->mips = rd.MipLevels;
+    d->samples = rd.SampleDesc.Count;
+    d->d3d12State = (int32_t)D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    snprintf(d->extra, sizeof d->extra, "D3D12 flags 0x%x queue %p", (unsigned)rd.Flags, (void*)td->m_pCommandQueue);
+    *image = td->m_pResource;   // the resource, never the (temporary) D3D12TextureData_t
+    return true;
 }
 
 // Under g_lock, before the game's Submit is forwarded.
@@ -413,10 +601,10 @@ void OnSubmitImpl(vr::EVREye eye, const vr::Texture_t* tex, const vr::VRTextureB
     const int e = eye == vr::Eye_Right ? 1 : 0;
     ++g.submits[e];
     if (!tex || !tex->handle) return;
-    if (tex->eType != vr::TextureType_DirectX) {
+    if (tex->eType != vr::TextureType_DirectX && tex->eType != vr::TextureType_DirectX12) {
         if (!g.loggedType) {
             g.loggedType = true;
-            LOGW("steamvr: textures of type %s (%d) are not supported yet (D3D11 only) -- forwarded, NOT recorded",
+            LOGW("steamvr: textures of type %s (%d) are not supported yet (D3D11 / D3D12 only) -- forwarded, NOT recorded",
                  TextureTypeName(tex->eType), (int)tex->eType);
         }
         return;
@@ -429,23 +617,19 @@ void OnSubmitImpl(vr::EVREye eye, const vr::Texture_t* tex, const vr::VRTextureB
         g.loggedDepth = true;
         LOGI("steamvr: Submit_TextureWithDepth -- depth is ignored (colour recorded)");
     }
-    IUnknown* unk = static_cast<IUnknown*>(tex->handle);
-    ComPtr<ID3D11Texture2D> t2d;
-    if (FAILED(unk->QueryInterface(IID_PPV_ARGS(&t2d))) || !t2d) {
-        if (!g.loggedQi) { g.loggedQi = true; LOGW("steamvr: Submit handle %p is not an ID3D11Texture2D -- not recorded", tex->handle); }
-        return;
-    }
-    if (!EnsureSource(t2d.Get())) return;
-    const bool srgbData = SubmitIsSrgb(tex->eColorSpace, [&] { D3D11_TEXTURE2D_DESC d{}; t2d->GetDesc(&d); return d.Format; }());
-    TexInfo* ti = LookupTexture(t2d.Get(), srgbData);
+    void* image = nullptr;
+    TexDesc td;
+    if (!ResolveSubmittedTexture(tex, &image, &td)) return;
+    const bool srgbData = SubmitIsSrgb(tex->eColorSpace, td.format);
+    TexInfo* ti = LookupTexture(image, td, srgbData);
     if (!ti) return;
     PendingEye& p = g.pend[e];
     if (p.have) ++g.replaced;   // a second Left (or Right) before the other eye: the newer one wins
     p = PendingEye();
     EyeView& v = p.v;
-    v.image = tex->handle;      // never AddRef'd: copied before this Submit returns (or before the other eye's)
+    v.image = image;            // never AddRef'd: copied before this Submit returns (or before the other eye's)
     v.sc = &ti->info;
-    v.swapchainKey = tex->handle;
+    v.swapchainKey = image;
     v.arrayIndex = 0;
     if (ti->info.arraySize >= 2) {
         v.arrayIndex = (uint32_t)e;
@@ -740,7 +924,7 @@ void OvrProcessInit(const std::wstring& proxyDir, bool realLoaded, const std::ws
              g.cfg.steamvr.enabled ? "steamvr_mode = off" : "steamvr_enabled = 0");
         return;
     }
-    LOGI("steamvr: steamvr_enabled 1 | steamvr_mode %s (a game with the proxy always records through it) | steamvr_pose_source %s | require_tray %d | supported: D3D11 textures, IVRCompositor_019.._028 "
+    LOGI("steamvr: steamvr_enabled 1 | steamvr_mode %s (a game with the proxy always records through it) | steamvr_pose_source %s | require_tray %d | supported: D3D11 + D3D12 textures, IVRCompositor_019.._028 "
          "(C++ and FnTable)", SteamVrModeKey(g.cfg.steamvr.mode), SteamVrPoseSourceKey(g.cfg.steamvr.poseSource), g.cfg.requireTray ? 1 : 0);
     if (g.cfg.indicator.enabled && g.cfg.steamvr.indicator)
         LOGI("indicator: on (vr_indicator = 1, steamvr_indicator = 1) -- SteamVR overlay dot in the headset while recording at (%.2f, %.2f, %.2f) m from "
@@ -865,6 +1049,11 @@ void OvrOnShutdown() {
         live = std::move(g.live);
         src = std::move(g.src);
         g.dev.Reset();
+        g.dev12.Reset();
+        g.queue12.Reset();
+        g.indDev.Reset();
+        g.indDevTried = false;
+        g.api = GfxApi::None;
         g.tex.clear();
         g.pend[0].have = g.pend[1].have = false;
         g.pairPose = WaitPose();

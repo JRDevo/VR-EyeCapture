@@ -101,6 +101,7 @@ bool OvrIndicator::FrameImpl(PFN_VR_GetGenericInterface get, ID3D11Device* dev, 
         std::vector<uint8_t> px((size_t)kIndicatorPx * kIndicatorPx * 4);
         RenderIndicator(show, 0.25, s_.opacity, true, false, px.data());   // now = 0.25: the pulse's peak (sin = 1)
         ctx_->UpdateSubresource(tex_.Get(), 0, nullptr, px.data(), kIndicatorPx * 4, 0);
+        ctx_->Flush();   // a few times per recording: the upload reaches the GPU before the compositor reads the texture
         vr::Texture_t t{tex_.Get(), vr::TextureType_DirectX, vr::ColorSpace_Gamma};
         const int err = ((PFN_OvTexture)fn_[ver_->setTexture])(handle_, &t);
         if (err) { Disable("SetOverlayTexture failed", err); return false; }

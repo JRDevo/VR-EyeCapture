@@ -31,9 +31,9 @@ the tray puts into that one game's folder ([SteamVR games](#steamvr-games-virtua
 
 First tested target: **Euro Truck Simulator 2 / American Truck Simulator** (OpenXR beta, Direct3D 11) on Virtual
 Desktop. Any other OpenXR game that renders with Direct3D 11 or Direct3D 12 should work the same way; SteamVR (OpenVR)
-games with Direct3D 11.
+games with Direct3D 11 or Direct3D 12.
 
-**In short:** a free, open-source **VR recorder** for Windows. It captures **stereoscopic 3D (side-by-side / SBS) gameplay** from a **Meta Quest 3** (Virtual Desktop or Link), a **SteamVR** headset or any other OpenXR runtime, straight from the game's own eye buffers, and prepares **YouTube 3D / VR180 uploads**. Any Direct3D 11 / 12 OpenXR game, and Direct3D 11 SteamVR (OpenVR) games.
+**In short:** a free, open-source **VR recorder** for Windows. It captures **stereoscopic 3D (side-by-side / SBS) gameplay** from a **Meta Quest 3** (Virtual Desktop or Link), a **SteamVR** headset or any other OpenXR runtime, straight from the game's own eye buffers, and prepares **YouTube 3D / VR180 uploads**. Any Direct3D 11 / 12 OpenXR game, and Direct3D 11 / 12 SteamVR (OpenVR) games.
 
 **Menu:** [Features](#features) · [What it looks like](#what-it-looks-like) · [Download](#-download) · [Requirements](#requirements) · [Install](#install) · [How it works](#how-it-works-start-the-tray-app-first) · [Record](#record) · [YouTube](#upload-to-youtube) · [Settings](#settings--configini) · [Indicator](#in-headset-indicator) · [Smoothing](#head-motion-smoothing) · [Dome mode](#vr180--vr360-dome-mode-experimental) · [OBS](#live-view-in-obs-experimental) · [SteamVR games](#steamvr-games-virtual-desktop--steamvr) · [Troubleshooting](#log-and-troubleshooting) · [Cost](#cost) · [With other mods](#with-other-mods) · [Build](#building-from-source) · [Report a problem](#reporting-a-problem-what-to-upload) · [License](#license-and-credits)
 
@@ -44,7 +44,7 @@ games with Direct3D 11.
 - **OpenXR API layer** — works with any runtime (Virtual Desktop VDXR, SteamVR, Oculus / Meta Link); nothing is injected
   and no game files are touched.
 - **Direct3D 11 and 12 games** — any OpenXR game that renders with either.
-- **SteamVR (OpenVR) games** — tray menu **SteamVR games...** enables recording per game (Direct3D 11).
+- **SteamVR (OpenVR) games** — tray menu **SteamVR games...** enables recording per game (Direct3D 11 and 12).
 - **One hotkey** — default `ScrollLock`, or the tray icon, starts and stops a recording; beeps in the headset confirm
   (`beeps = 0` turns them off, e.g. when they end up in the recorded audio).
   It can be any key, a mouse side button, an Xbox controller button or a wheel / joystick button (or several of them).
@@ -198,7 +198,7 @@ OpenXR is a trademark of The Khronos Group.
 
 
 - Windows 10 (1703 or newer) or Windows 11, 64-bit.
-- An OpenXR game using **Direct3D 11 or Direct3D 12**, or a SteamVR (OpenVR) game using **Direct3D 11**. Vulkan is planned ([`docs/VULKAN.md`](docs/VULKAN.md));
+- An OpenXR game using **Direct3D 11 or Direct3D 12**, or a SteamVR (OpenVR) game using **Direct3D 11 or Direct3D 12**. Vulkan is planned ([`docs/VULKAN.md`](docs/VULKAN.md));
   OpenGL is not supported. Unsupported games run normally, just without recording.
 - A GPU with a hardware HEVC (H.265) encoder: NVIDIA GTX 10xx or newer, AMD RX 400 or newer, Intel 7th gen or newer.
   HEVC is needed for wide frames: a Quest 3 at high settings is about 6000 x 3200 side by side, beyond H.264 limits.
@@ -805,8 +805,9 @@ file back. Nothing is installed globally, nothing is injected, and other games a
 
 **What you get.** The same recordings as with OpenXR games: hotkey, tray icon, beeps, `config.ini` settings (codec,
 bitrate, `symmetric_fov`, head smoothing, the VR180 / VR360 dome), audio, the MKV for YouTube, and the OBS live view.
-The in-headset dot works too (a SteamVR overlay, never in the video; `steamvr_indicator = 0` turns it off). Not yet:
-Direct3D 12 / Vulkan / OpenGL games (logged, the game runs unrecorded), 32-bit games. SteamVR's own overlays (dashboard, chaperone) are not in the game's images, so they are never
+The in-headset dot works too (a SteamVR overlay, never in the video; `steamvr_indicator = 0` turns it off). Direct3D 11
+and Direct3D 12 games are recorded (Direct3D 12 is covered by the test suite only so far — not yet by a real game; reports
+welcome). Not yet: Vulkan / OpenGL games (logged, the game runs unrecorded), 32-bit games. SteamVR's own overlays (dashboard, chaperone) are not in the game's images, so they are never
 recorded.
 
 **Settings** (`[steamvr]` in `config.ini`): `steamvr_enabled = 0` makes the copy pass everything through without

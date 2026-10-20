@@ -8,9 +8,10 @@
 //                        Submit hooked -- the C++ object's vtable patched in place, or a copy of the FnTable handed out.
 //   OvrOnShutdown        before the real VR_ShutdownInternal: finalize a recording, publish, unpatch, stop the control
 //                        thread (the real shutdown unloads vrclient, which owns the patched vtables).
-// Per frame: the hooked Submit pairs Left + Right (either order) and, on the second eye, copies both eye images on the
-// game's immediate context BEFORE forwarding that Submit (Recorder::SubmitFrame + LiveShare::Frame), exactly as the layer
-// does inside xrEndFrame. Every call is forwarded and its result returned unchanged; a fault in the capture disables it.
+// Per frame: the hooked Submit pairs Left + Right (either order) and, on the second eye, copies both eye images BEFORE
+// forwarding that Submit (Recorder::SubmitFrame + LiveShare::Frame), exactly as the layer does inside xrEndFrame: D3D11
+// textures on the game's immediate context, D3D12 textures (D3D12TextureData_t) by a command list of ours on the game's
+// queue from the Submit (PIXEL_SHADER_RESOURCE -> COPY_SOURCE -> back), fence-synchronized with the encoder, no CPU wait. Every call is forwarded and its result returned unchanged; a fault in the capture disables it.
 #pragma once
 #include <cstdint>
 #include <string>

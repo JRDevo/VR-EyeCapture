@@ -35,6 +35,10 @@ struct SwapchainInfo {
     int64_t  format = 0;          // DXGI_FORMAT for D3D11/D3D12, VkFormat for Vulkan
     uint32_t width = 0, height = 0, arraySize = 1, mipCount = 1, sampleCount = 1, faceCount = 1;
     uint64_t usageFlags = 0;      // XrSwapchainUsageFlags
+    // D3D12 only: the D3D12_RESOURCE_STATES the image is in when it is handed to CopyEyes (and is put back in afterwards).
+    // -1 = derived from usageFlags as XR_KHR_D3D12_enable defines it (RENDER_TARGET / UNORDERED_ACCESS). The SteamVR proxy
+    // sets PIXEL_SHADER_RESOURCE (OpenVR's D3D12 Submit convention).
+    int32_t  d3d12State = -1;
 };
 
 // One eye of one frame: which image, which array slice, which rectangle.

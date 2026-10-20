@@ -11,9 +11,10 @@
 //   on x; display 90 Hz.
 //   WaitGetPoses: render pose [0] = the HMD on the head motion of tests/test_motion.h at (0, 1.6, 0), t = seconds since the
 //   first call; MOCK_OPENVR_NO_POSE=1 reports it invalid.
-//   Submit: validates the handle (an ID3D11Texture2D), type, bounds (0..1, min < max unless flipped on purpose), flags and the
-//   pose struct (TextureWithPose: a finite rotation); counts per eye and returns VRCompositorError_None, or
-//   MOCK_OPENVR_SUBMIT_ERROR=<n>.
+//   Submit: validates the handle (TextureType_DirectX: an ID3D11Texture2D; TextureType_DirectX12: a D3D12TextureData_t whose
+//   resource is a 2D ID3D12Resource and whose queue is a direct ID3D12CommandQueue of the same device, node mask 0 / 1), type,
+//   bounds (0..1, min < max unless flipped on purpose), flags and the pose struct (TextureWithPose: a finite rotation);
+//   counts per eye (and the D3D12 ones) and returns VRCompositorError_None, or MOCK_OPENVR_SUBMIT_ERROR=<n>.
 //   MOCK_OPENVR_SYSTEM=019: only IVRSystem_019 exists (the proxy must fall back to it).
 //   Mirror recorder (EyeCaptureMirror.exe, quick mode): "FnTable:IVRCompositor_022" slot 33 GetMirrorTextureD3D11 returns an SRV
 //   (on the caller's device) of a 1440x1600 R8G8B8A8_UNORM_SRGB texture per eye with tests/test_pattern.h drawn into it (bar at
@@ -26,6 +27,7 @@
 // accessor calls n, interfaces asked: ...".
 #include <windows.h>
 #include <d3d11.h>
+#include <d3d12.h>
 #include <atomic>
 #include <cmath>
 #include <cstdio>
@@ -46,7 +48,7 @@ namespace {
 std::atomic<int64_t> g_mirrorGets{0}, g_mirrorReleases{0}, g_events{0}, g_backgroundInits{0};
 int64_t g_initTick = 0;
 std::atomic<int64_t> g_submitL{0}, g_submitR{0}, g_wait{0}, g_fnSubmits{0}, g_invalid{0}, g_stubCalls{0}, g_accessorCalls{0},
-    g_shutdowns{0}, g_systemCalls{0};
+    g_shutdowns{0}, g_systemCalls{0}, g_d3d12Submits{0};
 std::mutex g_m;
 std::string g_asked;
 std::string g_firstInvalid;
@@ -114,7 +116,31 @@ vr::EVRCompositorError DoWaitGetPoses(vr::TrackedDevicePose_t* render, uint32_t 
 vr::EVRCompositorError DoSubmit(vr::EVREye eye, const vr::Texture_t* tex, const vr::VRTextureBounds_t* b, int flags) {
     if (eye == vr::Eye_Left) ++g_submitL; else if (eye == vr::Eye_Right) ++g_submitR; else Invalid("bad eye");
     if (!tex || !tex->handle) Invalid("null texture");
-    else if (tex->eType != vr::TextureType_DirectX) Invalid("texture type");
+    else if (tex->eType == vr::TextureType_DirectX12) {
+        ++g_d3d12Submits;
+        const vr::D3D12TextureData_t* d = static_cast<const vr::D3D12TextureData_t*>(tex->handle);
+        ID3D12Resource* r = nullptr;
+        ID3D12CommandQueue* q = nullptr;
+        if (!d->m_pResource || FAILED(reinterpret_cast<IUnknown*>(d->m_pResource)->QueryInterface(IID_PPV_ARGS(&r))) || !r)
+            Invalid("D3D12 resource is not an ID3D12Resource");
+        if (!d->m_pCommandQueue || FAILED(reinterpret_cast<IUnknown*>(d->m_pCommandQueue)->QueryInterface(IID_PPV_ARGS(&q))) || !q)
+            Invalid("D3D12 queue is not an ID3D12CommandQueue");
+        if (r && q) {
+            if (r->GetDesc().Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D) Invalid("D3D12 resource is not a 2D texture");
+            if (q->GetDesc().Type != D3D12_COMMAND_LIST_TYPE_DIRECT) Invalid("D3D12 queue is not a direct queue");
+            ID3D12Device* dr = nullptr;
+            ID3D12Device* dq = nullptr;
+            r->GetDevice(IID_PPV_ARGS(&dr));
+            q->GetDevice(IID_PPV_ARGS(&dq));
+            if (!dr || dr != dq) Invalid("D3D12 resource and queue on different devices");
+            if (dr) dr->Release();
+            if (dq) dq->Release();
+        }
+        if (d->m_nNodeMask > 1) Invalid("D3D12 node mask");
+        if (r) r->Release();
+        if (q) q->Release();
+        if (tex->eColorSpace < vr::ColorSpace_Auto || tex->eColorSpace > vr::ColorSpace_Linear) Invalid("colour space");
+    } else if (tex->eType != vr::TextureType_DirectX) Invalid("texture type");
     else {
         ID3D11Texture2D* t = nullptr;
         if (FAILED(static_cast<IUnknown*>(tex->handle)->QueryInterface(IID_PPV_ARGS(&t))) || !t) Invalid("handle is not an ID3D11Texture2D");
@@ -591,10 +617,10 @@ ACC(VROculusDirect)
 ACC(VROverlayView)
 #undef ACC
 
-// Test only: out[0..8] = submits L, R, waitgetposes, fntable submits, invalid, stub calls, accessor calls, shutdowns,
-// system calls.
+// Test only: out[0..9] = submits L, R, waitgetposes, fntable submits, invalid, stub calls, accessor calls, shutdowns,
+// system calls, D3D12 submits.
 MOCK_EXPORT void MockOpenVrCounts(int64_t* out) {
     out[0] = g_submitL; out[1] = g_submitR; out[2] = g_wait; out[3] = g_fnSubmits; out[4] = g_invalid;
-    out[5] = g_stubCalls; out[6] = g_accessorCalls; out[7] = g_shutdowns; out[8] = g_systemCalls;
+    out[5] = g_stubCalls; out[6] = g_accessorCalls; out[7] = g_shutdowns; out[8] = g_systemCalls; out[9] = g_d3d12Submits;
 }
 MOCK_EXPORT void* MockOpenVrDummyAccessor() { return &g_dummyAccessor[0]; }

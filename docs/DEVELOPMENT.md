@@ -769,7 +769,7 @@ no home = pure forwarder (no log, nothing written). `steamvr_enabled = 0` = pure
   the stack untouched (slow path while unresolved: saves rcx/rdx/r8/r9/xmm0-3, calls `EyeCapResolveAccessor`, restores,
   jumps; returns 0 if the real DLL lacks it). `openvr_e2e` checks them with integer, stack and xmm arguments.
 - **Hooks.** `VR_InitInternal(2)`: arm check (tray running or `require_tray = 0`; checked once per VR init, like an
-  OpenXR session) + the control thread (`ControlStart`, api `SteamVR D3D11`, runtime `SteamVR`). `VR_GetGenericInterface`:
+  OpenXR session) + the control thread (`ControlStart`, api `SteamVR D3D11` / `SteamVR D3D12`, runtime `SteamVR`). `VR_GetGenericInterface`:
   `IVRCompositor_0xx` of a known version (019..028) -> the object's vtable is patched in place (slots 2 WaitGetPoses and 5
   Submit, `VirtualProtect` + `InterlockedExchangePointer`, one record per distinct vtable, the hook finds the original by
   `*(void***)this`); `FnTable:IVRCompositor_0xx` -> the real table is copied (method count + 16, stopping at an unreadable
@@ -781,8 +781,18 @@ no home = pure forwarder (no log, nothing written). `steamvr_enabled = 0` = pure
   (`WaitIdle` 30 s), `ControlPublishFinal`, live share / recorder / frame source released, control thread stopped.
   `thread_local` depth: an inner call (vrclient's FnTable -> its vtable, our own calls) is a plain pass-through.
 - **Per frame** (`OnSubmit`, under the proxy's mutex, SEH-wrapped: a fault disables capture, the game continues): D3D11
-  only (`TextureType_DirectX`; others logged once and forwarded). The first Submit creates the frame source on the
-  texture's device (`GetDevice` -> `CreateD3D11FrameSource`), the recorder and the live share. Per texture pointer a
+  (`TextureType_DirectX`) and D3D12 (`TextureType_DirectX12`; others logged once and forwarded). The first Submit creates
+  the frame source, the recorder and the live share: D3D11 on the texture's device (`GetDevice` ->
+  `CreateD3D11FrameSource`); D3D12 on the resource's device and the DIRECT queue of the game's `D3D12TextureData_t`
+  (`CreateD3D12FrameSource(dev, queue)`, the OpenXR layer's D3D12 source: one command list of ours executed on that queue
+  after the game's rendering, Wait(free) / Signal(ready) fences, no CPU wait; a compute / copy queue disables capture, a
+  later Submit on another queue or device is not recorded, logged once). D3D12 textures are handed over in
+  `PIXEL_SHADER_RESOURCE` (Valve's convention, the state vrclient itself reads them in) -- `SwapchainInfo::d3d12State`
+  tells the D3D12 source to transition from and back to exactly that state (the OpenXR path derives RENDER_TARGET /
+  UAV from the swapchain usage instead). The `D3D12TextureData_t` itself (often on the game's stack) is never kept: the
+  pending eye holds the `ID3D12Resource*`. One API per run (the first recorded). The in-headset dot's 64x64 texture is
+  on the game's D3D11 device, or for a D3D12 game on a small private D3D11 device on the same adapter (an IVROverlay
+  texture does not have to match the scene app's API). Per texture pointer a
   cached `SwapchainInfo` (typed capture format: TYPELESS -> `_UNORM_SRGB` / `_UNORM` by the colour space so an MSAA
   resolve works); a pointer whose description changes gets `ForgetSwapchain`. Colour space: Gamma -> sRGB, Linear ->
   linear, Auto -> `*_SRGB` or 8-bit = sRGB, float / 10-bit = linear; `gamma =` still overrides. Bounds -> rectangle

@@ -100,8 +100,8 @@ non-elevated by the tray when the user enables a game, not at start). Neither �
   `SwapchainInfo` from `GetDesc`, `swapchainKey` = texture pointer, `arrayIndex`, rect from bounds, pose/fov per §7), then
   `rec->SubmitFrame(QpcNow100ns(), L, R, 0, nullptr)` and `live->Frame(...)`. `FillRecorderSettings` + `Recorder::Start`
   at the first paired frame after a start request. `ControlStart(cfg, logPath, configPath, {Snapshot, RequestStart,
-  RequestStop})` with `api = L"SteamVR D3D11"`, `runtime = L"SteamVR"` — hotkey, tray commands, beeps, status, require_tray
-  for free.
+  RequestStop})` with `api = L"SteamVR D3D11"` (`L"SteamVR D3D12"` for a D3D12 game, §8), `runtime = L"SteamVR"` — hotkey,
+  tray commands, beeps, status, require_tray for free.
 - Risks: (1) `D3D11Source` caches resolve targets by `(swapchainKey, eye)`; OpenVR has no destroy event → call
   `ForgetSwapchain(ptr)` when `GetDesc` of a seen pointer changes (keep `{ptr,w,h,fmt,arraySize,samples}`). (2)
   `control.cpp` is a process singleton — one front end per process. (3) `VrIndicator` is OpenXR-only; only
@@ -209,8 +209,9 @@ tray enable/disable, Steam library discovery, automatic repair after game update
 `third_party\openvr\openvr.h` (Valve header, BSD-3 → THIRD_PARTY notice; types only), `src\config.{h,cpp}`,
 `tray\steamvr_games.{h,cpp}`, `tray\steamvr_ui.{h,cpp}`, `tray\settings.cpp`, `tray\tray.cpp`, tests above (+ `tests\run_steamvr_ui.ps1`,
 `tests\fixtures\steam`), `scripts\package.ps1`, docs. ≈ 4k lines.
-D3D12/Vulkan/OpenGL textures: detected, logged once as unsupported, forwarded.
-**Phase 2:** IVROverlay indicator, depth submit structs, flipped-V bounds, D3D12. (Steam library auto-discovery moved to v1.)
+Vulkan/OpenGL textures: detected, logged once as unsupported, forwarded. (D3D12 was in this list until 2026-10-20: §8.)
+**Phase 2:** IVROverlay indicator (done, §3), depth submit structs, flipped-V bounds, D3D12 (done 2026-10-20, §8). (Steam
+library auto-discovery moved to v1.)
 **Planned, deliberately postponed until the real-headset test of v0.5.0** (from the 2026-10-18 audit):
 - Change the interception method: instead of patching the runtime's `IVRCompositor` vtable in place (§1), hand the game a
   wrapper / a copied vtable for the C++ interface (as the FnTable path already does), so the runtime's own object is never
@@ -241,3 +242,39 @@ D3D12/Vulkan/OpenGL textures: detected, logged once as unsupported, forwarded.
 - OpenVR overlays / dashboard / chaperone: not in the submitted textures → not recorded.
 - Exit without `VR_ShutdownInternal`: finalize lost like the OpenXR case; `ShutdownInternal` does Stop + WaitIdle(30 s)
   + ControlPublishFinal and unpatches.
+
+## 8. D3D12 games (added 2026-10-20, branch feature/openvr-dx12)
+Status: built, passes the mock tests (`run_steamvr.ps1` d3d12_*, live_d3d12, d3d12_head_smoothing, d3d12_dome_vr180);
+**not yet tried with a real D3D12 SteamVR game.**
+- **Submit:** `TextureType_DirectX12` -> `Texture_t::handle` is a `D3D12TextureData_t {ID3D12Resource*, ID3D12CommandQueue*,
+  nNodeMask}` (`third_party\openvr\openvr.h`). Read inside the hook, never kept (games pass it on their stack); the pending
+  eye keeps the `ID3D12Resource*` (not AddRef'd, as for D3D11: copied before the pair's second Submit is forwarded).
+  `Submit_TextureWithPose` / `_WithDepth` / `VRTextureBounds_t` (one texture for both eyes) / texture arrays / MSAA /
+  TYPELESS / sRGB work exactly as for D3D11: the same `BoundsToRect`, `SubmitIsSrgb`, `TypedCaptureFormat`, pairing and
+  pose code (`ResolveSubmittedTexture` in `openvr_capture.cpp` is the only API-specific part).
+- **Copy:** the OpenXR layer's `CreateD3D12FrameSource(device, queue)` (`src\source_d3d12.cpp`), no second copy path:
+  per frame one command list of ours (barriers, 2x `CopyTextureRegion`, `ResolveSubresource` for MSAA) executed on the
+  game's queue from the Submit -- ordered after the game's rendering exactly like the compositor's own read -- between a
+  GPU `Wait(free)` and `Signal(ready)` on shared fences; the encoder's D3D11 device waits on `ready`. No CPU wait on the
+  game thread; a ring slot still in use = frame dropped (counted). The source is bound to the first Submit's queue: a
+  later Submit on another queue / device is not recorded (logged once); a compute / copy queue disables capture (it cannot
+  leave `PIXEL_SHADER_RESOURCE` or resolve MSAA).
+- **Resource state:** D3D12 cannot be asked which state a resource is in. OpenVR's convention (Valve's hellovr_dx12 and
+  the SDK comments; vrclient reads the texture on the same queue under the same assumption) is
+  `D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE` at Submit. `SwapchainInfo::d3d12State` (new, -1 = the OpenXR rule) makes
+  the shared D3D12 source transition `PIXEL_SHADER_RESOURCE -> COPY_SOURCE / RESOLVE_SOURCE -> PIXEL_SHADER_RESOURCE`, so the
+  texture is left in the state the game handed over. A game that submits in another state (e.g. COMMON, or
+  `NON_PIXEL | PIXEL_SHADER_RESOURCE`) would get mismatched barriers -- harmless on most drivers, an error in the debug
+  layer; the first real game will tell (look for D3D12 errors / device removal in the game's own log).
+- **Indicator dot:** the `IVROverlay` approach is API-independent: an overlay texture is submitted per `SetOverlayTexture`
+  and does not have to match the scene application's API. For a D3D12 game the proxy creates a small private D3D11 device
+  on the game's adapter (`IndicatorDevice`, by `GetAdapterLuid`) and keeps the 64x64 `TextureType_DirectX` texture there;
+  nothing of the dot runs on the game's queue. (The upload is flushed once per state change.)
+- **Head smoothing / symmetric_fov / dome / live share:** API-independent downstream of `EyeView` (pose + fov from the same
+  `FillPose`; the re-projection and the dome run on the encoder device); live share gets `LiveShareParams{D3D12, dev12,
+  queue12}` and its own D3D12 source on the game queue, as in the OpenXR layer.
+- **Tests:** `openvr_e2e --api d3d12` (a D3D12 game: textures in `PIXEL_SHADER_RESOURCE` between frames, each frame
+  `PSR -> RENDER_TARGET / COPY_DEST -> PSR` on its direct queue, `D3D12TextureData_t` on the stack) with the D3D12 debug
+  layer on when installed: any D3D12 error fails the run -- a proxy that leaves the texture in another state shows up as a
+  barrier mismatch at the game's next frame (checked once by breaking it on purpose: 1376 errors). The mock validates
+  every D3D12 Submit (2D resource, direct queue of the same device, node mask) and counts them.

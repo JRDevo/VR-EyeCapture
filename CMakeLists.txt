@@ -255,7 +255,7 @@ if (EYE_BUILD_TESTS)
     target_compile_options(openvr_e2e PRIVATE ${EYE_WARN_FLAGS})
     target_compile_definitions(openvr_e2e PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
     target_include_directories(openvr_e2e PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests ${CMAKE_CURRENT_SOURCE_DIR}/src)
-    target_link_libraries(openvr_e2e PRIVATE d3d11 dxgi winmm)
+    target_link_libraries(openvr_e2e PRIVATE d3d11 d3d12 dxgi winmm)
     add_dependencies(openvr_e2e openvr_proxy mock_openvr)
 
     # Head-smoothing filter unit test (CPU only).
