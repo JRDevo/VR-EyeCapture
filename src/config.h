@@ -11,6 +11,7 @@
 #include "hotkey.h"   // Hotkey, ParseHotkey (keyboard / mouse / XInput pad / DirectInput bindings)
 #include "log.h"
 #include "video_codec.h"
+#include "vr_hotkey.h"   // VrHotkey, ParseVrHotkey (VR controller button combination)
 
 
 enum class GammaMode { Auto, Srgb, Linear };
@@ -61,6 +62,10 @@ constexpr const wchar_t kDefaultHotkey[] = L"ScrollLock";
 
 struct Config {
     Hotkey       hotkey;                 // default kDefaultHotkey (ScrollLock)
+    // vr_hotkey / vr_hotkey_hold_s: start / stop with the VR controllers (OpenXR games; src/vr_input.h): hold the buttons
+    // together for vrHotkeyHoldS seconds. Read when the game starts (the bindings are fixed once the game attaches its input).
+    VrHotkey     vrHotkey = DefaultVrHotkey();   // default "thumbsticks" (both stick clicks); "off" = no action set at all
+    float        vrHotkeyHoldS = kDefaultVrHotkeyHoldS;   // 0.2 .. 10 s
     std::wstring outputDir;              // default <dll folder>\captures
     VideoCodec   codec = VideoCodec::Hevc;   // codec = hevc | h264 | av1 (av1: hardware only, falls back to HEVC)
     unsigned     bitrateMbps = 0;        // 0 = codec default (120 HEVC / 80 H.264 / 80 AV1)

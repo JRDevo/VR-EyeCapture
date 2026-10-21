@@ -5,6 +5,13 @@
 // Game-thread work per frame: record one small command list (barriers + 2x CopyTextureRegion, + ResolveSubresource for
 // MSAA swapchains) and submit it on the game's own queue between Wait(free) and Signal(ready).
 //
+// Command allocators come from a small pool (not one per ring slot): an allocator can only be reset once the GPU has run
+// its last list, and a GPU-bound game's queue runs 2-4 frames behind the CPU. With one allocator per slot (3 slots) the
+// copy of frame N had to wait for frame N-3's copy to complete on the GPU, and when it had not, the frame was dropped
+// ("gpu busy": 71 of 1299 frames in Metro Awakening at 6120x3248, 11-22 of ~340 in the D3D12 e2e cases). Re-using a ring
+// slot needs no such check: copies into a slot are ordered on the game's queue anyway, and the encoder's side is ordered by
+// the GPU wait on `free`. The pool grows on demand to kMaxAllocators; only beyond that is a frame dropped.
+//
 // Resource states: per XR_KHR_D3D12_enable, a released colour swapchain image is in D3D12_RESOURCE_STATE_RENDER_TARGET
 // (UNORDERED_ACCESS when the swapchain has only the UAV usage bit). We transition it to COPY_SOURCE and back. Ring
 // textures live in COMMON between uses (the hand-off state across APIs). A caller that knows better sets
@@ -22,6 +29,8 @@ static const uint64_t kUsageColor = 0x00000001;
 static const uint64_t kUsageUav   = 0x00000004;
 
 namespace {
+
+const size_t kMaxAllocators = 16;   // copies in flight on the game's queue before a frame is dropped ("gpu busy")
 
 class D3D12Source final : public IFrameSource {
 public:
@@ -79,10 +88,16 @@ public:
             CloseHandle(hnd);
             if (FAILED(hr)) { LOGE("D3D12 source: OpenSharedResource1(ring) on the encoder device failed hr=0x%08lx", (unsigned long)hr); return false; }
             out.tex.push_back(encTex);
-            hr = dev_->CreateCommandAllocator(listType_, IID_PPV_ARGS(&slots_[i].alloc));
-            if (FAILED(hr)) { LOGE("D3D12 source: CreateCommandAllocator failed hr=0x%08lx", (unsigned long)hr); return false; }
         }
-        HRESULT hr = dev_->CreateCommandList(0, listType_, slots_[0].alloc.Get(), nullptr, IID_PPV_ARGS(&list_));
+        allocs_.clear();
+        allocsLogged_ = 0;
+        for (UINT i = 0; i < count; ++i) {
+            Alloc a;
+            HRESULT hr = dev_->CreateCommandAllocator(listType_, IID_PPV_ARGS(&a.alloc));
+            if (FAILED(hr)) { LOGE("D3D12 source: CreateCommandAllocator failed hr=0x%08lx", (unsigned long)hr); return false; }
+            allocs_.push_back(a);
+        }
+        HRESULT hr = dev_->CreateCommandList(0, listType_, allocs_[0].alloc.Get(), nullptr, IID_PPV_ARGS(&list_));
         if (FAILED(hr)) { LOGE("D3D12 source: CreateCommandList failed hr=0x%08lx", (unsigned long)hr); return false; }
         list_->Close();
         if (!MakeFence(enc5.Get(), ready_, out.ready) || !MakeFence(enc5.Get(), free_, out.free)) return false;
@@ -94,8 +109,9 @@ public:
                       const OverlayCopy* ov, UINT nOv) override {
         if (slot >= slots_.size() || !list_) return 0;
         Slot& s = slots_[slot];
-        if (s.lastReady && ready_->GetCompletedValue() < s.lastReady) return 0;   // previous copy into this slot still on the GPU
-        if (FAILED(s.alloc->Reset()) || FAILED(list_->Reset(s.alloc.Get(), nullptr))) return 0;
+        Alloc* al = FreeAllocator();
+        if (!al) return 0;   // kMaxAllocators copies still queued on the game's GPU: dropped ("gpu busy")
+        if (FAILED(al->alloc->Reset()) || FAILED(list_->Reset(al->alloc.Get(), nullptr))) return 0;
 
         // Distinct source images (both eyes may share one image).
         ID3D12Resource* imgs[2] = {static_cast<ID3D12Resource*>(L.image), static_cast<ID3D12Resource*>(R.image)};
@@ -196,6 +212,7 @@ public:
         queue_->Signal(ready_.Get(), v);
         readyValue_.store(v);
         s.lastReady = v;
+        al->lastReady = v;
         return v;
     }
 
@@ -248,6 +265,7 @@ public:
         }
         list_.Reset();
         slots_.clear();
+        allocs_.clear();
         ready_.Reset();
         free_.Reset();
     }
@@ -260,9 +278,27 @@ public:
 private:
     struct Slot {
         ComPtr<ID3D12Resource> tex;
-        ComPtr<ID3D12CommandAllocator> alloc;
         uint64_t lastReady = 0;
     };
+    struct Alloc {
+        ComPtr<ID3D12CommandAllocator> alloc;
+        uint64_t lastReady = 0;   // the ready value of the last list recorded with it (0 = never used)
+    };
+    // An allocator whose last list has completed on the GPU; a new one while fewer than kMaxAllocators exist; else nullptr.
+    Alloc* FreeAllocator() {
+        const uint64_t done = ready_->GetCompletedValue();
+        for (Alloc& a : allocs_) if (a.lastReady <= done) return &a;
+        if (allocs_.size() >= kMaxAllocators) return nullptr;
+        Alloc a;
+        if (FAILED(dev_->CreateCommandAllocator(listType_, IID_PPV_ARGS(&a.alloc)))) return nullptr;
+        allocs_.push_back(a);
+        if (allocsLogged_ < 3) {   // the game's GPU runs this many of our copies behind (informational, a few lines)
+            ++allocsLogged_;
+            LOGI("D3D12 source: %zu copy command allocators (the game's queue has %zu of our copies in flight)", allocs_.size(),
+                 allocs_.size() - 1);
+        }
+        return &allocs_.back();
+    }
 
     static D3D12_RESOURCE_BARRIER Transition(ID3D12Resource* r, D3D12_RESOURCE_STATES from, D3D12_RESOURCE_STATES to) {
         D3D12_RESOURCE_BARRIER b{};
@@ -359,6 +395,8 @@ private:
     D3D12_COMMAND_LIST_TYPE listType_ = D3D12_COMMAND_LIST_TYPE_DIRECT;
     LUID luid_{};
     std::vector<Slot> slots_;
+    std::vector<Alloc> allocs_;   // made by CreateRing (before the first CopyEyes), grown by CopyEyes, cleared by DestroyRing (after the last)
+    int allocsLogged_ = 0;
     std::vector<ComPtr<ID3D12Resource>> atlas_[kOverlayFamilies];   // record_overlays: per family and slot (COMMON between uses, like the ring)
     std::atomic<bool> atlasReady_[kOverlayFamilies] = {};
     ComPtr<ID3D12GraphicsCommandList> list_;

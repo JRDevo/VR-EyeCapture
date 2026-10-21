@@ -64,7 +64,7 @@ jobs:
           New-Item -ItemType Directory -Force build\ci_unit | Out-Null
           Push-Location build\ci_unit
           $failed = @()
-          foreach ($t in 'overlay_test', 'head_smoothing_test', 'indicator_test', 'update_test', 'install_test', 'control_final_test',
+          foreach ($t in 'overlay_test', 'head_smoothing_test', 'indicator_test', 'vr_hotkey_test', 'update_test', 'install_test', 'control_final_test',
                          'openvr_hook_test', 'steamvr_install_test') {
             Write-Host "=== $t"
             & "..\Release\$t.exe" 2>&1 | Tee-Object -FilePath "$t.log"

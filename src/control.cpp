@@ -25,6 +25,8 @@ std::mutex        s_pubLock;
 std::atomic<bool> s_beeps{true};         // config beeps (ControlStart, ControlSetBeeps at every config reload)
 EyeCapShared*     s_shm = nullptr;       // valid while the control thread runs (set / cleared under s_pubLock)
 bool              s_owner = false;
+std::atomic<int>  s_extRequest{0};       // ControlRequest: 1 toggle, 2 start, 3 stop (0 = none)
+std::atomic<const char*> s_extSource{""};
 ULONGLONG         s_lastPublish = 0;
 
 // The cues play through PlaySound from THIS process (the game's own audio session on the default device): Beep() went
@@ -39,7 +41,7 @@ void Cue(int kind) {
     if (!PlaySoundW((LPCWSTR)wavs[k]->data(), nullptr, SND_MEMORY | SND_ASYNC | SND_NODEFAULT))
         LOGW("control: cue %s: PlaySound failed", names[k]);
     else
-        LOGD("control: cue %s (PlaySound)", names[k]);
+        LOGI("control: cue %s played (PlaySound, default playback device)", names[k]);
 }
 
 // True while ANY keyboard / mouse binding of the list is held with exactly its modifiers. Pad: / Joy: bindings are the
@@ -144,6 +146,10 @@ DWORD WINAPI ThreadProc(LPVOID param) {
             LOGI("control: hotkey %s pressed", elog::Narrow(s_cfg.hotkey.text).c_str());
         }
         prevDown = down;
+        if (const int ext = s_extRequest.exchange(0)) {   // the VR controller hotkey (no status-owner rule: see control.h)
+            if (!request) request = ext;
+            LOGI("control: %s: %s", s_extSource.load(), ext == 2 ? "start" : ext == 3 ? "stop" : "toggle");
+        }
         if (shm && shm->cmdSeq != lastSeq) {
             lastSeq = shm->cmdSeq;
             MemoryBarrier();
@@ -297,6 +303,13 @@ void ControlStart(const Config& cfg, const std::wstring& logPath, const std::wst
     }
     LOGI("control: hotkey %s (keyboard / mouse: exact modifiers; Pad: / Joy: are read by the tray), tray IPC %s, beeps %s",
          elog::Narrow(cfg.hotkey.text).c_str(), elog::Narrow(s_shmName).c_str(), cfg.beeps ? "on" : "off");
+}
+
+bool ControlRequest(int request, const char* source) {
+    if (!s_thread || s_stop.load() || request < 1 || request > 3) return false;
+    s_extSource = source ? source : "request";
+    s_extRequest = request;
+    return true;
 }
 
 void ControlSetBeeps(bool on) {

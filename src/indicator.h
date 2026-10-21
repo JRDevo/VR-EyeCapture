@@ -6,13 +6,17 @@
 //   VrIndicator        owns a 64x64 swapchain + a VIEW reference space created through the NEXT layer's functions
 //                      (the runtime sees a normal app swapchain; our own hooks never see it). D3D11: the image is filled
 //                      with UpdateSubresource on the game's immediate context, only on frames where the dot is shown.
-//                      D3D12 / Vulkan: not implemented yet (logged once, the indicator stays off; capture unaffected).
+//                      D3D12: the picture is written into a small persistently mapped upload buffer per swapchain image
+//                      and copied with CopyTextureRegion in a command list executed on the game's queue (direct queues
+//                      only), BEFORE xrReleaseSwapchainImage, fenced (an image's buffer / allocator is reused only after
+//                      its last copy completed). Vulkan: not implemented (logged once, the indicator stays off).
 // Visual states: starting / finalizing = amber, steady; recording = red, pulsing (alpha 0.35 .. 1.0, 1 Hz);
 // saved = green for 1.5 s; failed = red X for 2 s; live = violet, steady, while a live viewer (the OBS plugin) receives
 // frames and none of the others is shown (indicator_live; recording wins); otherwise hidden (nothing is done at all).
 #pragma once
 #include <windows.h>
 #include <d3d11.h>
+#include <d3d12.h>
 #include <wrl/client.h>
 #include <cstdint>
 #include <string>
@@ -58,8 +62,10 @@ struct IndicatorDispatch {
 
 class VrIndicator {
 public:
-    VrIndicator(const IndicatorSettings& s, GfxApi api, ID3D11Device* dev11, bool gameUsesSrgb)
-        : s_(s), api_(api), dev11_(dev11), preferSrgb_(gameUsesSrgb) {}
+    VrIndicator(const IndicatorSettings& s, GfxApi api, ID3D11Device* dev11, ID3D12Device* dev12, ID3D12CommandQueue* queue12,
+                bool gameUsesSrgb)
+        : s_(s), api_(api), dev11_(dev11), dev12_(dev12), queue12_(queue12), preferSrgb_(gameUsesSrgb) {}
+    ~VrIndicator();
     // Game thread, inside xrEndFrame. Creates the swapchain / space on first use, uploads the picture for `show` and
     // fills `quad`. Returns false (nothing to append) when hidden, disabled or on any failure (then disabled for good).
     bool Frame(XrSession session, const IndicatorDispatch& d, IndShow show, double now, XrCompositionLayerQuad& quad);
@@ -71,6 +77,9 @@ public:
 
 private:
     bool Create(XrSession session, const IndicatorDispatch& d);
+    bool CreateD3D12(uint32_t n);                       // per-image upload buffers, allocators, list, fence
+    bool Upload12(uint32_t idx);                        // pixels_ -> images12_[idx] on the game's queue
+    void WaitIdle12();                                  // the last copy has completed (bounded wait)
     IndicatorSettings s_;
     GfxApi api_;
     Microsoft::WRL::ComPtr<ID3D11Device> dev11_;
@@ -80,6 +89,22 @@ private:
     XrSwapchain swapchain_ = XR_NULL_HANDLE;
     XrSpace space_ = XR_NULL_HANDLE;
     std::vector<ID3D11Texture2D*> images_;
+    // D3D12
+    Microsoft::WRL::ComPtr<ID3D12Device> dev12_;
+    Microsoft::WRL::ComPtr<ID3D12CommandQueue> queue12_;
+    std::vector<ID3D12Resource*> images12_;              // the swapchain's images (owned by the runtime)
+    struct Upload12Slot {
+        Microsoft::WRL::ComPtr<ID3D12Resource> buffer;   // upload heap, persistently mapped
+        Microsoft::WRL::ComPtr<ID3D12CommandAllocator> alloc;
+        uint8_t* mapped = nullptr;
+        uint64_t fenceValue = 0;                         // the copy that last used this slot
+    };
+    std::vector<Upload12Slot> up12_;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT foot12_{};
+    Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> list12_;
+    Microsoft::WRL::ComPtr<ID3D12Fence> fence12_;
+    uint64_t fenceNext12_ = 0;
+    HANDLE fenceEvent12_ = nullptr;
     bool srgb_ = true, bgra_ = false;
     std::vector<uint8_t> pixels_;
 };

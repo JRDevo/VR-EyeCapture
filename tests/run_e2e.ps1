@@ -6,8 +6,11 @@
     override and without the tray and expects the layer to stay dormant (pass-through, nothing recorded); while an
     EyeCaptureTray runs that case is reported "SKIPPED" (neither passed nor failed; the other cases decide the exit code).
     In-headset indicator (vr_indicator = 1, default): the mock runtime validates and counts the quad layer the layer
-    appends. D3D11 cases: valid quad on at least as many frames as were recorded, never on every frame (hidden before /
-    after), no invalid quad, log line "appended AFTER the capture". D3D12: no quad + "not available on D3D12" line.
+    appends. D3D11 and D3D12 cases: valid quad on at least as many frames as were recorded, never on every frame (hidden
+    before / after), no invalid quad, log line "appended AFTER the capture"; the mock reads the quad's image back on its
+    45th frame ("quad readback: centre R,G,B,A"): the amber / red dot (R > 200, B < 60, alpha > 60) with a transparent
+    corner -- proves the D3D11 UpdateSubresource / D3D12 upload-buffer copy reached the swapchain image.
+    D3D12 cases also require 0 "gpu busy" drops (the copy's command allocators no longer wait on the ring slot).
     Extra case d3d11 / two with vr_indicator = 0: no quad, and the recorded pixels where the dot would be seen (both eyes)
     equal the test pattern and the indicator-on recording (the indicator never reaches the video). Dormant: no quad.
     Overlays (record_overlays): d3d11 and d3d12 / two with layer_e2e --overlays (an opaque quad in the projection space, a
@@ -19,12 +22,25 @@
     quad, a 10-bit quad and a quad with XrCompositionLayerColorScaleBiasKHR: each checked at its predicted pixel(s).
     With record_overlays = 0 the same places show the plain pattern. The stale-pose cases use an opaque projection
     layer: the layers before it must be skipped with a log line.
+    VR controller hotkey (vr_hotkey, src/vr_input.h; layer_e2e --input app|none, mock inputs from EYECAP_MOCK_INPUT): both
+    stick clicks held 1.0-2.4 s and 4.0-5.3 s after session start (and the app's right trigger 2.6-2.9 s), no autorecord:
+      vr_app_d3d11_ipc  the app has its own action set (priority 1, left stick click bound too), attached once, synced every
+                        frame; control thread on (private status block): the request goes through it, the start / stop
+                        cues play ("cue start played" / "cue stop played"; audible)
+      vr_app_d3d12      the same on D3D12 without a control thread (applied by the layer)
+      vr_none_d3d11     an app without any input: the layer attaches + syncs its own set (XR_EYE_CAPTURE_TEST_VR_SELF_ATTACH_S)
+      vr_custom_d3d11   vr_hotkey = left_menu+right_a (pressed at the same times)
+      vr_off_d3d11      vr_hotkey = off: no action set of ours, no recording
+    Checks: one MP4 of ~2.7 s (start at ~2.0 s, stop at ~5.0 s), "-> start recording" / "-> stop recording" log lines,
+    2 haptic pulses (0.1 s / 0.3 s), the app's own actions unaffected (app_select 1 press, app_stick 2 presses: equal
+    priority, both see the stick), our action set's priority = the app's (1), no failed input call (layer_e2e CHECKs them).
+      -OnlyVr: run only the VR controller hotkey cases.
       -OnlyOverlays: run only the overlay cases.
       -BuildLayer: test build\Release\eye_capture.dll instead of the installed (registered) copy -- the registered implicit
                    layer is disabled through its disable_environment and the build copy is enabled as an explicit layer
                    (XR_API_LAYER_PATH / XR_ENABLE_API_LAYERS). Nothing is copied or registered. Its log is build\Release\logs.
 #>
-param([switch]$BuildLayer, [switch]$OnlyOverlays)
+param([switch]$BuildLayer, [switch]$OnlyOverlays, [switch]$OnlyVr)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $bin = Join-Path $root 'build\Release'
@@ -92,7 +108,12 @@ $env:XR_EYE_CAPTURE_TRAY_IPC = '0'
 # These cases test the flat side-by-side path whatever config.ini says ([dome] projection = vr180 records a dome).
 $prevCfg = $env:XR_EYE_CAPTURE_CONFIG
 $env:XR_EYE_CAPTURE_CONFIG = 'projection=flat'
-foreach ($api in $(if ($OnlyOverlays) { @() } else { @('d3d11', 'd3d12') })) {
+function ReadbackOk($o) {   # the mock's read-back of the indicator quad: amber / red dot, transparent corner
+    $rb = [regex]::Match($o, 'quad readback: centre (\d+),(\d+),(\d+),(\d+) corner alpha (\d+)')
+    return $rb.Success -and [int]$rb.Groups[1].Value -gt 200 -and [int]$rb.Groups[3].Value -lt 60 -and [int]$rb.Groups[4].Value -gt 60 -and
+           [int]$rb.Groups[5].Value -eq 0
+}
+foreach ($api in $(if ($OnlyOverlays -or $OnlyVr) { @() } else { @('d3d11', 'd3d12') })) {
     foreach ($layout in @('two', 'array', 'wide', 'msaa')) {
         $out = Join-Path $root "build\e2e_out\${api}_$layout"
         if (Test-Path $out) { Remove-Item -Recurse -Force $out }
@@ -114,10 +135,13 @@ foreach ($api in $(if ($OnlyOverlays) { @() } else { @('d3d11', 'd3d12') })) {
         # limit (10 %): a real stall (a copy that waits, an encoder that falls behind) drops far more than that.
         $fpsWant = 90.0
         $dropOk = $written.Success -and ($nw + $nd) -gt 0 -and $nd -le 0.10 * ($nw + $nd)
+        # D3D12: the copy no longer waits for its ring slot's previous copy on the GPU (source_d3d12.cpp allocator pool)
+        $gpuBusy = [regex]::Match([string]$logTxt, 'gpu busy (\d+)')
+        if ($api -eq 'd3d12') { $dropOk = $dropOk -and $gpuBusy.Success -and [int]$gpuBusy.Groups[1].Value -eq 0 }
         if ($written.Success -and ($nw + $nd) -gt 0) { $fpsWant = 90.0 * $nw / ($nw + $nd) }
         $dropLine = [regex]::Match([string]$logTxt, 'dropped \d+ \([^)]*\)').Value
         Write-Host ("  dropped frames: {0} of {1} ({2}); file rate wanted {3:N2} fps -> {4}" -f $nd, ($nw + $nd), $dropLine, $fpsWant,
-            $(if ($dropOk) { 'ok (limit 10 %)' } else { 'FAIL (over 10 % or no summary)' })) -ForegroundColor $(if ($dropOk) { 'Green' } else { 'Red' })
+            $(if ($dropOk) { 'ok (limit 10 %; D3D12: no gpu busy)' } else { 'FAIL (over 10 %, D3D12 gpu busy > 0, or no summary)' })) -ForegroundColor $(if ($dropOk) { 'Green' } else { 'Red' })
         if ($runOk) {
             # autorecord counts from the first frame; encoder start-up takes ~0.2-0.4 s of it
             & (Join-Path $PSScriptRoot 'verify_mp4.ps1') -File $m.Groups[1].Value.Trim() -EyeW 1920 -EyeH 1080 -Fps $fpsWant -Seconds 3.7 -DurationTolerance 0.3 -ExpectAudio
@@ -125,20 +149,17 @@ foreach ($api in $(if ($OnlyOverlays) { @() } else { @('d3d11', 'd3d12') })) {
         }
         # indicator
         $qi = QuadInfo $o
-        if ($api -eq 'd3d11') {
-            $indOk = $qi.ok -and $qi.bad -eq 0 -and $qi.valid -ge $nw -and $nw -gt 0 -and $qi.valid -lt $qi.total -and
-                     ([string]$logTxt -match 'indicator: quad layer appended AFTER the capture')
-            if ($layout -eq 'two' -and $runOk) { $indOnFile = $m.Groups[1].Value.Trim() }
-        } else {
-            $indOk = $qi.ok -and $qi.valid -eq 0 -and $qi.bad -eq 0 -and ([string]$logTxt -match 'indicator: not available on D3D12 yet')
-        }
-        Write-Host ("  indicator: quad layer valid on {0} of {1} frames, invalid {2}; frames recorded {3} -> {4}" -f $qi.valid, $qi.total, $qi.bad, $nw, $(if ($indOk) { 'ok' } else { 'FAIL' })) -ForegroundColor $(if ($indOk) { 'Green' } else { 'Red' })
+        $indOk = $qi.ok -and $qi.bad -eq 0 -and $qi.valid -ge $nw -and $nw -gt 0 -and $qi.valid -lt $qi.total -and
+                 ([string]$logTxt -match 'indicator: quad layer appended AFTER the capture') -and (ReadbackOk $o)
+        if ($api -eq 'd3d11' -and $layout -eq 'two' -and $runOk) { $indOnFile = $m.Groups[1].Value.Trim() }
+        Write-Host ("  indicator: quad layer valid on {0} of {1} frames, invalid {2}; frames recorded {3}; read back: {4} -> {5}" -f $qi.valid, $qi.total, $qi.bad, $nw,
+            [regex]::Match($o, 'quad readback: [^\r\n]*').Value, $(if ($indOk) { 'ok' } else { 'FAIL' })) -ForegroundColor $(if ($indOk) { 'Green' } else { 'Red' })
         $results += [pscustomobject]@{ api = $api; layout = $layout; run = $runOk; verify = ($verOk -and $indOk) }
     }
 }
 
 # ---- indicator off: no quad; the recorded region where the dot would be is the pattern, same as with the indicator ----
-if (-not $OnlyOverlays) {
+if (-not $OnlyOverlays -and -not $OnlyVr) {
 $out = Join-Path $root 'build\e2e_out\d3d11_two_noindicator'
 if (Test-Path $out) { Remove-Item -Recurse -Force $out }
 Write-Host "`n=== d3d11 / two, vr_indicator = 0" -ForegroundColor Cyan
@@ -162,7 +183,7 @@ $results += [pscustomobject]@{ api = 'd3d11'; layout = 'two, no indicator'; run 
 }
 
 # ---- tag_3d = 0: a plain MP4 -- no st3d box (ffprobe shows no Stereo 3D side data), the log says so; the default file has it ----
-if (-not $OnlyOverlays) {
+if (-not $OnlyOverlays -and -not $OnlyVr) {
 $out = Join-Path $root 'build\e2e_out\d3d11_two_notag'
 if (Test-Path $out) { Remove-Item -Recurse -Force $out }
 Write-Host "`n=== d3d11 / two, tag_3d = 0" -ForegroundColor Cyan
@@ -248,7 +269,7 @@ $cubeFace = @(@(0, 0, 160), @(160, 160, 0), @(160, 0, 160), @(0, 160, 160), @(10
 $kGrey = @(0, 32, 64, 96, 128, 160, 192, 224, 255)
 function AddLin($a, $b) { return @(0, 1, 2 | ForEach-Object { [math]::Round((Enc ([math]::Min(1.0, (Dec $a[$_]) + (Dec $b[$_]))))) }) }
 function EncLin($l) { return @($l | ForEach-Object { [math]::Round((Enc $_)) }) }
-foreach ($ovCase in @(@{ api = 'd3d11'; on = $true }, @{ api = 'd3d12'; on = $true }, @{ api = 'd3d11'; on = $false })) {
+foreach ($ovCase in $(if ($OnlyVr) { @() } else { @(@{ api = 'd3d11'; on = $true }, @{ api = 'd3d12'; on = $true }, @{ api = 'd3d11'; on = $false }) })) {
     $api = $ovCase.api; $on = $ovCase.on
     $name = "${api}_two_overlays" + $(if ($on) { '' } else { '_off' })
     $out = Join-Path $root "build\e2e_out\$name"
@@ -329,7 +350,7 @@ foreach ($ovCase in @(@{ api = 'd3d11'; on = $true }, @{ api = 'd3d12'; on = $tr
                 $ok = $ok -and $ok2
             }
         }
-        if ($api -eq 'd3d11') {   # the indicator (shown in the headset during the recording) is never in the video
+        if ($on) {   # the indicator (shown in the headset during the recording, D3D11 and D3D12) is never in the video
             $ind = IndicatorRegion $m.Groups[1].Value.Trim()
             $okI = $ind.worst -le 12 -and ($o -match 'quad layers: valid on [1-9]')
             Write-Host ("  indicator region vs pattern: worst {0} (limit 12) -> {1}" -f $ind.worst, $(if ($okI) { 'ok: not recorded' } else { 'FAIL' })) -ForegroundColor $(if ($okI) { 'Green' } else { 'Red' })
@@ -395,7 +416,7 @@ function OrangeCentroid($px, $cx, $cy, $dx, $dy) {
     return @(($sx / $n), ($sy / $n), $n)
 }
 $tanD = { param($deg) [math]::Tan($deg * [math]::PI / 180) }
-foreach ($api in @('d3d11', 'd3d12')) {
+foreach ($api in $(if ($OnlyVr) { @() } else { @('d3d11', 'd3d12') })) {
     $out = Join-Path $root "build\e2e_out\${api}_two_overlays_stale"
     if (Test-Path $out) { Remove-Item -Recurse -Force $out }
     Write-Host "`n=== $api / two, overlays, stale submitted pose (head motion, submitted != located)" -ForegroundColor Cyan
@@ -454,6 +475,64 @@ foreach ($api in @('d3d11', 'd3d12')) {
     $results += [pscustomobject]@{ api = $api; layout = 'two, overlays, stale pose'; run = $runOk; verify = $ok }
 }
 
+# ---- VR controller hotkey (vr_hotkey): our action set next to the app's ----
+$sticks = '/user/hand/left/input/thumbstick/click,/user/hand/right/input/thumbstick/click'
+$menuA = '/user/hand/left/input/menu/click,/user/hand/right/input/a/click'
+$vrCases = @(
+    @{ name = 'vr_app_d3d11_ipc'; api = 'd3d11'; input = 'app'; cfg = ''; ipc = $true; keys = $sticks; rec = $true },
+    @{ name = 'vr_app_d3d12'; api = 'd3d12'; input = 'app'; cfg = ''; ipc = $false; keys = $sticks; rec = $true },
+    @{ name = 'vr_none_d3d11'; api = 'd3d11'; input = 'none'; cfg = ''; ipc = $false; keys = $sticks; rec = $true },
+    @{ name = 'vr_custom_d3d11'; api = 'd3d11'; input = 'app'; cfg = ';vr_hotkey=left_menu+right_a'; ipc = $false; keys = $menuA; rec = $true },
+    @{ name = 'vr_off_d3d11'; api = 'd3d11'; input = 'app'; cfg = ';vr_hotkey=off'; ipc = $false; keys = $sticks; rec = $false })
+foreach ($vc in $(if ($OnlyOverlays) { @() } else { $vrCases })) {
+    $out = Join-Path $root "build\e2e_out\$($vc.name)"
+    if (Test-Path $out) { Remove-Item -Recurse -Force $out }
+    Write-Host "`n=== $($vc.name): VR controller hotkey ($($vc.input) input$(if ($vc.cfg) { ', ' + $vc.cfg.TrimStart(';') })$(if ($vc.ipc) { ', control thread' }))" -ForegroundColor Cyan
+    $env:EYECAP_MOCK_INPUT = "1.0-2.4:$($vc.keys);2.6-2.9:/user/hand/right/input/trigger/value;4.0-5.3:$($vc.keys)"
+    $env:XR_EYE_CAPTURE_TEST_VR_SELF_ATTACH_S = '0.5'
+    $env:XR_EYE_CAPTURE_CONFIG = 'projection=flat' + $vc.cfg
+    if ($vc.ipc) { $env:XR_EYE_CAPTURE_TRAY_IPC = '1'; $env:XR_EYE_CAPTURE_TEST_SHM = "Local\EyeCapE2eVr-$PID" }
+    $vArgs = @('--api', $vc.api, '--layout', 'two', '--seconds', '7', '--record', '0', '--out-dir', $out, '--input', $vc.input)
+    if (-not $vc.rec) { $vArgs += '--no-output' }
+    $o = & $exe @vArgs 2>&1 | Out-String
+    $code = $LASTEXITCODE
+    $env:XR_EYE_CAPTURE_TRAY_IPC = '0'; Remove-Item Env:\XR_EYE_CAPTURE_TEST_SHM, Env:\EYECAP_MOCK_INPUT, Env:\XR_EYE_CAPTURE_TEST_VR_SELF_ATTACH_S -ErrorAction SilentlyContinue
+    if ($null -ne $prevCfg) { $env:XR_EYE_CAPTURE_CONFIG = $prevCfg } else { Remove-Item Env:\XR_EYE_CAPTURE_CONFIG -ErrorAction SilentlyContinue }
+    $o.Trim().Split("`n") | Where-Object { $_ -match 'E2E_INPUT|E2E_OUTPUT|E2E_LOOP|mock runtime\] (attach|suggest|action|input|haptic|quad readback)|FAIL' } | ForEach-Object { Write-Host "  $($_.TrimEnd())" }
+    $logTxt = [string](Get-Content (Join-Path $out 'eye_capture.log') -Raw -Encoding UTF8 -ErrorAction SilentlyContinue)
+    $logTxt -split "`r?`n" | Where-Object { $_ -match 'vr hotkey|control: (VR|cue)' } | ForEach-Object { Write-Host ('  log: ' + $_.Substring([math]::Min(31, $_.Length))) }
+    $f = @()
+    $mm = [regex]::Match($o, 'E2E_OUTPUT=(.+)')
+    $mp4s = @(Get-ChildItem $out -Filter *.mp4 -ErrorAction SilentlyContinue)
+    if ($code -ne 0) { $f += "layer_e2e exit $code (an input call of the app failed?)" }
+    if ($vc.input -eq 'app') {
+        $ai = [regex]::Match($o, 'E2E_INPUT app_select presses (\d+) \(true on (\d+) syncs\), app_stick presses (\d+)')
+        $wantStick = if ($vc.keys -eq $sticks) { 2 } else { 0 }
+        if (-not ($ai.Success -and [int]$ai.Groups[1].Value -eq 1 -and [int]$ai.Groups[3].Value -eq $wantStick)) { $f += "app's own actions: '$($ai.Value)' (want app_select 1 press, app_stick $wantStick)" }
+    }
+    $hap = [regex]::Match($o, 'input: profile (\S+), (\d+) syncs \(max (\d+) active sets\), (\d+) haptic pulses')
+    if ($vc.rec) {
+        if ($mp4s.Count -ne 1 -or -not $mm.Success) { $f += "one MP4 ($($mp4s.Count))" }
+        else {
+            & (Join-Path $PSScriptRoot 'verify_mp4.ps1') -File $mm.Groups[1].Value.Trim() -EyeW 1920 -EyeH 1080 -Fps 90 -Seconds 2.7 -DurationTolerance 0.5 -ExpectAudio
+            if ($LASTEXITCODE -ne 0) { $f += 'verify_mp4 (~2.7 s between the two holds)' }
+        }
+        if ($logTxt -notmatch 'vr hotkey: \S+ held 1\.0 s -> start recording' -or $logTxt -notmatch 'vr hotkey: \S+ held 1\.0 s -> stop recording') { $f += 'log: -> start / -> stop recording' }
+        if (-not ($hap.Success -and [int]$hap.Groups[4].Value -eq 2 -and $hap.Groups[1].Value -eq '/interaction_profiles/oculus/touch_controller')) { $f += "mock: 2 haptic pulses on touch_controller ('$($hap.Value)')" }
+        if ($vc.input -eq 'app' -and $o -notmatch "action set 'eyecapture_vr_hotkey' priority 1") { $f += 'our action set priority = the app set''s (1)' }
+        if ($vc.input -eq 'app' -and $o -notmatch "attach: app \(1\), eyecapture_vr_hotkey \(1\)") { $f += 'attach: the app set + ours in the app''s one call' }
+        if ($vc.input -eq 'none' -and $logTxt -notmatch 'the game has no controller input of its own') { $f += 'log: self-attach line' }
+        if ($vc.ipc -and ($logTxt -notmatch 'control: VR controller hotkey: start' -or $logTxt -notmatch 'control: cue start played' -or $logTxt -notmatch 'control: cue stop played')) { $f += 'control thread: request + start / stop cues played' }
+        if ($vc.api -eq 'd3d12' -and -not (ReadbackOk $o)) { $f += 'D3D12 indicator read back' }
+    } else {
+        if ($mp4s.Count -ne 0) { $f += "no MP4 with vr_hotkey = off ($($mp4s.Count))" }
+        if ($o -match 'eyecapture_vr_hotkey' -or $logTxt -notmatch 'vr hotkey: off') { $f += 'vr_hotkey = off: no action set of ours, log says off' }
+    }
+    $okV = $f.Count -eq 0
+    Write-Host ("  -> {0}" -f $(if ($okV) { 'ok' } else { 'FAIL: ' + ($f -join '; ') })) -ForegroundColor $(if ($okV) { 'Green' } else { 'Red' })
+    $results += [pscustomobject]@{ api = $vc.api; layout = $vc.name; run = ($code -eq 0); verify = $okV }
+}
+
 # ---- dormant case: no override, no tray -> the layer must do nothing but forward ----
 $skipped = @()
 Remove-Item Env:\XR_EYE_CAPTURE_REQUIRE_TRAY -ErrorAction SilentlyContinue
@@ -461,8 +540,8 @@ if ($null -ne $prevTrayIpc) { $env:XR_EYE_CAPTURE_TRAY_IPC = $prevTrayIpc } else
 $trayUp = $true
 try { $mx = [System.Threading.Mutex]::OpenExisting('Local\OpenXR-EyeCapture-TrayAlive'); $mx.Dispose() } catch { $trayUp = $false }
 Write-Host "`n=== dormant (no tray, no override)" -ForegroundColor Cyan
-if ($OnlyOverlays) {
-    Write-Host '  skipped (-OnlyOverlays)'
+if ($OnlyOverlays -or $OnlyVr) {
+    Write-Host '  skipped (-OnlyOverlays / -OnlyVr)'
 } elseif ($trayUp) {
     # not a failure of the layer: the case cannot run while a tray holds the TrayAlive marker (it is not counted)
     Write-Host '  SKIP: an EyeCaptureTray is running (it holds Local\OpenXR-EyeCapture-TrayAlive) -- close it to run the dormant case' -ForegroundColor Yellow

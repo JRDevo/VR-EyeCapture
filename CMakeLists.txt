@@ -45,6 +45,8 @@ add_library(eye_capture_core STATIC
     src/log.cpp
     src/config.cpp
     src/hotkey.cpp
+    src/vr_hotkey.cpp
+    src/vr_input.cpp
     src/frame_source.cpp
     src/source_d3d11.cpp
     src/source_d3d12.cpp
@@ -104,6 +106,8 @@ if (EYE_X86)
         src/log.cpp
         src/config.cpp
         src/hotkey.cpp
+        src/vr_hotkey.cpp
+        src/vr_input.cpp
         src/frame_source.cpp
         src/source_d3d11.cpp
         src/source_vulkan.cpp
@@ -357,6 +361,11 @@ if (EYE_BUILD_TESTS)
         EYE_TEST_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures")
     target_include_directories(update_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tray ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(update_test PRIVATE winhttp bcrypt)
+
+    # VR controller hotkey unit test (CPU only): vr_hotkey grammar, profile paths, hold detector, unique file names.
+    add_executable(vr_hotkey_test tests/vr_hotkey_test.cpp)
+    target_compile_options(vr_hotkey_test PRIVATE ${EYE_WARN_FLAGS})
+    target_link_libraries(vr_hotkey_test PRIVATE eye_capture_core)
 
     # In-headset indicator logic unit test (CPU only).
     add_executable(indicator_test tests/indicator_test.cpp)

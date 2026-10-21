@@ -39,6 +39,8 @@ struct Field {
 };
 const Field kFields[] = {
     {L"hotkey",            L"capture",         Kind::Edit,  ID_HOTKEY,     nullptr},
+    {L"vr_hotkey",         L"capture",         Kind::Combo, ID_VRHOTKEY,   L"thumbsticks|left_x+right_a|left_y+right_b|left_menu+right_thumbstick|off",
+     L"Both stick clicks|X + A buttons|Y + B buttons|Menu + right stick click|Off", L"Custom (%s)"},
     {L"output_dir",        L"capture",         Kind::Edit,  ID_OUTDIR,     nullptr},
     {L"codec",             L"capture",         Kind::Combo, ID_CODEC,      L"hevc|h264|av1",
      L"H.265 / HEVC (recommended)|H.264 / AVC|AV1 (hardware: RTX 40 / 50)"},
@@ -162,6 +164,11 @@ std::wstring Norm(const std::wstring& key, const std::wstring& raw) {
     }
     if (key == L"projection" || key == L"fill" || key == L"layout_3d" || key == L"post_when" || key == L"eye_crop" || key == L"theme")
         return Lower(v);
+    if (key == L"vr_hotkey") {
+        VrHotkey h;
+        if (ParseVrHotkey(v, h)) return h.text;   // canonical ("thumbsticks", "off", "left_menu+right_a")
+        return Lower(v);
+    }
     if (key == L"hotkey") {
         Hotkey h;
         if (ParseHotkey(v, h)) return Lower(h.text);   // canonical list (device names keep their inner spaces)
@@ -302,6 +309,7 @@ KeyValues FromConfig(const Config& c) {
     std::wstring hk = c.hotkey.text;
     if (hk.empty()) hk = kDefaultHotkey;
     kv.emplace_back(L"hotkey", hk);
+    kv.emplace_back(L"vr_hotkey", c.vrHotkey.text.empty() ? std::wstring(kDefaultVrHotkey) : c.vrHotkey.text);
     kv.emplace_back(L"output_dir", c.outputDir);
     kv.emplace_back(L"codec", FromUtf8(VideoCodecKey(c.codec)));
     kv.emplace_back(L"bitrate_mbps", std::to_wstring(c.bitrateMbps));
@@ -581,6 +589,14 @@ const Help kHelp[] = {
                 HELP_LI L"Wheel or joystick: Joy:*:Button3 (any device), Joy:T300RS:Button5+Button6 (a device whose name contains T300RS); POVUp / POVDown / POVLeft / POVRight for the hat switch."
                 HELP_LI L"Controller and wheel buttons work at once, without a game restart." HELP_BR
                 L"To see the button names of a wheel, run EyeCaptureTray.exe --inputs in a command prompt."},
+    {ID_VRHOTKEY, L"Start and stop with the VR controllers: hold these buttons together for 1 second (OpenXR games)." HELP_BR
+                  L"• Both stick clicks (default): press both thumbsticks down and hold them. Games rarely use that."
+                  HELP_LI L"The controllers vibrate briefly when a recording starts and longer when it stops; the dot in the headset shows the state."
+                  HELP_LI L"Works in any OpenXR game, also when the game has no keyboard support. The game still sees the buttons too."
+                  HELP_LI L"Custom combinations in config.ini: vr_hotkey = left_menu+right_a (buttons a, b, x, y, menu, thumbstick, trigger, grip; "
+                  L"left_ / right_; up to 4). The hold time is vr_hotkey_hold_s (default 1.0 s)."
+                  HELP_LI L"Off: the layer does not touch the game's controller input at all." HELP_BR
+                  L"Read when the game starts: restart the game after a change. SteamVR games: use the hotkey or the tray."},
     {ID_HOTKEY_PICK, L"Sets the hotkey by pressing it." HELP_BR
                      L"Click, then press a key, a mouse side button, a controller button (hold several for a combination) or a wheel button. "
                      L"It replaces what is in the field. Esc cancels."},
@@ -2484,7 +2500,13 @@ int BuildControls(HWND dlg, Builder::Pass pass, int clientW, int clientH, int sc
     }
     int r = y + top;
     b.Label(lx, r, labelW, L"Hotkey:", ID_HOTKEY);
-    b.Edit(ID_HOTKEY, cx, r, cw);
+    {   // one row: the keyboard / pad hotkey, then the VR controller combination (vr_hotkey) at the right end
+        const int vw = comboW(ID_VRHOTKEY, nullptr), vlw = b.TextW(L"Controllers:") + 6;
+        const int vx = cx + cw - vw;
+        b.Edit(ID_HOTKEY, cx, r, vx - vlw - 12 - cx);
+        b.Label(vx - vlw - 4, r, vlw, L"Controllers:", ID_VRHOTKEY);
+        b.Combo(ID_VRHOTKEY, vx, r, vw);
+    }
     r += pitch;
     {   // wide enough for the armed texts ("Press a key... (Esc cancels)")
         int bw = b.ButtonW(L"Press a key... (Esc cancels)");

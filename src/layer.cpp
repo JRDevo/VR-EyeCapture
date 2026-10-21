@@ -14,6 +14,8 @@
 //                          + live_share: the same L / R views to a live viewer (OBS plugin) when one is watching (live_share.h)
 //   xrCreateReferenceSpace / xrDestroySpace   track VIEW spaces (overlay layers in them follow the submitted head)
 //   xrDestroyInstance      clean up
+//   xrCreateActionSet / xrCreateAction / xrSuggestInteractionProfileBindings / xrAttachSessionActionSets / xrSyncActions
+//                          the VR controller hotkey (vr_hotkey): our own action set next to the game's (src/vr_input.h)
 // Rule: any internal failure logs and passes through. The game's calls are always forwarded and their results returned
 // unchanged; capture work in xrEndFrame is wrapped in SEH so a fault disables capture instead of crashing the game.
 #include <windows.h>
@@ -47,6 +49,7 @@
 #include "overlay.h"
 #include "recorder.h"
 #include "shared_status.h"
+#include "vr_input.h"
 #include "yt_layout.h"
 
 #define LAYER_NAME "XR_APILAYER_JRDEVO_eye_capture"
@@ -87,6 +90,13 @@ struct InstanceData {
     PFN_xrDestroySpace DestroySpace = nullptr;
     PFN_xrGetSystemProperties GetSystemProperties = nullptr;
     PFN_xrLocateSpace LocateSpace = nullptr;           // record_overlays: overlay layer spaces -> the projection space
+    // the VR controller hotkey (src/vr_input.h): the game's input calls are forwarded through VrInput
+    PFN_xrCreateActionSet CreateActionSet = nullptr;
+    PFN_xrCreateAction CreateAction = nullptr;
+    PFN_xrSuggestInteractionProfileBindings SuggestInteractionProfileBindings = nullptr;
+    PFN_xrAttachSessionActionSets AttachSessionActionSets = nullptr;
+    PFN_xrSyncActions SyncActions = nullptr;
+    std::unique_ptr<VrInput> vr;                       // vr_hotkey != off
     std::string runtimeName;
     std::string appName;
 };
@@ -130,6 +140,8 @@ struct SessionData {
     IndicatorTracker indTracker;
     std::unique_ptr<VrIndicator> ind;
     ComPtr<ID3D11Device> dev11;          // D3D11 sessions: the game's device (indicator uploads)
+    ComPtr<ID3D12Device> dev12;          // D3D12 sessions: the game's device + queue (indicator uploads)
+    ComPtr<ID3D12CommandQueue> queue12;
     uint32_t maxLayers = 16;             // XrSystemGraphicsProperties::maxLayerCount
     bool indOff = false, loggedIndAppend = false, loggedIndLimit = false;
     // record_overlays: overlay layers already logged this session (one line per layer signature, capped)
@@ -148,6 +160,7 @@ auto& g_swapchains = *new std::unordered_map<XrSwapchain, std::unique_ptr<Swapch
 // above us, e.g. the DLAA injector's head-locked panel space), with their poseInReferenceSpace.
 struct ViewSpaceData { XrSession session; InstanceData* inst; float q[4], p[3]; };
 auto& g_viewSpaces = *new std::unordered_map<XrSpace, ViewSpaceData>;
+auto& g_actionSetInst = *new std::unordered_map<XrActionSet, InstanceData*>;   // the game's action sets -> their instance
 SessionData* g_active = nullptr;              // newest capture-capable session (hotkey / tray act on it)
 std::atomic<bool> g_startRequested{false};
 std::atomic<uint64_t> g_faults{0};
@@ -279,7 +292,7 @@ void StartRecording(SessionData* sd, const EyeView& L, const EyeView& R) {
     if (sd->inst->GetDisplayRefreshRateFB) sd->inst->GetDisplayRefreshRateFB(sd->handle, &refresh);
     const unsigned fps = PickFps(g_cfg, sd->period.periodNs, sd->period.samples, refresh, "XR_FB_display_refresh_rate", &fpsFrom);
 
-    const std::wstring name = RecordingFileName(g_exeName, g_cfg.dome.projection);
+    const std::wstring name = RecordingFileName(g_exeName, g_cfg.dome.projection, g_cfg.outputDir);
     SHCreateDirectoryExW(nullptr, g_cfg.outputDir.c_str(), nullptr);
 
     RecorderSettings rs;
@@ -814,7 +827,7 @@ bool IndicatorImpl(SessionData* sd, const XrFrameEndInfo* info, XrCompositionLay
             if (IsSrgbDxgi((DXGI_FORMAT)s->info.format)) anySrgb = true;
         }
         if (any) srgb = anySrgb;
-        sd->ind = std::make_unique<VrIndicator>(sd->indCfg, sd->api, sd->dev11.Get(), srgb);
+        sd->ind = std::make_unique<VrIndicator>(sd->indCfg, sd->api, sd->dev11.Get(), sd->dev12.Get(), sd->queue12.Get(), srgb);
     }
     if (sd->ind->Disabled()) { sd->indOff = true; return false; }
     if (!sd->ind->Frame(sd->handle, IndDispatch(sd->inst), show, now, quad)) {
@@ -850,6 +863,7 @@ bool LayerError(XrResult r) {
 
 XrResult XRAPI_CALL Hook_EndFrame(XrSession session, const XrFrameEndInfo* info) {
     PFN_xrEndFrame next = nullptr;
+    VrInput* vr = nullptr;
     // Indicator: the game's layer pointers are forwarded untouched, plus our quad last. Both arrays live on this stack
     // frame for the whole call to the next layer.
     XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD};
@@ -861,6 +875,7 @@ XrResult XRAPI_CALL Hook_EndFrame(XrSession session, const XrFrameEndInfo* info)
         SessionData* sd = FindSession(session);
         if (sd) {
             next = sd->inst->EndFrame;
+            if (sd->armed) vr = sd->inst->vr.get();
             if (sd->src && sd->rec && !sd->faulted && info) {
                 bool ok = false;
                 try { ok = CaptureSafe(sd, info); } catch (...) { ok = false; }
@@ -893,6 +908,10 @@ XrResult XRAPI_CALL Hook_EndFrame(XrSession session, const XrFrameEndInfo* info)
         }
     }
     if (!next) return XR_ERROR_HANDLE_INVALID;
+    // VR controller hotkey: a game without input of its own gets our action set attached + synced here (vr_input.h)
+    if (vr) {
+        try { vr->EndFrame(session); } catch (...) { LOGE("vr hotkey: EndFrame bookkeeping failed (ignored)"); }
+    }
     if (!appended) return next(session, info);
     const XrResult r = next(session, &withInd);
     if (XR_SUCCEEDED(r) || !LayerError(r)) return r;
@@ -1119,6 +1138,8 @@ XrResult XRAPI_CALL Hook_CreateSession(XrInstance instance, const XrSessionCreat
             if (p->type == XR_TYPE_GRAPHICS_BINDING_D3D12_KHR) {
                 sd->api = GfxApi::D3D12;
                 auto* b = reinterpret_cast<const XrGraphicsBindingD3D12KHR*>(p);
+                sd->dev12 = b->device;
+                sd->queue12 = b->queue;
                 sd->src = CreateD3D12FrameSource(b->device, b->queue);
                 break;
             }
@@ -1168,11 +1189,12 @@ XrResult XRAPI_CALL Hook_CreateSession(XrInstance instance, const XrSessionCreat
                 LOGI("indicator: on (vr_indicator = 1) -- dot in the headset while recording%s at (%.2f, %.2f, %.2f) m view "
                      "space, %.3f m, opacity %.2f%s", sd->indCfg.live && sd->live ? " and (violet) while a live viewer receives frames" : "",
                      sd->indCfg.x, sd->indCfg.y, sd->indCfg.z, sd->indCfg.size, sd->indCfg.opacity,
-                     sd->api == GfxApi::D3D11 ? "" : " (D3D11 only for now)");
+                     sd->api == GfxApi::D3D11 || sd->api == GfxApi::D3D12 ? "" : " (D3D11 / D3D12 only)");
             else if (sd->rec)
                 LOGI("indicator: off (vr_indicator = 0)");
         }
         armedSession = sd->armed;
+        if (id->vr) id->vr->SessionCreated(*session, sd->armed && sd->rec != nullptr);
         {
             std::lock_guard<std::mutex> lk(g_lock);
             SessionData* raw = sd.get();
@@ -1220,6 +1242,7 @@ XrResult XRAPI_CALL Hook_DestroySession(XrSession session) {
         }
     }
     if (sd) {
+        if (sd->inst->vr) sd->inst->vr->SessionDestroyed(session);
         if (sd->ind) {   // our swapchain / space go first, through the next layer, before the session is destroyed
             try { sd->ind->Destroy(IndDispatch(sd->inst)); } catch (...) { LOGE("indicator: cleanup failed (ignored)"); }
             sd->ind.reset();
@@ -1267,6 +1290,8 @@ XrResult XRAPI_CALL Hook_DestroyInstance(XrInstance instance) {
         }
         for (auto v = g_viewSpaces.begin(); v != g_viewSpaces.end();)
             v = v->second.inst == id.get() ? g_viewSpaces.erase(v) : std::next(v);
+        for (auto a = g_actionSetInst.begin(); a != g_actionSetInst.end();)
+            a = a->second == id.get() ? g_actionSetInst.erase(a) : std::next(a);
         last = g_instances.empty();
     }
     for (auto& sd : orphans) {
@@ -1312,6 +1337,113 @@ void RequestStop() {
     if (g_active && g_active->rec) g_active->rec->Stop();
 }
 
+// ------------------------------------------------------------------------------------------------ VR controller hotkey
+
+// The combination was held in session s (vr_input.cpp, on the game's input thread, no lock held): start or stop like the
+// keyboard hotkey. With the control thread (the normal case) the request goes through it, so the beeps, the "no frame
+// within 6 s" watchdog and the tray status behave exactly as for the hotkey; without one (XR_EYE_CAPTURE_TRAY_IPC=0) it is
+// applied here. Returns 1 = start requested, 2 = stop requested, 0 = nothing (for the haptic pulse).
+int VrActivate(XrSession s) {
+    bool active = false, stopping = false;
+    {
+        std::lock_guard<std::mutex> lk(g_lock);
+        SessionData* sd = FindSession(s);
+        if (!sd || !sd->armed || !sd->rec || !sd->src || sd != g_active) return 0;
+        const RecState st = sd->rec->State();
+        active = st == RecState::Starting || st == RecState::Recording || g_startRequested.load();
+        stopping = st == RecState::Stopping;
+    }
+    if (ControlRequest(active ? 3 : 2, "VR controller hotkey")) return active ? 2 : stopping ? 0 : 1;
+    if (active) { RequestStop(); return 2; }
+    if (stopping) return 0;
+    RequestStart();
+    return 1;
+}
+
+InstanceData* InstanceOrAny(XrInstance i) {   // under g_lock
+    InstanceData* id = FindInstance(i);
+    if (!id && !g_instances.empty()) id = g_instances.begin()->second.get();
+    return id;
+}
+
+XrResult XRAPI_CALL Hook_CreateActionSet(XrInstance instance, const XrActionSetCreateInfo* ci, XrActionSet* set) {
+    InstanceData* id = nullptr;
+    {
+        std::lock_guard<std::mutex> lk(g_lock);
+        id = InstanceOrAny(instance);
+    }
+    if (!id || !id->CreateActionSet) return XR_ERROR_HANDLE_INVALID;
+    const XrResult r = id->CreateActionSet(instance, ci, set);
+    if (XR_SUCCEEDED(r) && set && ci) {
+        try {
+            {
+                std::lock_guard<std::mutex> lk(g_lock);
+                g_actionSetInst[*set] = id;
+            }
+            if (id->vr) id->vr->ActionSetCreated(*set, ci);
+            LOGI("input: the game created action set '%s' ('%s', priority %u)", ci->actionSetName, ci->localizedActionSetName, ci->priority);
+        } catch (...) {}
+    }
+    return r;
+}
+
+XrResult XRAPI_CALL Hook_CreateAction(XrActionSet set, const XrActionCreateInfo* ci, XrAction* action) {
+    InstanceData* id = nullptr;
+    {
+        std::lock_guard<std::mutex> lk(g_lock);
+        auto it = g_actionSetInst.find(set);
+        id = it != g_actionSetInst.end() ? it->second : (g_instances.empty() ? nullptr : g_instances.begin()->second.get());
+    }
+    if (!id || !id->CreateAction) return XR_ERROR_HANDLE_INVALID;
+    const XrResult r = id->CreateAction(set, ci, action);
+    if (XR_SUCCEEDED(r) && action && id->vr) {
+        try { id->vr->ActionCreated(*action, set); } catch (...) {}
+    }
+    return r;
+}
+
+XrResult XRAPI_CALL Hook_SuggestInteractionProfileBindings(XrInstance instance, const XrInteractionProfileSuggestedBinding* sb) {
+    InstanceData* id = nullptr;
+    {
+        std::lock_guard<std::mutex> lk(g_lock);
+        id = InstanceOrAny(instance);
+    }
+    if (!id || !id->SuggestInteractionProfileBindings) return XR_ERROR_HANDLE_INVALID;
+    const XrResult r = id->SuggestInteractionProfileBindings(instance, sb);   // forwarded untouched (vr_input.h)
+    if (XR_SUCCEEDED(r) && sb && id->vr) {
+        try { id->vr->Suggested(sb); } catch (...) {}
+    }
+    return r;
+}
+
+XrResult XRAPI_CALL Hook_AttachSessionActionSets(XrSession session, const XrSessionActionSetsAttachInfo* ai) {
+    InstanceData* id = nullptr;
+    {
+        std::lock_guard<std::mutex> lk(g_lock);
+        SessionData* sd = FindSession(session);
+        id = sd ? sd->inst : (g_instances.empty() ? nullptr : g_instances.begin()->second.get());
+    }
+    if (!id || !id->AttachSessionActionSets) return XR_ERROR_HANDLE_INVALID;
+    if (id->vr) {
+        try { return id->vr->Attach(session, ai); } catch (...) { LOGE("vr hotkey: attach bookkeeping failed -- forwarding as is"); }
+    }
+    return id->AttachSessionActionSets(session, ai);
+}
+
+XrResult XRAPI_CALL Hook_SyncActions(XrSession session, const XrActionsSyncInfo* si) {
+    InstanceData* id = nullptr;
+    {
+        std::lock_guard<std::mutex> lk(g_lock);
+        SessionData* sd = FindSession(session);
+        id = sd ? sd->inst : (g_instances.empty() ? nullptr : g_instances.begin()->second.get());
+    }
+    if (!id || !id->SyncActions) return XR_ERROR_HANDLE_INVALID;
+    if (id->vr) {
+        try { return id->vr->Sync(session, si); } catch (...) { LOGE("vr hotkey: sync bookkeeping failed -- forwarding as is"); }
+    }
+    return id->SyncActions(session, si);
+}
+
 // ------------------------------------------------------------------------------------------------ dispatch
 
 XrResult XRAPI_CALL Layer_GetInstanceProcAddr(XrInstance instance, const char* name, PFN_xrVoidFunction* function);
@@ -1322,6 +1454,8 @@ const HookEntry kHooks[] = {
     HOOK(DestroyInstance), HOOK(CreateSession), HOOK(DestroySession), HOOK(CreateSwapchain), HOOK(DestroySwapchain),
     HOOK(EnumerateSwapchainImages), HOOK(AcquireSwapchainImage), HOOK(ReleaseSwapchainImage), HOOK(EndFrame),
     HOOK(CreateReferenceSpace), HOOK(DestroySpace),
+    HOOK(CreateActionSet), HOOK(CreateAction), HOOK(SuggestInteractionProfileBindings), HOOK(AttachSessionActionSets),
+    HOOK(SyncActions),
 };
 
 XrResult XRAPI_CALL Layer_GetInstanceProcAddr(XrInstance instance, const char* name, PFN_xrVoidFunction* function) {
@@ -1391,6 +1525,28 @@ XrResult XRAPI_CALL Layer_CreateApiLayerInstance(const XrInstanceCreateInfo* inf
         RESOLVE(ReleaseSwapchainImage); RESOLVE(EndFrame); RESOLVE(GetInstanceProperties);
         RESOLVE(EnumerateSwapchainFormats); RESOLVE(WaitSwapchainImage); RESOLVE(CreateReferenceSpace); RESOLVE(DestroySpace);
         RESOLVE(GetSystemProperties); RESOLVE(LocateSpace);
+        RESOLVE(CreateActionSet); RESOLVE(CreateAction); RESOLVE(SuggestInteractionProfileBindings);
+        RESOLVE(AttachSessionActionSets); RESOLVE(SyncActions);
+        if (g_cfg.vrHotkey.enabled) {
+            VrInputDispatch vd;
+            vd.CreateActionSet = id->CreateActionSet;
+            vd.CreateAction = id->CreateAction;
+            vd.SuggestInteractionProfileBindings = id->SuggestInteractionProfileBindings;
+            vd.AttachSessionActionSets = id->AttachSessionActionSets;
+            vd.SyncActions = id->SyncActions;
+#define RESOLVE_VD(fn) id->nextGipa(*instance, "xr" #fn, reinterpret_cast<PFN_xrVoidFunction*>(&vd.fn))
+            RESOLVE_VD(StringToPath); RESOLVE_VD(PathToString); RESOLVE_VD(GetActionStateBoolean);
+            RESOLVE_VD(ApplyHapticFeedback); RESOLVE_VD(GetCurrentInteractionProfile);
+#undef RESOLVE_VD
+            id->vr = std::make_unique<VrInput>(*instance, vd, g_cfg.vrHotkey, (double)g_cfg.vrHotkeyHoldS, VrActivate);
+            if (id->vr->Enabled())
+                LOGI("vr hotkey: %s held %.1f s starts / stops a recording (vr_hotkey; bindings are added when the game attaches "
+                     "its input)", elog::Narrow(g_cfg.vrHotkey.text).c_str(), g_cfg.vrHotkeyHoldS);
+            else
+                id->vr.reset();
+        } else {
+            LOGI("vr hotkey: off (vr_hotkey = off) -- the game's input is not touched");
+        }
 #undef RESOLVE
         std::string exts;
         bool fb = false;
