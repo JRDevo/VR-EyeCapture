@@ -5,7 +5,13 @@
 //
 //   layer_e2e [--api d3d11|d3d12] [--layout two|array|wide|msaa] [--eye 1920x1080] [--seconds 6] [--record 4]
 //             [--out-dir dir] [--expect-dormant] [--jitter] [--hud] [--overlays] [--stale-pose] [--opaque-projection]
-//             [--no-output]
+//             [--no-output] [--input app|none]
+// --input app (the VR controller hotkey test, tests/run_e2e.ps1): the app has its OWN controller input like a game: action
+// set "app" (priority 1) with "app_select" (right trigger on touch_controller, select on simple_controller) and
+// "app_stick" (left stick click, touch_controller only), suggested for both profiles, attached ONCE before the frame loop,
+// synced every frame (xrSyncActions with only its own set); every input call must succeed. Prints
+// "E2E_INPUT app_select presses <n> (true on <k> syncs), app_stick presses <m>" (rising edges the app saw). --input none:
+// no input calls at all (the layer attaches its own action set). The mock's pressed inputs come from EYECAP_MOCK_INPUT.
 // --no-output (with --record 0): no MP4 is expected; exit 0 = the frame loop completed (tests/run_live.ps1: the live
 // share consumer reads the frames meanwhile).
 // --overlays (record_overlays test; tests/run_e2e.ps1 has the expected pixel positions): every frame also submits, AFTER
@@ -106,6 +112,7 @@ int main(int argc, char** argv) {
     unsigned eyeW = 1920, eyeH = 1080;
     double seconds = 6, record = 4;
     bool expectDormant = false, noOutput = false, jitter = false, eyeSet = false, overlays = false, stalePose = false, opaqueProj = false, hud = false;
+    std::string input = "none";
     std::wstring outDir = ExeDir() + L"\\e2e_out";
     for (int i = 1; i < argc; ++i) {
         std::string k = argv[i];
@@ -123,6 +130,7 @@ int main(int argc, char** argv) {
         else if (k == "--out-dir") outDir = Widen(next());
         else if (k == "--expect-dormant") expectDormant = true;
         else if (k == "--no-output") noOutput = true;
+        else if (k == "--input") input = next();
         else { printf("unknown argument %s\n", k.c_str()); return 2; }
     }
     const bool d3d12 = api == "d3d12";
@@ -231,6 +239,45 @@ int main(int argc, char** argv) {
     rsi.poseInReferenceSpace.orientation.w = 1;
     XrSpace space = XR_NULL_HANDLE;
     CHECK(xrCreateReferenceSpace(session, &rsi, &space));
+
+    // ---- --input app: the app's own controller input (one action set, attached once) ----
+    XrActionSet appSet = XR_NULL_HANDLE;
+    XrAction appSelect = XR_NULL_HANDLE, appStick = XR_NULL_HANDLE;
+    if (input == "app") {
+        XrActionSetCreateInfo asi{XR_TYPE_ACTION_SET_CREATE_INFO};
+        strcpy_s(asi.actionSetName, "app");
+        strcpy_s(asi.localizedActionSetName, "App controls");
+        asi.priority = 1;
+        CHECK(xrCreateActionSet(inst, &asi, &appSet));
+        XrActionCreateInfo aci{XR_TYPE_ACTION_CREATE_INFO};
+        aci.actionType = XR_ACTION_TYPE_BOOLEAN_INPUT;
+        strcpy_s(aci.actionName, "app_select");
+        strcpy_s(aci.localizedActionName, "Select");
+        CHECK(xrCreateAction(appSet, &aci, &appSelect));
+        strcpy_s(aci.actionName, "app_stick");
+        strcpy_s(aci.localizedActionName, "Stick click");
+        CHECK(xrCreateAction(appSet, &aci, &appStick));
+        auto path = [&](const char* t) { XrPath p = XR_NULL_PATH; xrStringToPath(inst, t, &p); return p; };
+        XrActionSuggestedBinding touch[] = {{appSelect, path("/user/hand/right/input/trigger/value")},
+                                            {appStick, path("/user/hand/left/input/thumbstick/click")}};
+        XrInteractionProfileSuggestedBinding sb{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+        sb.interactionProfile = path("/interaction_profiles/oculus/touch_controller");
+        sb.countSuggestedBindings = 2;
+        sb.suggestedBindings = touch;
+        CHECK(xrSuggestInteractionProfileBindings(inst, &sb));
+        XrActionSuggestedBinding simple[] = {{appSelect, path("/user/hand/right/input/select/click")}};
+        sb.interactionProfile = path("/interaction_profiles/khr/simple_controller");
+        sb.countSuggestedBindings = 1;
+        sb.suggestedBindings = simple;
+        CHECK(xrSuggestInteractionProfileBindings(inst, &sb));
+        XrSessionActionSetsAttachInfo at{XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
+        at.countActionSets = 1;
+        at.actionSets = &appSet;
+        CHECK(xrAttachSessionActionSets(session, &at));
+        printf("E2E_INPUT_APP=1 (action set 'app' priority 1: app_select, app_stick; attached once)\n");
+    }
+    uint32_t selPresses = 0, selTrue = 0, stickPresses = 0;
+    bool selPrev = false, stickPrev = false;
 
     // ---- jitter scene renderer (D3D11) ----
     ComPtr<ID3D11VertexShader> sceneVs;
@@ -444,6 +491,24 @@ int main(int argc, char** argv) {
             XrViewState vs{XR_TYPE_VIEW_STATE};
             uint32_t nv = 0;
             CHECK(xrLocateViews(session, &li, &vs, 2, &nv, located));
+        }
+        if (appSet) {   // the app's own input, like a game: one sync per frame with its own set only
+            XrActiveActionSet as{appSet, XR_NULL_PATH};
+            XrActionsSyncInfo si{XR_TYPE_ACTIONS_SYNC_INFO};
+            si.countActiveActionSets = 1;
+            si.activeActionSets = &as;
+            CHECK(xrSyncActions(session, &si));
+            XrActionStateGetInfo gi{XR_TYPE_ACTION_STATE_GET_INFO};
+            XrActionStateBoolean st{XR_TYPE_ACTION_STATE_BOOLEAN};
+            gi.action = appSelect;
+            CHECK(xrGetActionStateBoolean(session, &gi, &st));
+            if (st.currentState) ++selTrue;
+            if (st.currentState && !selPrev) ++selPresses;
+            selPrev = st.currentState != XR_FALSE;
+            gi.action = appStick;
+            CHECK(xrGetActionStateBoolean(session, &gi, &st));
+            if (st.currentState && !stickPrev) ++stickPresses;
+            stickPrev = st.currentState != XR_FALSE;
         }
         XrFrameBeginInfo fbi{XR_TYPE_FRAME_BEGIN_INFO};
         CHECK(xrBeginFrame(session, &fbi));
@@ -710,6 +775,7 @@ int main(int argc, char** argv) {
            efSlow, frames, efSlowLate);
     printf("E2E_ADDRESS_SPACE max used %.1f MB of %.0f MB (%u-bit process)\n", vaMax / 1048576.0, vaTotal / 1048576.0,
            (unsigned)(sizeof(void*) * 8));
+    if (appSet) printf("E2E_INPUT app_select presses %u (true on %u syncs), app_stick presses %u\n", selPresses, selTrue, stickPresses);
 
     // ---- teardown (the layer finalizes in xrDestroySession if still recording) ----
     if (d3d12) { queue->Signal(fence.Get(), ++fenceVal); fence->SetEventOnCompletion(fenceVal, evt); WaitForSingleObject(evt, 5000); }

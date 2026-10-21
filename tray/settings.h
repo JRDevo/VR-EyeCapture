@@ -138,6 +138,7 @@ enum : int {
     , ID_UPDATENOW              // "Check now" button in the Advanced group: a manual update check (not a config key; appended)
     , ID_UPDATELINK             // SysLink on the Advanced group's top edge: "VR EyeCapture vX is available -- Update now" (hidden until available; appended)
     , ID_TAG3DMP4               // "Write the 3D tag into the MP4" check in the Export group, bound to [capture] tag_3d (appended)
+    , ID_VRHOTKEY               // "Controllers:" drop-down on the Hotkey row, bound to [capture] vr_hotkey (appended)
 };
 // ID_QSTART reads "Start" and acts on every selected item of ID_QLIST (a multi-select list box: LB_SETSEL / LB_GETSELITEMS).
 extern const wchar_t* const kWindowTitle;

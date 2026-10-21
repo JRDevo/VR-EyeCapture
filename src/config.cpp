@@ -239,6 +239,11 @@ KeyResult ApplyKey(Config& c, const std::wstring& key, std::wstring val) {
     if (key == L"hotkey") {
         Hotkey h;
         if (ParseHotkey(val, h)) c.hotkey = h; else ok = false;
+    } else if (key == L"vr_hotkey") {
+        VrHotkey h;
+        if (ParseVrHotkey(val, h)) c.vrHotkey = h; else ok = false;
+    } else if (key == L"vr_hotkey_hold_s") {
+        if (ParseFloat(val, fl) && fl >= 0.2f && fl <= 10.0f) c.vrHotkeyHoldS = fl; else ok = false;
     } else if (key == L"output_dir") {
         while (!val.empty() && (val.back() == L'\\' || val.back() == L'/')) val.pop_back();
         if (!val.empty()) c.outputDir = val;

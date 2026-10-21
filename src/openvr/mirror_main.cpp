@@ -309,7 +309,7 @@ void StartRecording(EyeView L, EyeView R) {
     const unsigned fps = PickFps(g.cfg, 0, 0, g.hz, "Prop_DisplayFrequency_Float", &from);
     SHCreateDirectoryExW(nullptr, g.cfg.outputDir.c_str(), nullptr);
     RecorderSettings rs;
-    rs.path = g.cfg.outputDir + L"\\" + RecordingFileName(g.exeName, DomeProjection::Flat);
+    rs.path = g.cfg.outputDir + L"\\" + RecordingFileName(g.exeName, DomeProjection::Flat, g.cfg.outputDir);
     FillRecorderSettings(g.cfg, L, R, fps, rs);
     const UINT W = L.w + R.w, H = L.h > R.h ? L.h : R.h;
     LOGI("record: start %s | SteamVR mirror (quick mode) | %ux%u SBS (eyes %ux%u + %ux%u) | %u fps from %s | %s",

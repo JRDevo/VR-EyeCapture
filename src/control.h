@@ -34,6 +34,12 @@ void ControlStop();   // joins (bounded wait)
 // hands the new value over here. Any thread; logged when it changes.
 void ControlSetBeeps(bool on);
 
+// A request from another input of this process (the VR controller hotkey, src/vr_input.h): 1 toggle, 2 start, 3 stop,
+// handled by the control thread at its next poll (<= 20 ms) exactly like a tray command -- same beeps, same "no frame
+// within 6 s" watchdog -- but without the hotkey's status-owner rule (only the game in front gets controller input).
+// `source` is a string literal (logged). false = no control thread runs (the caller applies the request itself).
+bool ControlRequest(int request, const char* source);
+
 // Publishes the result of a finalized recording ("saved <file>" / failure message, file, counters) to the tray's status
 // block immediately and synchronously, from any thread -- the 250 ms publish loop may already be gone (game quit right after
 // the recording ended). Keeps ownership / liveness untouched; ownerPid / state are only changed by the loop and at shutdown,

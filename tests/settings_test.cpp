@@ -919,6 +919,20 @@ int TestDrive(DWORD pid, bool leaveSlider) {
               "Include overlay layers check shows record_overlays = 1 from the file");
         SendMessageW(ovc, BM_SETCHECK, BST_UNCHECKED, 0);
     }
+    // "Controllers:" drop-down on the Hotkey row (vr_hotkey): 5 items, loads thumbsticks as "Both stick clicks", right of the hotkey edit
+    {
+        const HWND vh = GetDlgItem(d, settings::ID_VRHOTKEY), he = GetDlgItem(d, settings::ID_HOTKEY);
+        wchar_t txt[96] = L"";
+        const LRESULT vsel = vh ? SendMessageW(vh, CB_GETCURSEL, 0, 0) : -1;
+        if (vsel >= 0) SendMessageW(vh, CB_GETLBTEXT, (WPARAM)vsel, (LPARAM)txt);
+        RECT rv{}, rh{};
+        if (vh) GetWindowRect(vh, &rv);
+        if (he) GetWindowRect(he, &rh);
+        printf("    Controllers drop-down: '%s', %d items\n", N(txt).c_str(), vh ? (int)SendMessageW(vh, CB_GETCOUNT, 0, 0) : -1);
+        Check(vh && IsWindowVisible(vh) && SendMessageW(vh, CB_GETCOUNT, 0, 0) == 5 && wcscmp(txt, L"Both stick clicks") == 0 &&
+                  rv.left > rh.right && rv.top < rh.bottom && rv.bottom > rh.top,
+              "Controllers drop-down (vr_hotkey) shows 'Both stick clicks' on the Hotkey row, right of the hotkey field");
+    }
     // "YouTube output" drop-down: item 2 = "3D MKV and 8K 3D MKV" (post_mkv = 1 and post_yt8k = 1; run_settings.ps1 checks the saved file)
     // "8K bitrate" drop-down (yt8k_bitrate_mbps): greyed while YouTube output is "3D MKV" (loaded), enabled with 8K; loaded 150 -> pick 200
     const HWND y8 = GetDlgItem(d, settings::ID_YT8KBITRATE);

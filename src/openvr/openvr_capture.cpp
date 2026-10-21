@@ -269,7 +269,7 @@ void StartRecording(const EyeView& L, const EyeView& R, bool srgb) {
     else if (g.cfg.gamma == GammaMode::Linear) srgb = false;
     const char* fpsFrom = "config";
     const unsigned fps = PickFps(g.cfg, g.period.periodNs, g.period.samples, g.displayHz, "Prop_DisplayFrequency_Float", &fpsFrom);
-    const std::wstring name = RecordingFileName(g.exeName, g.cfg.dome.projection);
+    const std::wstring name = RecordingFileName(g.exeName, g.cfg.dome.projection, g.cfg.outputDir);
     SHCreateDirectoryExW(nullptr, g.cfg.outputDir.c_str(), nullptr);
     RecorderSettings rs;
     rs.path = g.cfg.outputDir + L"\\" + name;

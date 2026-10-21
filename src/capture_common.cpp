@@ -4,6 +4,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <mutex>
+#include <vector>
 #include "control.h"
 #include "log.h"
 #include "yt_layout.h"
@@ -55,14 +57,16 @@ void LogCaptureConfig(const char* folderWhat, const std::wstring& folder, const 
     if (c.qualityVsSpeed >= 0) snprintf(qvsText, sizeof(qvsText), "%d", c.qualityVsSpeed);
     else snprintf(qvsText, sizeof(qvsText), "auto");
     LOGI("%s %s | config %s | output %s | hotkey %s | codec %s %u Mb/s | rate_control %s | qp %u | "
-         "quality_vs_speed %s | max_width %u | max_fps %u | constant_frame_rate %d | audio %s%s%s | gamma %s | beeps %d",
+         "quality_vs_speed %s | max_width %u | max_fps %u | constant_frame_rate %d | audio %s%s%s | gamma %s | beeps %d | "
+         "vr_hotkey %s (hold %.1f s; OpenXR games)",
          folderWhat, elog::Narrow(folder).c_str(), c.loadedFrom.empty() ? "(defaults)" : elog::Narrow(c.loadedFrom).c_str(),
          elog::Narrow(c.outputDir).c_str(), elog::Narrow(c.hotkey.text).c_str(), VideoCodecName(c.codec),
          c.bitrateMbps ? c.bitrateMbps : VideoCodecDefaultMbps(c.codec), RateControlKey(c.rateControl), c.qp,
          qvsText, c.maxWidth, c.maxFps, c.constantFrameRate ? 1 : 0,
          c.audioEnabled ? "on" : "off", c.audioDevice.empty() ? "" : " device~",
          elog::Narrow(c.audioDevice).c_str(),
-         c.gamma == GammaMode::Auto ? "auto" : c.gamma == GammaMode::Srgb ? "srgb" : "linear", c.beeps ? 1 : 0);
+         c.gamma == GammaMode::Auto ? "auto" : c.gamma == GammaMode::Srgb ? "srgb" : "linear", c.beeps ? 1 : 0,
+         elog::Narrow(c.vrHotkey.text).c_str(), c.vrHotkeyHoldS);
     if (c.head.Enabled())
         LOGI("head smoothing: head_smoothing %.2f (time constant %.3f s) | head_follow_deg %.1f | roll_lock %d | "
              "output_fov_scale %.2f | edge_guard %d",
@@ -112,13 +116,41 @@ void PeriodEstimator::Add(int64_t tNs) {
     last = tNs;
 }
 
-std::wstring RecordingFileName(const std::wstring& exeName, DomeProjection p) {
+namespace {
+bool AnyFileLike(const std::wstring& pattern) {   // FindFirstFile pattern matches at least one entry
+    WIN32_FIND_DATAW fd;
+    const HANDLE h = FindFirstFileW(pattern.c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    FindClose(h);
+    return true;
+}
+} // namespace
+
+std::wstring RecordingFileName(const std::wstring& exeName, DomeProjection p, const std::wstring& dir) {
     SYSTEMTIME st;
     GetLocalTime(&st);
-    wchar_t name[128];
-    // <exe>_<stamp>_SBS.mp4 (flat), _VR180.mp4 / _VR360.mp4 (dome)
-    swprintf_s(name, L"%s_%04u%02u%02u_%02u%02u%02u_%hs.mp4", exeName.c_str(), st.wYear, st.wMonth, st.wDay, st.wHour,
-               st.wMinute, st.wSecond, DomeFileTag(p));
+    wchar_t stamp[160];
+    swprintf_s(stamp, L"%s_%04u%02u%02u_%02u%02u%02u", exeName.c_str(), st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute,
+               st.wSecond);
+    // names handed out by this process (a recording's file appears only once its worker opened it; the stop / start of two
+    // quick hotkey presses can fall into one second -- 2026-10-21 Metro Awakening: the second file replaced the first)
+    static std::mutex& m = *new std::mutex;
+    static std::vector<std::wstring>& used = *new std::vector<std::wstring>;
+    std::lock_guard<std::mutex> lk(m);
+    std::wstring name;
+    for (int n = 1; n < 10000; ++n) {
+        wchar_t stem[192];
+        if (n == 1) swprintf_s(stem, L"%s_%hs", stamp, DomeFileTag(p));
+        else swprintf_s(stem, L"%s_%d_%hs", stamp, n, DomeFileTag(p));
+        name = std::wstring(stem) + L".mp4";
+        bool taken = false;
+        for (const std::wstring& u : used) taken = taken || _wcsicmp(u.c_str(), name.c_str()) == 0;
+        // the MP4 itself, or what the tray made of it (<stem>.mkv / .json, <stem>_FLAT.mp4, <stem>_YT8K*.mkv)
+        if (!taken && !dir.empty()) taken = AnyFileLike(dir + L"\\" + stem + L".*") || AnyFileLike(dir + L"\\" + stem + L"_*");
+        if (!taken) break;
+    }
+    used.push_back(name);
+    if (used.size() > 256) used.erase(used.begin());
     return name;
 }
 

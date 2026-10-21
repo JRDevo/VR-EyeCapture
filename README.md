@@ -51,6 +51,8 @@ games with Direct3D 11 or Direct3D 12.
 - **One hotkey** — default `ScrollLock`, or the tray icon, starts and stops a recording; beeps in the headset confirm
   (`beeps = 0` turns them off, e.g. when they end up in the recorded audio).
   It can be any key, a mouse side button, an Xbox controller button or a wheel / joystick button (or several of them).
+- **VR controller hotkey** — in OpenXR games, hold **both thumbstick clicks for 1 s** to start / stop (the controllers
+  vibrate); works in games without keyboard support, the game keeps its own buttons (`vr_hotkey`).
 - **Tray app with a main window** — every option has a help text, no `config.ini` editing needed.
 - **One-click registration** — the tray registers the layer for you (one UAC prompt); **Register** / **Unregister** are in the app window (Advanced > Tools).
 - **Tray menu** — short, in the app's light / dark theme: Start / Stop recording, Open VR EyeCapture, Open captures folder,
@@ -163,7 +165,7 @@ Point at any setting and the **Description** box at the bottom explains it. **Sa
 
 | Part | What is in it |
 |---|---|
-| **Recording** | **Hotkey**: the key that starts / stops a recording. **Capture...** records a key, mouse button, Xbox controller button or wheel button for you; **Add...** adds a further one. **Output folder** (**Browse...** picks a folder on any drive; the line below shows that drive's free space, e.g. "E: 812 GB free"). **Audio** (record system audio, and on the same line the **Device** to record; empty = the default playback device). **Overlays**: include overlay layers (menus, mod panels) in the video. **Beeps**: beep in the headset when a recording starts / stops (clear it if the beeps are heard in your recordings). **Updates**: check GitHub for a newer version automatically (see [Updates](#updates)), with a **Check now** button; when one is found, a line at the top of the window offers to update. |
+| **Recording** | **Hotkey**: the key that starts / stops a recording; on the same line **Controllers**: the VR controller buttons that do the same when held together for 1 s (Both stick clicks, X + A, Y + B, Menu + right stick click, Off; a combination set in config.ini shows as Custom). **Capture...** records a key, mouse button, Xbox controller button or wheel button for you; **Add...** adds a further one. **Output folder** (**Browse...** picks a folder on any drive; the line below shows that drive's free space, e.g. "E: 812 GB free"). **Audio** (record system audio, and on the same line the **Device** to record; empty = the default playback device). **Overlays**: include overlay layers (menus, mod panels) in the video. **Beeps**: beep in the headset when a recording starts / stops (clear it if the beeps are heard in your recordings). **Updates**: check GitHub for a newer version automatically (see [Updates](#updates)), with a **Check now** button; when one is found, a line at the top of the window offers to update. |
 | **Video** | **Codec** (H.265 / HEVC is recommended; AV1 needs a GPU with an AV1 encoder, e.g. NVIDIA RTX 40 / 50, and falls back to HEVC without one) and, on the same line, the **Encoder preset** (Auto, Fastest, Fast, Balanced, Quality, Best quality: `quality_vs_speed`). **Bitrate**: Default (120 Mbit/s), 150, 200, 250, 300, 350, 400, 450 or 500 Mbit/s, with the file size per hour next to it (250 Mbit/s = about 113 GB per hour; suggested: 250 at 60 fps, 120 at 30 fps, 350 - 500 for VR180 / VR360 on a fast GPU; a value set in config.ini shows as Custom; greyed for Constant QP). **Rate control**: VBR (default), CBR or Constant QP, with the **QP** field (0 = best, 51 = worst; only for Constant QP). **Resolution**: Native, 3840 px (4K), 2560 px (2K) or 1920 px (1080p) -- the width of the whole side-by-side video; smaller = less GPU work while recording and smaller files. **Frame rate limit** in fps (0 = unlimited, the game's own rate) and **Constant frame rate** (for video editors such as DaVinci Resolve). |
 | **Stereo 3D** | **Projection**: flat stereo (side by side, normal) or the experimental VR180 / VR360 dome. **Dome fill** and **Fade after**: dome mode only (greyed while Projection is Flat). **Options**: *Symmetric field of view* lines both eyes up so the 3D is comfortable (leave on), *Swap eyes* if left and right look swapped, *Level horizon (roll lock)* keeps the horizon level. **Head smoothing**: calms small head shakes (0 = off), with the **FOV scale** (field of view scale) next to it: zooms in a little to hide the edges. |
 | **Recording Indicator** | A small red dot that you see in the headset while recording, never in the video. Size, opacity and where it floats. **Violet for OBS**: the dot turns violet while OBS shows the live view and nothing is recorded (`indicator_live`). |
@@ -341,15 +343,30 @@ used for the encoder (measured: about 6 MB more while recording), and the record
 
 
 1. Start `EyeCaptureTray.exe`, then the game in VR as usual (ETS2 / ATS: launch option `-openxr`).
-2. Press **ScrollLock** (the default hotkey) → one beep (880 Hz) in the headset: recording.
+2. Press **ScrollLock** (the default hotkey) → one beep (880 Hz) in the headset: recording. **Or with the VR controllers**
+   (OpenXR games): press both thumbsticks down and hold them for 1 second → a short vibration + the beep. The same again
+   stops it (a longer vibration + two beeps). See "VR controller hotkey" below.
 3. Press **ScrollLock** again → two beeps: stopped, the MP4 is finalized.
    One long low beep = it could not start (see the log).
    The beeps are played by the game's own process, so you hear them wherever you hear the game (they no longer depend on
    the "System sounds" volume in the Windows volume mixer). They play on the Windows default playback device; if that is
    the device being recorded (the usual setup), they are in the recording too: set `beeps = 0` (app window: Recording -> Beeps) to switch them off.
 4. The file lands in `Videos\VR EyeCapture` (or the output folder you set), named
-   `<game exe>_<yyyyMMdd_HHmmss>_SBS.mp4`, e.g. `eurotrucks2_20261009_201512_SBS.mp4` (`_VR180.mp4` / `_VR360.mp4` in
+   `<game exe>_<yyyyMMdd_HHmmss>_SBS.mp4`, e.g. `eurotrucks2_20261009_201512_SBS.mp4` (a second recording within the same
+   second gets `..._2_SBS.mp4`; an existing file is never overwritten) (`_VR180.mp4` / `_VR360.mp4` in
    dome mode, see "VR180 / VR360 dome mode").
+
+**VR controller hotkey** (`vr_hotkey`, OpenXR games, 64- and 32-bit): the layer adds its own small OpenXR action set to
+the game's controller input, so it works in any OpenXR game, also one without keyboard support. Default: hold **both
+thumbstick clicks** for `vr_hotkey_hold_s` = 1.0 s. The game still sees the buttons (our action set gets the same priority
+as the game's set that uses them, never a higher one), and only controller profiles the game itself suggests get our
+bindings, so the runtime keeps picking the profile the game expects. Other combinations: `vr_hotkey = left_menu+right_a`
+(buttons `a`, `b`, `x`, `y`, `menu`, `thumbstick`, `trigger`, `grip`, prefixed `left_` / `right_`, up to 4; on Quest / Oculus
+Touch there is no `right_menu`: that is the system button). `vr_hotkey = off` leaves the game's input completely alone.
+The log shows the bindings (`vr hotkey: binding ... merged into the game's N bindings`), the controller profile the
+runtime uses and every activation (`vr hotkey: thumbsticks held 1.0 s -> start recording`). A game with no controller
+input at all gets our action set after 20 s of frames. Read when the game starts. SteamVR (OpenVR) games: not available
+(use the hotkey or the tray).
 
 Recording also stops and the file is finalized when the game closes its VR session (quitting the game normally).
 If the game crashes or is killed while recording, the MP4 is lost (it is only finalized at the end).
@@ -500,7 +517,7 @@ to the new folder once). Read when a game starts its OpenXR instance (SteamVR ga
 (`output_dir`, `codec`, `bitrate_mbps`, `rate_control`, `qp`, `quality_vs_speed`, `max_fps`, `constant_frame_rate`, `max_width`, `gamma`,
 `swap_eyes`, `record_overlays`, audio, `beeps`, head smoothing / symmetric
 fov, the `[dome]` block, `log_level`) apply to the next recording without restarting the game. Only the keyboard /
-mouse part of `hotkey`, `require_tray` and the `[indicator]` keys are fixed until the game restarts (the `post_*` keys
+mouse part of `hotkey`, `vr_hotkey` / `vr_hotkey_hold_s`, `require_tray` and the `[indicator]` keys are fixed until the game restarts (the `post_*` keys
 and the controller / wheel part of `hotkey` are read by the tray, at once). The log says what changed: `config reloaded for this recording
 from <path>: changed bitrate_mbps=20->60, ...`.
 
@@ -517,7 +534,7 @@ Windows account (one `Run` value, see Install) plus the config.ini key `start_wi
 whose value changed, in place: comments, blank lines, section headers and keys the window does not know stay as they are
 (a missing key is added at the end of its section). A value the parser would reject is refused with a message and nothing
 is written. After a save the tray tooltip says "settings saved" for 5 s and `logs\tray.log` lists the changed keys. The
-change applies to the next recording, no game restart needed; the exceptions are the keyboard / mouse **hotkey**,
+change applies to the next recording, no game restart needed; the exceptions are the keyboard / mouse **hotkey**, the VR **Controllers** combination,
 **require_tray** and the **indicator** settings, which need a game restart (controller / wheel hotkeys apply at once). "Open config.ini" opens the file, "Restore Defaults" fills the window with
 the built-in defaults (nothing is written until Save). Every control has a description: hover it for a tooltip,
 or read the "Description" panel at the bottom of the window (it also follows the keyboard focus). The vr180 / vr360
@@ -525,6 +542,8 @@ projections are labelled "experimental" in the window.
 
 | Key | Default | Meaning |
 |---|---|---|
+| `vr_hotkey` | `thumbsticks` | `[capture]`: start / stop with the VR controllers in OpenXR games: the buttons held together for `vr_hotkey_hold_s`. `thumbsticks` = both stick clicks; `off` = the game's controller input is not touched; or up to 4 of `left_`/`right_` + `a`, `b`, `x`, `y`, `menu`, `thumbstick`, `trigger`, `grip` joined with `+` (e.g. `left_menu+right_a`). Read when the game starts. App window: Recording → Controllers. See "Record". |
+| `vr_hotkey_hold_s` | `1.0` | `[capture]`: how long the `vr_hotkey` buttons must be held, 0.2 .. 10 s. |
 | `hotkey` | `ScrollLock` | Start / stop. One or more, separated by commas; any of them works. **Keys**: `Ctrl`, `Shift`, `Alt` + `F1`..`F24`, `A`..`Z`, `0`..`9`, `Numpad0`..`9`, `Home`, `End`, `Insert`, `Delete`, `PageUp`, `PageDown`, `Pause`, `ScrollLock`, `CapsLock`, media keys (`MediaPlayPause`, `VolumeUp` ...), punctuation (`Semicolon`, `Comma` ...), any other key as `Key0xNN`; modifiers must match exactly. **Mouse**: `MouseMiddle`, `MouseX1`, `MouseX2`. Keys and mouse buttons are read when the game starts. **Xbox controller**: `Pad:A`, `Pad:Back+Start` (hold both), `Pad2:LB` (2nd pad only). **Wheel / joystick**: `Joy:*:Button3` (any device), `Joy:T300RS:Button5+Button6` (device name contains `T300RS`), `POVUp` / `POVDown` / `POVLeft` / `POVRight` for the hat. Controller and wheel buttons are read by the tray and apply at once. `EyeCaptureTray.exe --inputs` lists your devices and prints the name of each button you press. `none` = tray only. Example: `ScrollLock, Pad:Back+Start`. |
 | `output_dir` | *(empty)* = `captures` next to the DLL | Where MP4s go; the converted files (MKV, 8K, flat) go next to them, on the same drive. Nothing large is written to C: (or `%TEMP%`) unless this folder is on C:. **Low-space guard**: a recording does not start with less than 10 GB free on that drive, a conversion not with less than 10 GB + the estimated size of the files it makes (from the recording's length and the bitrates: an 8K copy of a 30-minute recording at 150 Mbit/s is about 31 GB) (log line + balloon "Recording not started" / "Not enough disk space ... needs about N GB"), and a recording is stopped and saved when the drive drops below 2 GB free (balloon "Recording stopped: disk almost full"). |
 | `codec` | `hevc` | `hevc`, `h264` or `av1` (H.264 is limited to 4096 px wide; wider frames are scaled down). `av1` = hardware AV1 through the GPU's Media Foundation AV1 encoder (NVIDIA RTX 40 / 50): about the HEVC quality at 2/3 of the bitrate, up to 8192 px; above 1 Gpixel/s (8K at 72 / 90 fps) the encoder runs at its faster quality setting (`CODECAPI_AVEncCommonQualityVsSpeed` 25) because its default speed cannot keep up (measured on an RTX 5090: ~51 fps at 8192x4348). No AV1 encoder: the recording is HEVC (logged `AV1 unavailable -- fell back to HEVC`). The tray converts AV1 recordings like any other (the MKV remux copies the AV1 stream). |
@@ -588,8 +607,8 @@ OBS live view (also not with `record_overlays = 1`: only the layers the game and
 Settings in `config.ini` `[indicator]`: `vr_indicator = 0` turns it off; `indicator_live = 0` keeps it off for the live
 view (the dot then only shows for recordings); `indicator_x/y/z` move it (metres, relative
 to your head), `indicator_size` and `indicator_opacity` change size and maximum opacity. The app window has fields
-for the position, size and opacity (Position X / Y / Z, Size, Opacity); `indicator_live` is in `config.ini` only. OpenXR: Direct3D 11 games (ETS2 / ATS)
-only for now; on Direct3D 12 the log says `indicator: not available on D3D12 yet` and recording works as before.
+for the position, size and opacity (Position X / Y / Z, Size, Opacity); `indicator_live` is in `config.ini` only. OpenXR: Direct3D 11 and Direct3D 12 games
+(Direct3D 12: games that render on a direct queue, i.e. practically all; Vulkan / OpenGL: no dot, the log says so).
 SteamVR games (per-game recording) show the same dot as a SteamVR overlay that SteamVR draws after the game's images were
 copied, so it is not in the video either; `steamvr_indicator = 0` (`[steamvr]`) turns it off for SteamVR games only.
 Quick mode never shows a dot: it records SteamVR's finished picture, so a dot would be in the video.

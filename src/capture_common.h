@@ -47,8 +47,11 @@ struct PeriodEstimator {
     void Add(int64_t tNs);
 };
 
-// <exe>_<yyyymmdd>_<hhmmss>_SBS.mp4 (flat), _VR180.mp4 / _VR360.mp4 (dome); local time now.
-std::wstring RecordingFileName(const std::wstring& exeName, DomeProjection p);
+// <exe>_<yyyymmdd>_<hhmmss>_SBS.mp4 (flat), _VR180.mp4 / _VR360.mp4 (dome); local time now. Never a name that was
+// already used: when this process handed out the same name before (two recordings within one second) or `dir` (if not
+// empty) already has a file of that name or one derived from it (<stem>.mkv / .json / <stem>_FLAT.mp4 ...), a counter goes
+// in front of the tag: <exe>_<stamp>_2_SBS.mp4, _3_ ... (the tag stays last: the tray and the docs rely on it).
+std::wstring RecordingFileName(const std::wstring& exeName, DomeProjection p, const std::wstring& dir = std::wstring());
 // Every RecorderSettings field that comes from the config and the two start views (path is left to the caller).
 void FillRecorderSettings(const Config& c, const EyeView& L, const EyeView& R, unsigned fps, RecorderSettings& out);
 
