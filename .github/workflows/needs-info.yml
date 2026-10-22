@@ -1,0 +1,138 @@
+# Waiting flow. Label "needs-info" = we wait for the reporter ("needs-logs" = the log is what we wait for). No other labels.
+#   - a maintainer comments on an open issue -> "needs-info" is added: we answered, now the reporter tests / replies
+#   - anyone else comments (not a bot)       -> "needs-info" is removed: their turn is done. While "needs-logs" is on, only a
+#                                               comment WITH a log ends the wait. An issue the bot closed opens again.
+#   - day 7 without an answer                -> ONE friendly reminder that tags the reporter (asks for the logs when
+#                                               "needs-logs" is on, else to test the fix / answer the question)
+#   - day 14 without an answer               -> closed as "not planned", with a friendly note that a reply opens it again
+# "Without an answer" counts from the last maintainer comment or the last time "needs-info" was added, whichever is later.
+# The reporter is the issue's author, or for an issue the maintainer opened for someone the "Reported by @name" /
+# "Tester: @name" in its body. A maintainer's own issue without one is never reminded or closed. The bot finds its own
+# comments by the hidden marks below. The daily run also repairs a missed event (an answer after the label).
+name: Needs-info waiting flow
+
+on:
+  schedule:
+    - cron: '17 4 * * *'        # once a day
+  workflow_dispatch:
+  issue_comment:
+    types: [created]
+
+permissions:
+  issues: write
+
+jobs:
+  flow:
+    if: github.event_name != 'issue_comment' || !github.event.issue.pull_request
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const MAINT = ['OWNER', 'MEMBER', 'COLLABORATOR'];
+            const MARK_REMIND = '<!-- needs-info-reminder -->';
+            const MARK_CLOSE = '<!-- needs-info-close -->';
+            const DAY = 24 * 3600 * 1000, REMIND_DAYS = 7, CLOSE_DAYS = 14;
+            const HOWTO = `https://github.com/${owner}/${repo}#reporting-a-problem-what-to-upload`;
+            const isMaint = c => MAINT.includes(c.author_association);
+            const LOG_RE = [                                // the same test as needs-logs.yml
+              /user-attachments\/(files|assets)\/\d+\/[^\s)\]]*\.(log|zip|7z|rar)\b/i,
+              /\[[^\]]*(eye_capture|tray)[^\]]*\]\(http/i,
+              /==== VR EyeCapture[^\n]*loaded/i,
+            ];
+            const hasLog = t => !!t && LOG_RE.some(r => r.test(t));
+            const isBot = u => !u || u.type === 'Bot' || /\[bot\]$/.test(u.login);
+            const labelsOf = i => i.labels.map(l => typeof l === 'string' ? l : l.name);
+            const addLabels = (n, labels) => github.rest.issues.addLabels({ owner, repo, issue_number: n, labels });
+            const removeLabel = (n, name) => github.rest.issues.removeLabel({ owner, repo, issue_number: n, name }).catch(() => {});
+            const listComments = n => github.paginate(github.rest.issues.listComments,
+              { owner, repo, issue_number: n, per_page: 100 });
+
+            // who we wait for: the author, or "Reported by @name" / "Tester: @name" in the body of an issue the maintainer opened
+            function reporter(issue) {
+              if (!MAINT.includes(issue.author_association)) return issue.user.login;
+              const m = /(?:Reported by|Tester):?\s*@([A-Za-z0-9-]+)/i.exec(issue.body || '');
+              return m ? m[1] : null;
+            }
+
+            async function answered(issue, why) {
+              const n = issue.number;
+              if (labelsOf(issue).includes('needs-info')) await removeLabel(n, 'needs-info');
+              if (issue.state === 'closed') {             // reopen only an issue the bot closed (its close note is the last word)
+                const comments = await listComments(n);
+                const last = comments.filter(c => isBot(c.user)).pop();
+                if (last && last.body && last.body.includes(MARK_CLOSE)) {
+                  await github.rest.issues.update({ owner, repo, issue_number: n, state: 'open' })
+                    .catch(e => core.warning(`#${n}: reopen failed: ${e.message}`));
+                }
+              }
+              core.info(`#${n}: answered (${why}) -> needs-info removed`);
+            }
+
+            // ---- a new comment ----
+            if (context.eventName === 'issue_comment') {
+              const c = context.payload.comment, issue = context.payload.issue;
+              if (isBot(c.user)) return;
+              if (isMaint(c)) {
+                if (issue.state !== 'open') return;
+                if (!reporter(issue)) { core.info(`#${issue.number}: maintainer's own issue, no reporter -> not waiting`); return; }
+                await addLabels(issue.number, ['needs-info']);
+                core.info(`#${issue.number}: maintainer answered -> needs-info added`);
+              } else if (labelsOf(issue).includes('needs-logs') && !hasLog(c.body)) {
+                core.info(`#${issue.number}: @${c.user.login} commented without a log -> still needs-info`);
+              } else {
+                await answered(issue, `@${c.user.login} commented`);
+              }
+              return;
+            }
+
+            // ---- daily (or manual) run: reminder, closing, repair ----
+            const now = Date.now();
+            const issues = await github.paginate(github.rest.issues.listForRepo,
+              { owner, repo, state: 'open', labels: 'needs-info', per_page: 100 });
+            for (const issue of issues) {
+              if (issue.pull_request) continue;
+              const n = issue.number, labels = labelsOf(issue);
+              const who = reporter(issue);
+              if (!who) { core.info(`#${n}: maintainer's own issue, no reporter -> skipped`); continue; }
+              const comments = await listComments(n);
+              const events = await github.paginate(github.rest.issues.listEventsForTimeline,
+                { owner, repo, issue_number: n, per_page: 100 });
+              // when the wait started: the last maintainer comment or the last "needs-info" label, whichever is later
+              let start = 0;
+              for (const c of comments) if (isMaint(c) && !isBot(c.user)) start = Math.max(start, Date.parse(c.created_at));
+              for (const e of events) if (e.event === 'labeled' && e.label && e.label.name === 'needs-info')
+                start = Math.max(start, Date.parse(e.created_at));
+              if (!start) start = Date.parse(issue.created_at);
+              // an answer after that = a missed event: repair
+              const needLog = labels.includes('needs-logs');
+              const answer = comments.find(c => !isMaint(c) && !isBot(c.user) && Date.parse(c.created_at) > start &&
+                                                (!needLog || hasLog(c.body)));
+              if (answer) { await answered(issue, `repair: @${answer.user.login} commented`); continue; }
+
+              const days = (now - start) / DAY;
+              const reminded = comments.some(c => isBot(c.user) && c.body && c.body.includes(MARK_REMIND) &&
+                                                  Date.parse(c.created_at) > start);
+              if (days >= CLOSE_DAYS) {
+                await github.rest.issues.createComment({ owner, repo, issue_number: n, body: MARK_CLOSE + `
+            Hi @${who}, I'm closing this for now because it has been quiet for 2 weeks. No problem at all! If it still happens, just comment here${needLog ? ' with your `eye_capture.log`, `tray.log` and `config.ini`' : ''} and it opens again. Thanks for reporting it!` });
+                await github.rest.issues.update({ owner, repo, issue_number: n, state: 'closed', state_reason: 'not_planned' });
+                core.info(`#${n}: closed after ${days.toFixed(1)} days`);
+              } else if (days >= REMIND_DAYS && !reminded) {
+                const ask = needLog
+                  ? `Hi @${who}, thanks for opening this issue! To find out what happens, I need your \`eye_capture.log\`, \`tray.log\` and \`config.ini\`. Where they are is in [Reporting a problem (what to upload)](${HOWTO}): the logs are in \`%LOCALAPPDATA%\\VR EyeCapture\\logs\` (app window, Advanced, **Open log**). Make the problem happen once more, then drag the three files into a comment here.
+
+            Every log helps make the tool better for everyone, so thank you!`
+                  : `Hi @${who}, just a friendly reminder: there is an answer above for you (a fix or a new build to try, or a question). When you have a moment, please try it and tell us here whether it works.
+
+            Your feedback really helps make the tool better for everyone, so thank you!`;
+                await github.rest.issues.createComment({ owner, repo, issue_number: n, body: MARK_REMIND + `
+            ${ask}
+
+            (If there is no answer, this issue closes in 7 days. You can always reopen it by commenting.)` });
+                core.info(`#${n}: reminder after ${days.toFixed(1)} days`);
+              } else {
+                core.info(`#${n}: waiting ${days.toFixed(1)} days${reminded ? ' (reminded)' : ''}`);
+              }
+            }
