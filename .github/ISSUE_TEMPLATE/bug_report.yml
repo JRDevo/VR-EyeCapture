@@ -6,29 +6,32 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for the report. **Without the three log / config files below I usually cannot tell what happened**, so please attach them.
-        They are in the tool's folder (next to `eye_capture.dll`).
-        **Privacy:** the logs contain folder paths with your Windows user name. Open them and check (or edit them) before uploading.
-  - type: input
-    id: version
+        **Before you write:** make the problem happen once more (start the game, record, stop), then close the game.
+        Then open the log folder: paste `%LOCALAPPDATA%\VR EyeCapture\logs` into the Explorer address bar
+        (or app window → Advanced → **Open log**). Without the log I usually cannot tell what happened.
+  - type: textarea
+    id: what
     attributes:
-      label: Tool version
-      description: The name of the zip you downloaded, e.g. `VR-EyeCapture-v0.5.0.zip` (`OpenXR-EyeCapture-v...zip` before the rename).
+      label: What happens
+      description: What you did, what you expected, and what you got. Say when it happens (every recording, only VR180, after a few minutes, ...).
+      placeholder: |
+        I pressed the hotkey, heard one beep, recorded 2 minutes and stopped.
+        The video is black / stutters / the eyes are swapped / no file was made.
     validations:
       required: true
   - type: input
     id: game
     attributes:
       label: Game
-      description: Which game, OpenXR or SteamVR (OpenVR), and was it started with `-openxr`?
-      placeholder: "Game name, started with -openxr (if the game needs that switch)"
+      description: Game name, and OpenXR or SteamVR.
+      placeholder: "Half-Life: Alyx (SteamVR)"
     validations:
       required: true
   - type: input
     id: headset
     attributes:
-      label: Headset and runtime
-      placeholder: "Quest 3 via Virtual Desktop (VDXR) / Quest Link / SteamVR / ..."
+      label: Headset and how it connects
+      placeholder: "Quest 3 via Virtual Desktop / Quest Link / Steam Link / Index / ..."
     validations:
       required: true
   - type: input
@@ -39,29 +42,30 @@ body:
     validations:
       required: true
   - type: input
-    id: windows
+    id: version
     attributes:
-      label: Windows version
-      placeholder: "Windows 11 24H2"
+      label: VR EyeCapture version
+      placeholder: "0.5.2"
     validations:
       required: true
-  - type: textarea
-    id: what
-    attributes:
-      label: What did you do, and what happened?
-      description: What you pressed, which beeps you heard, the tray icon colour, what the video looks like.
-    validations:
-      required: true
-  - type: textarea
+  - type: input
     id: mods
     attributes:
-      label: Other OpenXR layers or mods in use
-      placeholder: "OpenXR Toolkit, other API layers, overlays, ..."
+      label: Other overlays or mods
+      description: OpenXR Toolkit, other OpenXR layers, ReShade, overlay apps, ... ("none" if none).
+    validations:
+      required: true
   - type: textarea
-    id: logs
+    id: files
     attributes:
-      label: Logs and config (drag the files in here)
-      description: "Attach logs\eye_capture.log, logs\tray.log and config.ini. GitHub does not accept .log / .ini drops directly: rename them to .txt or zip them first."
+      label: Files (drag them into this box)
+      description: |
+        - `eye_capture.log` (**required**; no file = the recorder did not load in the game, say so)
+        - `tray.log` (**required**)
+        - `config.ini` (**required**; usually `%APPDATA%\VR EyeCapture\config.ini`). GitHub does not take `.ini` files: rename it to `config.txt` or zip it.
+        - A screenshot or short clip of the problem (optional)
+
+        **Privacy:** the logs contain folder paths with your Windows user name. Open them and check before uploading.
     validations:
       required: true
   - type: checkboxes
@@ -69,7 +73,7 @@ body:
     attributes:
       label: Before you send
       options:
-        - label: I use the latest version from the Releases page of this repository (not a copy from somewhere else).
+        - label: I use the latest version from the Releases page of this repository.
           required: true
-        - label: I checked the logs for my user name / private paths before attaching them.
+        - label: I attached eye_capture.log, tray.log and config.ini (or said that eye_capture.log does not exist).
           required: true
