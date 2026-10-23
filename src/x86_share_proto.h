@@ -53,7 +53,7 @@
 
 enum : uint32_t {
     EYECAP_X86_MAGIC = 0x52363858u,   // 'X86R'
-    EYECAP_X86_VERSION = 1,
+    EYECAP_X86_VERSION = 2,          // 2: bitDepth / sharpen in EyeCapX86Start
     EYECAP_X86_MAX_SLOTS = 8,
     EYECAP_X86_FRAMES = 16,           // frame descriptors (> slots: a descriptor is never rewritten before it was taken)
     EYECAP_X86_STALE_MS = 3000        // a helper heartbeat older than this = no helper
@@ -88,6 +88,8 @@ struct EyeCapX86Start {
     uint32_t domeSharedView;            // was padding (0 from an older layer = off)
     wchar_t  path[520];                 // output .mp4
     wchar_t  audioDevice[256];
+    uint32_t bitDepth;                  // 8 | 10 (version 2)
+    float    sharpen;                   // 0 = off (version 2)
 };
 
 struct EyeCapX86Eye {
@@ -150,13 +152,13 @@ struct EyeCapX86 {
 #pragma pack(pop)
 
 // The layout is the same in the 32-bit layer and the 64-bit helper.
-static_assert(sizeof(EyeCapX86Start) == 1744, "EyeCapX86Start layout");
+static_assert(sizeof(EyeCapX86Start) == 1752, "EyeCapX86Start layout");
 static_assert(sizeof(EyeCapX86Eye) == 64, "EyeCapX86Eye layout");
 static_assert(sizeof(EyeCapX86Frame) == 160 && offsetof(EyeCapX86Frame, ts100ns) == 16, "EyeCapX86Frame layout");
 static_assert(sizeof(EyeCapX86Status) == 824 && offsetof(EyeCapX86Status, framesWritten) == 24, "EyeCapX86Status layout");
-static_assert(offsetof(EyeCapX86, start) == 168 && offsetof(EyeCapX86, frames) == 1912, "EyeCapX86 layout (producer part)");
-static_assert(offsetof(EyeCapX86, helperPid) == 4472 && offsetof(EyeCapX86, ringTex) == 4496, "EyeCapX86 layout (helper part)");
-static_assert(offsetof(EyeCapX86, status) == 4584 && sizeof(EyeCapX86) == 5408, "EyeCapX86 layout (status)");
+static_assert(offsetof(EyeCapX86, start) == 168 && offsetof(EyeCapX86, frames) == 1920, "EyeCapX86 layout (producer part)");
+static_assert(offsetof(EyeCapX86, helperPid) == 4480 && offsetof(EyeCapX86, ringTex) == 4504, "EyeCapX86 layout (helper part)");
+static_assert(offsetof(EyeCapX86, status) == 4592 && sizeof(EyeCapX86) == 5416, "EyeCapX86 layout (status)");
 
 // <block> name: the test override (XR_EYE_CAPTURE_TEST_X86_SHM) or EYECAP_X86_SHM_NAME. Pure; out gets at most cap chars.
 inline void EyeCapX86BlockName(wchar_t* out, size_t cap) {

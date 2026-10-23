@@ -476,7 +476,10 @@ int RunAll() {
         MakeFile(both + L"\\" + install::JsonName32());
         MakeFile(both + L"\\" + install::DllName32());
         const std::wstring ours64 = install::OurValueName(both), ours32 = install::OurValueName32(both);
-        Check(ours32 == both + L"\\XR_APILAYER_JRDEVO_eye_capture32.json", "OurValueName32 = <dir>\\XR_APILAYER_JRDEVO_eye_capture32.json");
+        // same folder as the 64-bit value (both expand 8.3 names: GitHub's runner TEMP is C:\Users\RUNNER~1\...)
+        const size_t cut = ours64.find_last_of(L'\\');
+        Check(cut != std::wstring::npos && ours32 == ours64.substr(0, cut) + L"\\XR_APILAYER_JRDEVO_eye_capture32.json",
+              "OurValueName32 = <dir>\\XR_APILAYER_JRDEVO_eye_capture32.json");
         SetDword(kLm32, kUnrelated, 0);
         s = install::Query(both);
         Check(s.filesPresent && s.files32Present, "Query: both file pairs present");

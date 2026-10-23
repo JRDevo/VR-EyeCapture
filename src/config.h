@@ -75,6 +75,8 @@ struct Config {
     RateControl  rateControl = RateControl::Vbr;   // rate_control = vbr | cbr | qp (video_codec.h)
     unsigned     qp = 24;                // qp: 0..51, the constant QP of rate_control = qp (0 = best, 51 = worst)
     int          qualityVsSpeed = -1;    // quality_vs_speed: -1 = auto (encoder default; AV1 > 1 Gpixel/s asks for 25), else 0..100
+    unsigned     bitDepth = 8;           // bit_depth = 8 | 10: 10 = HEVC Main10 / AV1 10-bit (H.264 stays 8-bit)
+    float        sharpen = 0.0f;         // sharpen: 0 = off, 0 < s <= 1 = contrast-adaptive sharpen strength (all layouts)
     bool         constantFrameRate = false;  // constant_frame_rate: 1 = exactly one video frame per 1/fps (repeats / drops), for editors
     bool         beeps = true;           // beeps: 0 = no audible cues at all (they play on the default device = the loopback one)
     bool         audioEnabled = true;

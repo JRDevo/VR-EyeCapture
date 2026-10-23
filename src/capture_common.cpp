@@ -57,12 +57,12 @@ void LogCaptureConfig(const char* folderWhat, const std::wstring& folder, const 
     if (c.qualityVsSpeed >= 0) snprintf(qvsText, sizeof(qvsText), "%d", c.qualityVsSpeed);
     else snprintf(qvsText, sizeof(qvsText), "auto");
     LOGI("%s %s | config %s | output %s | hotkey %s | codec %s %u Mb/s | rate_control %s | qp %u | "
-         "quality_vs_speed %s | max_width %u | max_fps %u | constant_frame_rate %d | audio %s%s%s | gamma %s | beeps %d | "
+         "quality_vs_speed %s | bit_depth %u | sharpen %.2f | max_width %u | max_fps %u | constant_frame_rate %d | audio %s%s%s | gamma %s | beeps %d | "
          "vr_hotkey %s (hold %.1f s; OpenXR games)",
          folderWhat, elog::Narrow(folder).c_str(), c.loadedFrom.empty() ? "(defaults)" : elog::Narrow(c.loadedFrom).c_str(),
          elog::Narrow(c.outputDir).c_str(), elog::Narrow(c.hotkey.text).c_str(), VideoCodecName(c.codec),
          c.bitrateMbps ? c.bitrateMbps : VideoCodecDefaultMbps(c.codec), RateControlKey(c.rateControl), c.qp,
-         qvsText, c.maxWidth, c.maxFps, c.constantFrameRate ? 1 : 0,
+         qvsText, c.bitDepth, c.sharpen, c.maxWidth, c.maxFps, c.constantFrameRate ? 1 : 0,
          c.audioEnabled ? "on" : "off", c.audioDevice.empty() ? "" : " device~",
          elog::Narrow(c.audioDevice).c_str(),
          c.gamma == GammaMode::Auto ? "auto" : c.gamma == GammaMode::Srgb ? "srgb" : "linear", c.beeps ? 1 : 0,
@@ -160,6 +160,8 @@ void FillRecorderSettings(const Config& c, const EyeView& L, const EyeView& R, u
     rs.rateControl = c.rateControl;
     rs.qp = c.qp;
     rs.qualityVsSpeed = c.qualityVsSpeed;
+    rs.bitDepth = c.bitDepth;
+    rs.sharpen = c.sharpen;
     rs.constantFrameRate = c.constantFrameRate;
     rs.fps = fps;
     rs.maxFps = c.maxFps;
@@ -211,6 +213,8 @@ std::string ApplyReloadedConfig(Config& c, const Config& n, bool* outputChanged)
     note("rate_control", RateControlKey(c.rateControl), RateControlKey(n.rateControl));
     note("qp", U(c.qp), U(n.qp));
     note("quality_vs_speed", Q(c.qualityVsSpeed), Q(n.qualityVsSpeed));
+    note("bit_depth", U(c.bitDepth), U(n.bitDepth));
+    note("sharpen", F(c.sharpen), F(n.sharpen));
     note("fps", U(c.fps), U(n.fps));
     note("max_fps", U(c.maxFps), U(n.maxFps));
     note("constant_frame_rate", B(c.constantFrameRate), B(n.constantFrameRate));
@@ -245,6 +249,7 @@ std::string ApplyReloadedConfig(Config& c, const Config& n, bool* outputChanged)
     if (outputChanged) *outputChanged = c.outputDir != n.outputDir;
     c.outputDir = n.outputDir; c.codec = n.codec; c.bitrateMbps = n.bitrateMbps; c.fps = n.fps; c.maxFps = n.maxFps;
     c.rateControl = n.rateControl; c.qp = n.qp; c.qualityVsSpeed = n.qualityVsSpeed; c.constantFrameRate = n.constantFrameRate;
+    c.bitDepth = n.bitDepth; c.sharpen = n.sharpen;
     c.beeps = n.beeps;
     c.maxWidth = n.maxWidth; c.gamma = n.gamma; c.swapEyes = n.swapEyes; c.recordOverlays = n.recordOverlays;
     c.tag3d = n.tag3d;

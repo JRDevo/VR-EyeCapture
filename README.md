@@ -82,6 +82,8 @@ games with Direct3D 11 or Direct3D 12.
 - **Hardware HEVC encoding** — NVIDIA GTX 10xx or newer, AMD RX 400 or newer, Intel 7th gen or newer.
 - **Rate control and encoder preset** — VBR (default), CBR or constant QP (`rate_control`, `qp`), and the encoder's
   speed / quality preset (`quality_vs_speed`).
+- **10-bit video** (`bit_depth = 10`) — HEVC Main10 / AV1 10-bit: no colour banding in skies, fog and dark scenes.
+- **Sharpen** (`sharpen`) — a contrast-adaptive sharpen pass while recording, per eye; most useful for VR180 / VR360.
 - **Constant frame rate for video editors** (`constant_frame_rate`) — one frame per frame period with equal durations, for
   DaVinci Resolve and other editors that dislike variable frame rate; off by default (the real frame times are kept).
 - **Dormant unless the tray runs** — the layer does nothing while the tray app is not running.
@@ -523,7 +525,7 @@ the normal side-by-side way (logged).
 Next to `eye_capture.dll` (or `%APPDATA%\VR EyeCapture\config.ini`, which wins if it exists; versions before the rename
 used `%APPDATA%\OpenXR-EyeCapture\config.ini`, which is still read when the new one does not exist, and the tray copies it
 to the new folder once). Read when a game starts its OpenXR instance (SteamVR games: when they start SteamVR), and read again at the start of every recording: edits to the recording and 3D settings
-(`output_dir`, `codec`, `bitrate_mbps`, `rate_control`, `qp`, `quality_vs_speed`, `max_fps`, `constant_frame_rate`, `max_width`, `gamma`,
+(`output_dir`, `codec`, `bitrate_mbps`, `rate_control`, `qp`, `quality_vs_speed`, `bit_depth`, `sharpen`, `max_fps`, `constant_frame_rate`, `max_width`, `gamma`,
 `swap_eyes`, `record_overlays`, audio, `beeps`, head smoothing / symmetric
 fov, the `[dome]` block, `log_level`) apply to the next recording without restarting the game. Only the keyboard /
 mouse part of `hotkey`, `vr_hotkey` / `vr_hotkey_hold_s`, `require_tray` and the `[indicator]` keys are fixed until the game restarts (the `post_*` keys

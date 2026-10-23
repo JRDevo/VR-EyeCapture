@@ -51,6 +51,9 @@ const Field kFields[] = {
     {L"qp",                L"capture",         Kind::Edit,  ID_QP,         nullptr},
     {L"quality_vs_speed",  L"capture",         Kind::Combo, ID_PRESET,     L"auto|0|25|50|75|100",
      L"Auto (default)|Fastest|Fast|Balanced|Quality|Best quality", L"Custom (%s)"},
+    {L"bit_depth",         L"capture",         Kind::Combo, ID_BITDEPTH,   L"8|10", L"8-bit (default)|10-bit (HEVC / AV1)"},
+    {L"sharpen",           L"capture",         Kind::Combo, ID_SHARPEN,    L"0|0.3|0.6|1",
+     L"Off (default)|Light|Medium|Strong", L"Custom (%s)"},
     {L"max_fps",           L"capture",         Kind::Edit,  ID_MAXFPS,     nullptr},
     {L"constant_frame_rate", L"capture",       Kind::Check, ID_CFR,        nullptr},
     {L"beeps",             L"capture",         Kind::Check, ID_BEEPS,      nullptr},
@@ -140,7 +143,7 @@ std::wstring Norm(const std::wstring& key, const std::wstring& raw) {
         return l == L"cqp" ? L"qp" : l;   // the parser takes cqp for qp
     }
     if (f->kind == Kind::Track || key == L"bitrate_mbps" || key == L"yt8k_bitrate_mbps" || key == L"max_fps" || key == L"max_width" || key == L"output_fov_scale" ||
-        key == L"qp" || key == L"quality_vs_speed" ||
+        key == L"qp" || key == L"quality_vs_speed" || key == L"bit_depth" || key == L"sharpen" ||
         key == L"fill_fade_s" || key == L"indicator_x" || key == L"indicator_y" || key == L"indicator_z" ||
         key == L"indicator_size" || key == L"indicator_opacity") {
         wchar_t* end = nullptr;
@@ -316,6 +319,12 @@ KeyValues FromConfig(const Config& c) {
     kv.emplace_back(L"rate_control", FromUtf8(RateControlKey(c.rateControl)));
     kv.emplace_back(L"qp", std::to_wstring(c.qp));
     kv.emplace_back(L"quality_vs_speed", c.qualityVsSpeed < 0 ? std::wstring(L"auto") : std::to_wstring(c.qualityVsSpeed));
+    kv.emplace_back(L"bit_depth", std::to_wstring(c.bitDepth));
+    {
+        wchar_t sh[32];
+        swprintf_s(sh, L"%g", c.sharpen);
+        kv.emplace_back(L"sharpen", sh);
+    }
     kv.emplace_back(L"max_fps", std::to_wstring(c.maxFps));
     kv.emplace_back(L"constant_frame_rate", B(c.constantFrameRate));
     kv.emplace_back(L"beeps", B(c.beeps));
@@ -655,6 +664,16 @@ const Help kHelp[] = {
                 HELP_LI L"Fastest: the least GPU time."
                 HELP_LI L"Best quality: a sharper picture at the same bitrate, but slower. At high resolutions and frame rates it can drop frames." HELP_BR
                 L"A value from config.ini that is not in the list shows as Custom and is kept."},
+    {ID_BITDEPTH, L"Colour steps per channel in the video (bit_depth in config.ini)." HELP_BR
+                  L"• 8-bit (default): plays everywhere."
+                  HELP_LI L"10-bit: smooth skies and dark scenes without banding (HEVC Main10 / AV1 10-bit). Needs codec HEVC or AV1; "
+                  L"H.264 records 8-bit. YouTube, VLC and Quest players play it; some older players and editors do not." HELP_BR
+                  L"The file size does not change much."},
+    {ID_SHARPEN, L"Sharpens the picture while it is recorded (sharpen in config.ini, 0 .. 1)." HELP_BR
+                 L"• Off (default): no extra work."
+                 HELP_LI L"Light / Medium / Strong: more fine detail. Most useful for VR180 / VR360, where the dome makes the picture softer." HELP_BR
+                 L"Contrast-adaptive: flat areas get more, hard edges less, so there are no bright halos. Each eye is sharpened on "
+                 L"its own. Works for flat recordings too. Sharper video needs a bit more bitrate."},
     {ID_CFR, L"Writes exactly one frame per frame period, all the same length." HELP_BR
              L"• Ticked: video editors such as DaVinci Resolve handle the file better. A doubled frame is dropped; a missing one repeats the last (up to 5 seconds)."
              HELP_LI L"Cleared (default): the real frame times are kept. Plays perfectly in players and on YouTube." HELP_BR
@@ -1986,7 +2005,7 @@ void CommandHandler(int id, int code) {
         UpdateLayoutPreview();
     if ((id == ID_PROJECTION || id == ID_YTMODE || id == ID_LAYOUT3D || id == ID_POSTWHEN || id == ID_EYECROP ||
          id == ID_MAXWIDTH || id == ID_BITRATE || id == ID_YT8KBITRATE || id == ID_YT8KCODEC || id == ID_RATECONTROL ||
-         id == ID_PRESET) && code == CBN_SELCHANGE) {
+         id == ID_PRESET || id == ID_BITDEPTH || id == ID_SHARPEN) && code == CBN_SELCHANGE) {
         ShowHelp(HelpText(id));
         return;
     }
@@ -2466,8 +2485,8 @@ int BuildControls(HWND dlg, Builder::Pass pass, int clientW, int clientH, int sc
     y += 32 + 4;
     const int yTop = y;
 
-    // Rows that carry two settings (Audio + Device, Codec + Encoder preset, Frame rate limit + Constant frame rate, Head
-    // smoothing + FOV scale) keep both columns at 16 rows, so the window still fits a 1920x1080 screen. Texts that depend on
+    // Rows that carry two settings (Audio + Device, Codec + Encoder preset, Resolution + Colour depth, Frame rate limit +
+    // Constant frame rate, Projection + Sharpen, Head smoothing + FOV scale) keep both columns at 16 rows, so the window still fits a 1920x1080 screen. Texts that depend on
     // the room are picked for the NARROWEST layout (cwMin), so the Create and Move passes always agree.
     const int cwMin = colWMin - 12 - 132;
     auto pickText = [&](int room, std::initializer_list<const wchar_t*> texts, int pad) {
@@ -2575,7 +2594,13 @@ int BuildControls(HWND dlg, Builder::Pass pass, int clientW, int clientH, int sc
     r += pitch;
     b.Label(lx, r, labelW, L"Resolution:", ID_MAXWIDTH);
     b.Combo(ID_MAXWIDTH, cx, r, 190);
-    b.Hint(cx + 190 + 8, r, cw - 198, L"Width of the side-by-side frame", ID_MAXWIDTH);
+    {   // same row: "Colour depth:" (bit_depth) takes the rest of the row
+        const int bx = cx + 190 + 16;
+        const wchar_t* bl = pickText(cwMin - (190 + 16) - comboW(ID_BITDEPTH, nullptr), {L"Colour depth:", L"Colour:"}, 6);
+        const int blw = b.TextW(bl) + 6;
+        b.Label(bx, r, blw, bl, ID_BITDEPTH);
+        b.Combo(ID_BITDEPTH, bx + blw, r, cx + cw - (bx + blw));
+    }
     r += pitch;
     b.Label(lx, r, labelW, L"Frame rate limit:", ID_MAXFPS);
     b.Edit(ID_MAXFPS, cx, r, 60);
@@ -2594,7 +2619,12 @@ int BuildControls(HWND dlg, Builder::Pass pass, int clientW, int clientH, int sc
     b.Group(gx, y, gw, groupH(kStereoRows) + leftEx, L"Stereo 3D");
     r = y + top;
     b.Label(lx, r, labelW, L"Projection:", ID_PROJECTION);
-    b.Combo(ID_PROJECTION, cx, r, 240);
+    {   // one row: Projection, then "Sharpen:" (sharpen; every layout, most useful for the domes)
+        const int pw = comboW(ID_PROJECTION, nullptr), sx = cx + pw + 16, slw = b.TextW(L"Sharpen:") + 6;
+        b.Combo(ID_PROJECTION, cx, r, pw);
+        b.Label(sx, r, slw, L"Sharpen:", ID_SHARPEN);
+        b.Combo(ID_SHARPEN, sx + slw, r, cx + cw - (sx + slw));
+    }
     r += pitch;
     keep(g_domeLabels, b.Label(lx, r, labelW, L"Dome fill:", ID_FILL));
     b.Combo(ID_FILL, cx, r, 160);

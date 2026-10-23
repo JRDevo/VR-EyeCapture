@@ -9,7 +9,8 @@
 //                    [--head-smoothing S] [--fov-scale K] [--follow-deg D] [--roll-lock] [--no-edge-guard] [--no-symmetric]
 //                    [--youtube tb_half|sbs_half|sbs_full|tb_full] [--eye-crop 16:9|4:3|4:3pad|none]
 //                    [--rate-control vbr|cbr|qp] [--qp N] [--bitrate MBPS] [--quality-vs-speed auto|0..100]
-//                    [--cfr] [--ts-jitter] [--ts-gap SECONDS] [--detail]
+//                    [--cfr] [--ts-jitter] [--ts-gap SECONDS] [--detail] [--bit-depth 8|10] [--sharpen 0..1]
+// --bit-depth / --sharpen: config.ini bit_depth, sharpen.
 // --detail (D3D11, layout two; for the rate-control measurements in run_selftests.ps1): instead of the test pattern each
 // eye shows one of 8 pre-made pictures of a gradient with per-pixel noise (+-20 levels), changing every frame, so the
 // encoder has to spend bits (the flat test pattern compresses to almost nothing at any QP or bitrate). No pixel checks.
@@ -57,6 +58,8 @@ struct Args {
     RateControl rateControl = RateControl::Vbr;
     unsigned qp = 24, bitrateMbps = 0;
     int qualityVsSpeed = -1;
+    unsigned bitDepth = 8;
+    float sharpen = 0.0f;
     bool cfr = false, tsJitter = false, detail = false;
     double tsGap = 0;
 };
@@ -140,6 +143,12 @@ int main(int argc, char** argv) {
             const std::string v = next();
             a.qualityVsSpeed = v == "auto" ? -1 : atoi(v.c_str());
             if (a.qualityVsSpeed < -1 || a.qualityVsSpeed > 100) { printf("bad --quality-vs-speed %s\n", v.c_str()); return 2; }
+        } else if (k == "--bit-depth") {
+            a.bitDepth = (unsigned)atoi(next().c_str());
+            if (a.bitDepth != 8 && a.bitDepth != 10) { printf("bad --bit-depth %u\n", a.bitDepth); return 2; }
+        } else if (k == "--sharpen") {
+            a.sharpen = (float)atof(next().c_str());
+            if (a.sharpen < 0.0f || a.sharpen > 1.0f) { printf("bad --sharpen %.2f\n", a.sharpen); return 2; }
         } else if (k == "--cfr") a.cfr = true;
         else if (k == "--ts-jitter") a.tsJitter = true;
         else if (k == "--detail") a.detail = true;
@@ -161,10 +170,10 @@ int main(int argc, char** argv) {
     elog::SetLevel(LogLevel::Debug);
     if (a.out.empty()) a.out = dir + L"\\selftest_" + elog::Widen(a.api + "_" + a.layout + "_" + a.format + "_" + a.codec) + L".mp4";
     LOGI("=== encoder_selftest: api=%s layout=%s eye=%ux%u format=%s codec=%s %.1f s @ %u fps%s%s%s%s rate_control %s qp %u "
-         "bitrate %u quality_vs_speed %d%s%s gap %.1f s -> %s", a.api.c_str(),
+         "bitrate %u quality_vs_speed %d bit_depth %u sharpen %.2f%s%s gap %.1f s -> %s", a.api.c_str(),
          a.layout.c_str(), a.eyeW, a.eyeH, a.format.c_str(), a.codec.c_str(), a.seconds, a.fps, a.youtube ? " youtube " : "",
          a.youtube ? YtPackingKey(a.layout3d) : "", a.youtube ? " eye_crop " : "", a.youtube ? YtCropKey(a.eyeCrop) : "",
-         RateControlKey(a.rateControl), a.qp, a.bitrateMbps, a.qualityVsSpeed, a.cfr ? " cfr" : "", a.tsJitter ? " ts-jitter" : "",
+         RateControlKey(a.rateControl), a.qp, a.bitrateMbps, a.qualityVsSpeed, a.bitDepth, a.sharpen, a.cfr ? " cfr" : "", a.tsJitter ? " ts-jitter" : "",
          a.tsGap, elog::Narrow(a.out).c_str());
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
 
@@ -340,6 +349,8 @@ int main(int argc, char** argv) {
     rs.rateControl = a.rateControl;
     rs.qp = a.qp;
     rs.qualityVsSpeed = a.qualityVsSpeed;
+    rs.bitDepth = a.bitDepth;
+    rs.sharpen = a.sharpen;
     rs.constantFrameRate = a.cfr;
     rs.fps = a.fps;
     rs.audio = a.audio;

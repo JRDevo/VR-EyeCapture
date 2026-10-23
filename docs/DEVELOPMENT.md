@@ -192,6 +192,21 @@ those get a compute pre-pass that sRGB-encodes. Measured: the NVIDIA video proce
 passes values through without the curve (grey 128 stayed 128 instead of 188), hence the explicit pass.
 `config.ini gamma = srgb | linear` overrides the decision. Output is tagged BT.709 primaries / transfer / matrix, limited range.
 
+`bit_depth = 10` (Main10): the encoder pool is P010 instead of NV12 (video processor output), the encoder gets
+`MFVideoFormat_P010` with `eAVEncH265VProfile_Main_420_10` / `eAVEncAV1VProfile_Main_420_10`, and the re-projection / dome
+output (+ the last_seen dome) and the linear pre-pass render to `R10G10B10A2_UNORM` instead of an 8-bit format (8-bit
+game formats only; FP16 stays FP16). Fallbacks, each logged: H.264 -> 8-bit; no P010 output -> 8-bit; no
+R10G10B10A2 input -> 8-bit passes, 10-bit encode; the asked codec refuses 10-bit -> the pool is rebuilt as NV12 and the
+normal 8-bit attempt list runs (the codec choice wins over the bit depth). Measured on an RTX 5090 (encoder_selftest,
+run_dome `vr180_10s`): HEVC -> `Main 10 yuv420p10le`, AV1 -> `Main yuv420p10le`, colours pass verify_mp4 in all paths.
+
+`sharpen = s` (0 < s <= 1): one full-screen pass (`kSharpenPs`, AMD FidelityFX CAS formula without scaling, peak
+`-0.2 s`) on the frame the video processor would read (dome / re-projection output, linear pre-pass output, or the ring
+slot), into `shTex`, which the video processor reads instead. Taps are clamped to the pixel's eye rectangle (left | right,
+VR360 / YouTube tb top / bottom), so the eyes never bleed. The last_seen dome stores the unsharpened picture (no repeated
+sharpening). The flat test pattern is unchanged by it (PSNR 61 dB: no halos at hard edges); the noisy `--detail` picture
+gets ~26 % more bits at QP 10.
+
 ### Re-projection stage: symmetric fov and head-motion smoothing
 
 One pass on the encoder device does both. It exists when `symmetric_fov = 1` (default; needs a usable view fov at

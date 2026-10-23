@@ -66,6 +66,7 @@ const char* DxgiFormatName(DXGI_FORMAT f) {
     case DXGI_FORMAT_D32_FLOAT_S8X24_UINT:   return "D32_FLOAT_S8X24_UINT";
     case DXGI_FORMAT_D16_UNORM:              return "D16_UNORM";
     case DXGI_FORMAT_NV12:                   return "NV12";
+    case DXGI_FORMAT_P010:                   return "P010";
     default:                                 return "other";
     }
 }

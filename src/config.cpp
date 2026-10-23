@@ -271,6 +271,10 @@ KeyResult ApplyKey(Config& c, const std::wstring& key, std::wstring val) {
         if (Lower(val) == L"auto") c.qualityVsSpeed = -1;
         else if (ParseUInt(val, u) && u <= 100) c.qualityVsSpeed = (int)u;
         else ok = false;
+    } else if (key == L"bit_depth") {
+        if (ParseUInt(val, u) && (u == 8 || u == 10)) c.bitDepth = u; else ok = false;
+    } else if (key == L"sharpen") {
+        if (ParseFloat(val, fl) && fl >= 0.0f && fl <= 1.0f) c.sharpen = fl; else ok = false;
     } else if (key == L"constant_frame_rate") {
         if (ParseBool(val, b)) c.constantFrameRate = b; else ok = false;
     } else if (key == L"beeps") {

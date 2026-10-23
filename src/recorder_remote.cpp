@@ -244,6 +244,7 @@ void Recorder::Impl::Request(EyeCapX86* b) {
     q.luidLow = luid.LowPart; q.luidHigh = luid.HighPart;
     q.codec = (uint32_t)s.codec; q.bitrate = s.bitrate; q.rateControl = (uint32_t)s.rateControl; q.qp = s.qp;
     q.qualityVsSpeed = s.qualityVsSpeed;
+    q.bitDepth = s.bitDepth; q.sharpen = s.sharpen;
     q.constantFrameRate = s.constantFrameRate ? 1u : 0u;
     q.fps = s.fps; q.maxFps = s.maxFps; q.maxWidth = s.maxWidth; q.audio = s.audio ? 1u : 0u;
     q.headSmoothing = s.head.smoothing; q.headFollowDeg = s.head.followDeg; q.rollLock = s.head.rollLock ? 1u : 0u;

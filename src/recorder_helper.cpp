@@ -251,6 +251,8 @@ void TakeStart(LONG startSeq) {
     rs.rateControl = (RateControl)q.rateControl;
     rs.qp = q.qp;
     rs.qualityVsSpeed = q.qualityVsSpeed;
+    rs.bitDepth = q.bitDepth;
+    rs.sharpen = q.sharpen;
     rs.constantFrameRate = q.constantFrameRate != 0;
     rs.fps = q.fps;
     rs.maxFps = q.maxFps;

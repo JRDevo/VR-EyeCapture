@@ -5,12 +5,13 @@
     right -40/+50, +-45 deg). layer_e2e --jitter renders a world-locked grid (background 40, a 90 line every 10 deg of
     yaw / pitch) and a white marker at the world direction -Z (at infinity) for the located pose, like a game.
 
-    Five recordings (11.5 s each, XR_EYE_CAPTURE_CONFIG overrides):
+    Six recordings (11.5 s each, XR_EYE_CAPTURE_CONFIG overrides):
         vr180         projection = vr180 (fill last_seen, fill_fade_s 8, window_feather_deg 1, dome_shared_view 1: the defaults)
         vr180_black   projection = vr180, fill = black
         vr180_fade1   projection = vr180, fill_fade_s = 1
         vr360         projection = vr360 (fill last_seen)
         vr180_full    projection = vr180, dome_shared_view = 0 (each eye paints its full fov)
+        vr180_10s     projection = vr180, bit_depth = 10, sharpen = 0.6 (HEVC Main10 + the sharpen pass on the dome)
     Each video is decoded (ffmpeg, Y plane); the marker is located per frame in both eyes (weighted centroid of Y > 150
     inside lon +-20 / lat +-10 deg around the dome centre); video time -> motion time through the layer's "first video
     frame ... displayTime" line and layer_e2e's E2E_T0_NS (same mapping as run_jitter.ps1).
@@ -19,7 +20,7 @@
     it (the head turned 30 deg LEFT, so the right edge moves to ~+10). Painted = max Y > 60 (grid line ~93, background ~50 in limited range), black = max Y < 30 (black = 16).
     Checks:
       (a) world lock: left-eye marker centroid over the jitter-only phase t in [1.0, 3.9] s: std-dev x and y < 0.3 px
-          (vr180, vr360); its mean lon / lat = the dome frame's yaw from the log (lon = +D yaw: OpenXR yaw is positive
+          (vr180, vr360, vr180_10s); its mean lon / lat = the dome frame's yaw from the log (lon = +D yaw: OpenXR yaw is positive
           to the LEFT, lon positive to the RIGHT; D = head yaw at the first recorded frame) within 2 deg, lat 0 +- 2 deg.
       (b) turn: mean marker position over t in [5.5, end] = mean over [1.0, 3.9] within 0.5 px (vr180, vr360); probe
           region painted at t ~ 5.5 s in vr180 (last_seen), black in vr180_black.
@@ -33,6 +34,8 @@
       (e) tags: ffprobe on the MP4 and on the MKV made with the tray's remux command: spherical (tiled) equirectangular
           + stereo 3D side by side (vr180) / top and bottom (vr360); the exact ffprobe lines are printed. Plus the
           <name>.json sidecar and the _VR180 / _VR360 file name.
+      (g) vr180_10s: the stream is HEVC Main 10 / yuv420p10le and the log has the sharpen 0.60 pass on the dome output;
+          (a), (b) and (d) run on it too (the sharpen pass must not move the marker or bleed between the eyes).
     Sets XR_EYE_CAPTURE_REQUIRE_TRAY=0 and XR_EYE_CAPTURE_TRAY_IPC=0 (a running tray must not post-process the MP4s).
       powershell -ExecutionPolicy Bypass -File tests\run_dome.ps1 [-BuildLayer]
     -BuildLayer: test build\Release\eye_capture.dll instead of the installed (registered) copy, as in run_e2e.ps1.
@@ -124,13 +127,15 @@ $cases = @(
     @{ name = 'vr180_black'; cfg = 'projection=vr180;fill=black';       proj = 'vr180' },
     @{ name = 'vr180_fade1'; cfg = 'projection=vr180;fill_fade_s=1';    proj = 'vr180' },
     @{ name = 'vr360';       cfg = 'projection=vr360';                  proj = 'vr360' },
-    @{ name = 'vr180_full';  cfg = 'projection=vr180;dome_shared_view=0'; proj = 'vr180' }
+    @{ name = 'vr180_full';  cfg = 'projection=vr180;dome_shared_view=0'; proj = 'vr180' },
+    @{ name = 'vr180_10s';   cfg = 'projection=vr180;bit_depth=10;sharpen=0.6'; proj = 'vr180' }
 )
 $prevTray = $env:XR_EYE_CAPTURE_REQUIRE_TRAY; $prevCfg = $env:XR_EYE_CAPTURE_CONFIG; $prevIpc = $env:XR_EYE_CAPTURE_TRAY_IPC
 $env:XR_EYE_CAPTURE_REQUIRE_TRAY = '0'
 $env:XR_EYE_CAPTURE_TRAY_IPC = '0'   # a running tray must not post-process (and delete) the test recordings
 $data = @{}
 $files = @{}
+$logs = @{}
 $fails = New-Object System.Collections.Generic.List[string]
 function Check($ok, $what) {
     if ($ok) { Write-Host "  ok   $what" -ForegroundColor Green } else { Write-Host "  FAIL $what" -ForegroundColor Red; $fails.Add($what) }
@@ -148,6 +153,7 @@ foreach ($c in $cases) {
     $file = $mOut.Groups[1].Value.Trim()
     $files[$c.name] = $file
     $log = Get-Content (Join-Path $out 'eye_capture.log') -Raw -Encoding UTF8
+    $logs[$c.name] = $log
     foreach ($pat in @('recorder: dome vr\d+: [^\r\n]+', 'recorder: dome_shared_view[^\r\n]+','recorder: dome pass[^\r\n]+', 'dome frame D fixed[^\r\n]+', 're-projection summary[^\r\n]+', 'st3d\+sv3d: [^|\r\n]+')) {
         foreach ($mm in [regex]::Matches($log, $pat)) { Write-Host "  [$($c.name)] $($mm.Value)" }
     }
@@ -198,7 +204,7 @@ function Stats($rows, $t0, $t1) {
 
 Write-Host "`n=== checks" -ForegroundColor Cyan
 # (a) world lock + (b) marker after the turn
-foreach ($name in @('vr180', 'vr360')) {
+foreach ($name in @('vr180', 'vr360', 'vr180_10s')) {
     if (-not $data.ContainsKey($name)) { continue }
     $d = $data[$name]
     $a = Stats $d.rows 1.0 3.9
@@ -239,7 +245,7 @@ if ($data.ContainsKey('vr180_fade1')) {
     }
 }
 # (d) stereo: both eyes put the far marker on the same equirect pixel
-foreach ($name in @('vr180', 'vr180_black', 'vr180_fade1', 'vr360')) {
+foreach ($name in @('vr180', 'vr180_black', 'vr180_fade1', 'vr360', 'vr180_10s')) {
     if (-not $data.ContainsKey($name)) { continue }
     $both = @($data[$name].rows | Where-Object { -not [double]::IsNaN($_.xl) -and -not [double]::IsNaN($_.xr) })
     $dx = @($both | ForEach-Object { $_.xr - $_.xl }); $dy = @($both | ForEach-Object { $_.yr - $_.yl })
@@ -263,6 +269,14 @@ foreach ($name in @('vr180', 'vr180_full')) {
     } else {
         Check ($sv.Count -gt 200 -and $smn -gt 60) ("(f) {0}: dome_shared_view = 0: lon -45 is PAINTED by the left eye over t 1.0..3.9 s: max-Y {1}..{2} over {3} frames (> 60)" -f $name, $smn, $smx, $sv.Count)
     }
+}
+# (g) bit_depth = 10 + sharpen on the dome
+if ($files.ContainsKey('vr180_10s')) {
+    $f = $files['vr180_10s']
+    $pv = (& $ffprobe -v error -select_streams v:0 -show_entries stream=codec_name,profile,pix_fmt -of csv=p=0 $f | Out-String).Trim()
+    Check ($pv -match '^hevc,Main 10,yuv420p10le') ("(g) vr180_10s: stream {0} (hevc, Main 10, yuv420p10le)" -f $pv)
+    $ms = [regex]::Match($logs['vr180_10s'], 'recorder: sharpen 0\.60 [^\r\n]*dome output[^\r\n]*')
+    Check $ms.Success ("(g) vr180_10s: sharpen pass on the dome output: {0}" -f $ms.Value)
 }
 # (e) tags: MP4 boxes, the tray's MKV remux, sidecar, file name
 foreach ($name in @('vr180', 'vr360')) {

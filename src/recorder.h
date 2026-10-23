@@ -6,7 +6,8 @@
 //   * game thread  : SubmitFrame() -- picks a free ring slot, IFrameSource::CopyEyes (GPU work only), queues it.
 //                    Never waits: a full ring (or a slot still busy on the GPU) drops the frame and counts it.
 //   * worker thread: everything else (device + ring creation, sink writer, per-frame [linear->sRGB pre-pass],
-//                    [head-motion smoothing re-projection | VR180 / VR360 dome pass], NV12 conversion and WriteSample,
+//                    [head-motion smoothing re-projection | VR180 / VR360 dome pass], [sharpen], NV12 / P010 conversion
+//                    and WriteSample,
 //                    finalize, st3d (+ sv3d and a <name>.json sidecar for dome recordings; the sidecar also for YouTube-mode ones).
 //                    One worker per recording.
 //   * audio thread : AudioCapture -> WriteSample on the audio stream.
@@ -36,6 +37,12 @@ struct RecorderSettings {
     RateControl  rateControl = RateControl::Vbr;   // vbr / cbr: at `bitrate`; qp: constant QP `qp`, `bitrate` ignored
     unsigned     qp = 24;            // 0..51 (rate_control = qp)
     int          qualityVsSpeed = -1;   // CODECAPI_AVEncCommonQualityVsSpeed 0..100; -1 = auto (AV1 above 1 Gpixel/s: 25)
+    // bit_depth: 10 = HEVC Main10 / AV1 Main 10-bit from P010 surfaces, the re-projection / dome pass in R10G10B10A2 (less
+    // banding in skies and dark scenes). H.264 and encoders that refuse 10-bit record 8-bit (logged). 8 = NV12 as before.
+    unsigned     bitDepth = 8;
+    // sharpen: 0 = off; 0 < s <= 1 = strength of a contrast-adaptive sharpen pass (kSharpenPs) on the frame the video
+    // processor reads (after the dome / re-projection resampling, which softens the picture; per eye, no bleed at the seam).
+    float        sharpen = 0.0f;
     // constant_frame_rate: exactly one frame per 1/fps (fps = the nominal rate below, after max_fps) at k / fps with constant
     // durations: a frame that lands in an already written slot is dropped, a missing slot repeats the previous frame
     // (at most 5 s per gap). Off = the real timestamps (variable frame rate).

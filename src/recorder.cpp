@@ -141,6 +141,44 @@ const char kSeenPs[] =
     "    return Lit(E, s + float2(-q, -q)) * Lit(E, s + float2(q, -q)) * Lit(E, s + float2(-q, q)) * Lit(E, s + float2(q, q));\n"
     "}\n";
 
+// sharpen: contrast-adaptive sharpening (the AMD FidelityFX CAS formula, no scaling) on the frame the video processor reads.
+// Per pixel: the 3x3 neighbourhood's min / max set how much the cross (up, left, right, down) is subtracted -- strong where
+// the local contrast is low, little at hard edges, so it adds detail without halos or noise boost. peak = -0.2 x sharpen
+// (1 = CAS at its strongest). Taps are clamped to the pixel's own eye rectangle: the left / right (or top / bottom) eyes
+// never bleed into each other. Black (empty dome) areas stay black (max = 0 -> amp = 0).
+const char kSharpenPs[] =
+    "Texture2D<float4> src : register(t0);\n"
+    "cbuffer S : register(b0) { int4 r0; int4 r1; float4 p; };\n"   // eye rects (x0, y0, x1, y1 inclusive); p.x = peak
+    "float3 L(int2 q, int4 r) { return src.Load(int3(clamp(q, r.xy, r.zw), 0)).rgb; }\n"
+    "float4 main(float4 pos : SV_Position) : SV_Target {\n"
+    "    const int2 c = int2(pos.xy);\n"
+    "    const int4 r = (c.x >= r1.x && c.y >= r1.y) ? r1 : r0;\n"
+    "    float3 a = L(c + int2(-1, -1), r), b = L(c + int2(0, -1), r), cc = L(c + int2(1, -1), r);\n"
+    "    float3 d = L(c + int2(-1, 0), r), e = L(c, r), f = L(c + int2(1, 0), r);\n"
+    "    float3 g = L(c + int2(-1, 1), r), h = L(c + int2(0, 1), r), i = L(c + int2(1, 1), r);\n"
+    "    float3 mn = min(min(min(d, e), min(f, b)), h);\n"
+    "    float3 mx = max(max(max(d, e), max(f, b)), h);\n"
+    "    mn += min(mn, min(min(a, cc), min(g, i)));\n"
+    "    mx += max(mx, max(max(a, cc), max(g, i)));\n"
+    "    float3 amp = sqrt(saturate(min(mn, 2.0 - mx) / max(mx, 1e-5)));\n"
+    "    float3 w = amp * p.x;\n"
+    "    return float4(saturate((b * w + d * w + f * w + h * w + e) / (1.0 + 4.0 * w)), 1.0);\n"
+    "}\n";
+struct SharpenConstants { int32_t r0[4], r1[4]; float p[4]; };
+static_assert(sizeof(SharpenConstants) % 16 == 0, "constant buffer size");
+
+// 8-bit RGB formats: bit_depth = 10 renders the stage / pre-pass into R10G10B10A2 instead of these
+bool Fmt8Bit(DXGI_FORMAT f) {
+    switch (f) {
+    case DXGI_FORMAT_R8G8B8A8_UNORM: case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB: case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+    case DXGI_FORMAT_B8G8R8A8_UNORM: case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB: case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+    case DXGI_FORMAT_B8G8R8X8_UNORM: case DXGI_FORMAT_B8G8R8X8_UNORM_SRGB: case DXGI_FORMAT_B8G8R8X8_TYPELESS:
+        return true;
+    default:
+        return false;
+    }
+}
+
 const UINT kTimingQueries = 6;
 
 // ---- NV12 pool: tracked samples return their surface here when Media Foundation releases them ----
@@ -413,8 +451,25 @@ struct Recorder::Impl {
     // smoothing stats (worker thread only)
     uint64_t smFrames = 0, smGuarded = 0, smUncovered = 0, smCatch = 0, smNoPose = 0, smResets = 0, gpuN = 0;
     double smCorrSum = 0, smCorrMax = 0, gpuSum = 0, gpuMax = 0, cpuSum = 0, cpuMax = 0;
+    // bit_depth = 10: on for this recording (Start; off again when the video processor has no P010 output, the codec is H.264
+    // or no encoder takes Main10 -- logged); r10In = the video processor reads R10G10B10A2 (the 10-bit stage / pre-pass format)
+    bool tenBit = false;
+    bool r10In = false;
+    DXGI_FORMAT stageFmt = DXGI_FORMAT_UNKNOWN;   // re-projection / dome output (+ last_seen dome) format
+    DXGI_FORMAT linFmt = DXGI_FORMAT_R8G8B8A8_UNORM;   // linear -> sRGB pre-pass output format
+    // sharpen (kSharpenPs): on for this recording; the pass reads the stage output / the pre-pass output / the ring slot and
+    // writes shTex, which the video processor reads instead
+    bool sharpOn = false;
+    ComPtr<ID3D11VertexShader> shVs;
+    ComPtr<ID3D11PixelShader> shPs;
+    ComPtr<ID3D11Buffer> shCb;
+    ComPtr<ID3D11Texture2D> shTex;
+    ComPtr<ID3D11RenderTargetView> shRtv;
+    ComPtr<ID3D11VideoProcessorInputView> shView;
+    ComPtr<ID3D11ShaderResourceView> shStageSrv, shLinSrv;
+    std::vector<ComPtr<ID3D11ShaderResourceView>> shRingSrv;
     HANDLE devHandle = nullptr;   // IMFDXGIDeviceManager handle, to lock the device around our GPU work
-    std::vector<ComPtr<ID3D11Texture2D>> nv12;
+    std::vector<ComPtr<ID3D11Texture2D>> nv12;   // the encoder's input surfaces: NV12, or P010 (tenBit)
     std::vector<ComPtr<ID3D11VideoProcessorOutputView>> outViews;
     std::vector<ComPtr<IMFAsyncCallback>> poolCb;
     std::shared_ptr<Nv12Pool> pool;
@@ -450,6 +505,8 @@ struct Recorder::Impl {
     bool FitOutputSize();
     bool InitVideoProcessor();
     bool InitLinearPass();
+    bool InitPool();
+    bool InitSharpen(DXGI_FORMAT readFmt);
     bool InitReprojection(DXGI_FORMAT vpFmt);
     bool InitDomeTextures(DXGI_FORMAT vpFmt, double& mb);
     void Reproject(ID3D11ShaderResourceView* const* srvs, UINT nSrv, ID3D11RenderTargetView* const* rtvs, UINT nRtv,
@@ -491,6 +548,9 @@ bool Recorder::Start(IFrameSource* src, const RecorderSettings& s, UINT w, UINT 
     m.fps = s.fps ? s.fps : 90;
     if (s.maxFps && s.maxFps < m.fps) m.fps = s.maxFps;
     m.codec = s.codec;
+    m.tenBit = s.bitDepth == 10;
+    m.r10In = false;
+    m.sharpOn = s.sharpen > 0.0f;
     m.stopReq = false;
     m.t0 = INT64_MIN;
     m.lastTs = INT64_MIN;
@@ -861,12 +921,16 @@ void Recorder::Impl::Run() {
                  (unsigned long long)cfrRepeated.load(), (unsigned long long)cfrDropped.load(),
                  cfrCapped ? " (a gap over 5 s was only partly filled)" : "");
     else snprintf(rateText, sizeof(rateText), "variable frame rate (real timestamps)");
-    char sum[1000];
+    char sharpText[16];
+    if (sharpOn) snprintf(sharpText, sizeof(sharpText), "%.2f", std::min(1.0f, s.sharpen));
+    else snprintf(sharpText, sizeof(sharpText), "off");
+    char sum[1100];
     snprintf(sum, sizeof(sum),
-             "recording summary: %s | %s | %ux%u %s %s @%u fps nominal | layout %s | frames written %llu, dropped %llu "
+             "recording summary: %s | %s | %ux%u %s %s @%u fps nominal | layout %s | %s-bit, sharpen %s | frames written %llu, dropped %llu "
              "(ring full %llu, gpu busy %llu, encoder stall %llu), duplicates %llu, over max_fps %llu | %s | duration %.2f s | "
              "audio %s (%llu frames = %.2f s) | finalize %s | %s",
              fileOk ? "OK" : "FAILED", file.c_str(), outW, outH, VideoCodecName(codec), rcText.c_str(), fps, layoutText,
+             tenBit ? "10" : "8", sharpText,
              (unsigned long long)frames,
              (unsigned long long)(dropRing.load() + dropGpu.load() + dropPool.load()),
              (unsigned long long)dropRing.load(), (unsigned long long)dropGpu.load(), (unsigned long long)dropPool.load(),
@@ -936,6 +1000,10 @@ bool Recorder::Impl::Init() {
     LOGI("recorder: init %s -- SBS %ux%u (left %u) %s %s -> %ux%u %s %.0f Mb/s, %u fps nominal, GOP %u, rate_control %s%s",
          GfxApiName(src->Api()), W, H, leftW, DxgiFormatName(fmt), srgb ? "sRGB-encoded" : "linear", outW, outH,
          VideoCodecName(codec), bitrate / 1e6, fps, fps * 2, RateControlKey(s.rateControl), qpNote);
+    if (tenBit && codec == VideoCodec::H264) {
+        LOGW("recorder: bit_depth = 10: H.264 has no 10-bit hardware encoding -- recording 8-bit (use codec = hevc or av1 for 10-bit)");
+        tenBit = false;
+    }
     if (cfr)
         LOGI("recorder: constant frame rate %u fps: one frame every %.3f ms at k / %u s with constant durations (a frame in an "
              "already written slot is dropped, a missing slot repeats the previous frame, at most 5 s per gap); audio keeps its real "
@@ -1071,22 +1139,33 @@ bool Recorder::Impl::Init() {
     // list. HEVC: hw, H.264 hw (only <= 4096), HEVC sw, H.264 sw (only <= 4096). H.264: hw, sw. HEVC and AV1 both take
     // 8192, so a fallback from AV1 keeps the size fitted above. XR_EYE_CAPTURE_TEST_NO_AV1 (tests only) makes the AV1
     // attempt fail in CreateWriter (after AddStream), as if the GPU had no AV1 encoder.
-    struct Attempt { VideoCodec c; bool hw; };
+    // bit_depth = 10: first the asked codec alone in 10-bit (hardware; HEVC also software) -- the codec choice wins over the
+    // bit depth -- then, if none takes Main10, the P010 pool is replaced by NV12 and the normal 8-bit list runs.
+    struct Attempt { VideoCodec c; bool hw; bool ten; };
     const VideoCodec want = codec;
     const bool h264Fits = outW <= 4096 && outH <= 4096;
     std::vector<Attempt> attempts;
-    if (want == VideoCodec::Av1) attempts.push_back({VideoCodec::Av1, true});
+    if (tenBit) {
+        attempts.push_back({want, true, true});
+        if (want == VideoCodec::Hevc) attempts.push_back({VideoCodec::Hevc, false, true});
+    }
+    if (want == VideoCodec::Av1) attempts.push_back({VideoCodec::Av1, true, false});
     if (want == VideoCodec::H264) {
-        attempts.push_back({VideoCodec::H264, true});
-        attempts.push_back({VideoCodec::H264, false});
+        attempts.push_back({VideoCodec::H264, true, false});
+        attempts.push_back({VideoCodec::H264, false, false});
     } else {
-        attempts.push_back({VideoCodec::Hevc, true});
-        if (h264Fits) attempts.push_back({VideoCodec::H264, true});
-        attempts.push_back({VideoCodec::Hevc, false});
-        if (h264Fits) attempts.push_back({VideoCodec::H264, false});
+        attempts.push_back({VideoCodec::Hevc, true, false});
+        if (h264Fits) attempts.push_back({VideoCodec::H264, true, false});
+        attempts.push_back({VideoCodec::Hevc, false, false});
+        if (h264Fits) attempts.push_back({VideoCodec::H264, false, false});
     }
     HRESULT hr = E_FAIL;
     for (const Attempt& a : attempts) {
+        if (tenBit && !a.ten) {   // every 10-bit attempt failed: 8-bit from here on
+            LOGW("recorder: bit_depth = 10: no %s encoder accepted 10-bit (Main10, P010) -- recording 8-bit", VideoCodecName(want));
+            tenBit = false;
+            if (!InitPool()) return false;
+        }
         std::string why;
         bitrate = s.bitrate ? s.bitrate : VideoCodecDefaultMbps(a.c) * 1000000u;   // the default follows the codec tried
         hr = CreateWriter(a.c, a.hw, why);
@@ -1097,13 +1176,19 @@ bool Recorder::Impl::Init() {
             codec = a.c;
             break;
         }
-        LOGW("recorder: sink writer attempt %s %s failed at %s hr=0x%08lx", VideoCodecName(a.c),
-             a.hw ? "hardware" : "software", why.c_str(), (unsigned long)hr);
-        if (a.c == VideoCodec::Av1)
+        LOGW("recorder: sink writer attempt %s %s%s failed at %s hr=0x%08lx", VideoCodecName(a.c),
+             a.hw ? "hardware" : "software", a.ten ? " 10-bit" : "", why.c_str(), (unsigned long)hr);
+        if (a.c == VideoCodec::Av1 && !a.ten)
             LOGW("recorder: no usable hardware AV1 encoder (needs AV1 encoding on the GPU, e.g. NVIDIA RTX 40 / 50) -- trying HEVC");
         DeleteFileW(s.path.c_str());
     }
     if (FAILED(hr)) { SetMessage("no usable video encoder"); return false; }
+    if (tenBit)
+        LOGI("recorder: 10-bit: %s %s from P010 surfaces, %s", VideoCodecName(codec),
+             codec == VideoCodec::Av1 ? "Main 4:2:0 10-bit" : "Main10 4:2:0",
+             stage && stageFmt == DXGI_FORMAT_R10G10B10A2_UNORM ? "re-projection / dome pass in R10G10B10A2"
+             : !srgb && linFmt == DXGI_FORMAT_R10G10B10A2_UNORM ? "linear pre-pass in R10G10B10A2"
+                                                               : "colour conversion from the game's format");
     LogTransforms();
     {   // what the encoder MFT reports back (ICodecAPI::GetValue; "n/a" = it does not say)
         ComPtr<ICodecAPI> api;
@@ -1162,12 +1247,30 @@ bool Recorder::Impl::InitVideoProcessor() {
     cd.Usage = D3D11_VIDEO_USAGE_OPTIMAL_QUALITY;
     hr = vdev->CreateVideoProcessorEnumerator(&cd, &venum);
     if (FAILED(hr)) { LOGE("recorder: CreateVideoProcessorEnumerator hr=0x%08lx", (unsigned long)hr); SetMessage("video processor"); return false; }
-    const DXGI_FORMAT vpFmt = srgb ? fmt : DXGI_FORMAT_R8G8B8A8_UNORM;   // linear input goes through the pre-pass
+    // bit_depth = 10: P010 output, and the stage / pre-pass in R10G10B10A2 when the video processor reads it
+    if (tenBit) {
+        UINT p010 = 0, r10 = 0;
+        venum->CheckVideoProcessorFormat(DXGI_FORMAT_P010, &p010);
+        venum->CheckVideoProcessorFormat(DXGI_FORMAT_R10G10B10A2_UNORM, &r10);
+        r10In = (r10 & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT) != 0;
+        if (!(p010 & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT)) {
+            LOGW("recorder: bit_depth = 10: the video processor has no P010 output (0x%x) -- recording 8-bit", p010);
+            tenBit = false;
+        } else if (!r10In) {
+            LOGW("recorder: bit_depth = 10: the video processor cannot read R10G10B10A2 (0x%x) -- the passes stay in their 8-bit "
+                 "format, only the encode is 10-bit", r10);
+        }
+    }
+    linFmt = tenBit && r10In ? DXGI_FORMAT_R10G10B10A2_UNORM : DXGI_FORMAT_R8G8B8A8_UNORM;
+    const DXGI_FORMAT vpFmt = srgb ? fmt : linFmt;   // linear input goes through the pre-pass
+    stageFmt = tenBit && r10In && Fmt8Bit(vpFmt) ? DXGI_FORMAT_R10G10B10A2_UNORM : vpFmt;
+    const DXGI_FORMAT poolFmt = tenBit ? DXGI_FORMAT_P010 : DXGI_FORMAT_NV12;
     UINT inSup = 0, outSup = 0;
     venum->CheckVideoProcessorFormat(vpFmt, &inSup);
-    venum->CheckVideoProcessorFormat(DXGI_FORMAT_NV12, &outSup);
+    venum->CheckVideoProcessorFormat(poolFmt, &outSup);
     if (!(inSup & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT) || !(outSup & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT)) {
-        LOGE("recorder: video processor cannot convert %s -> NV12 (in 0x%x out 0x%x)", DxgiFormatName(vpFmt), inSup, outSup);
+        LOGE("recorder: video processor cannot convert %s -> %s (in 0x%x out 0x%x)", DxgiFormatName(vpFmt),
+             DxgiFormatName(poolFmt), inSup, outSup);
         SetMessage("format not supported by the video processor");
         return false;
     }
@@ -1182,8 +1285,9 @@ bool Recorder::Impl::InitVideoProcessor() {
     bool cs1 = SUCCEEDED(vctx.As(&vctx1));
     if (cs1 && SUCCEEDED(venum.As(&venum1))) {
         BOOL sup = FALSE;
-        if (SUCCEEDED(venum1->CheckVideoProcessorFormatConversion(vpFmt, inCs, DXGI_FORMAT_NV12, outCs, &sup)) && !sup)
-            LOGW("recorder: the video processor reports no %s RGB -> NV12 BT.709 conversion; colours may be off", DxgiFormatName(vpFmt));
+        if (SUCCEEDED(venum1->CheckVideoProcessorFormatConversion(vpFmt, inCs, poolFmt, outCs, &sup)) && !sup)
+            LOGW("recorder: the video processor reports no %s RGB -> %s BT.709 conversion; colours may be off", DxgiFormatName(vpFmt),
+                 DxgiFormatName(poolFmt));
     }
     if (cs1) {
         vctx1->VideoProcessorSetStreamColorSpace1(vp.Get(), 0, inCs);
@@ -1220,7 +1324,7 @@ bool Recorder::Impl::InitVideoProcessor() {
         hr = vdev->CreateVideoProcessorInputView(linTex.Get(), venum.Get(), &iv, &linView);
         if (FAILED(hr)) { LOGE("recorder: input view on the linear pre-pass texture hr=0x%08lx", (unsigned long)hr); SetMessage("video processor input view"); return false; }
     }
-    if (stage && !InitReprojection(vpFmt)) {
+    if (stage && !InitReprojection(stageFmt)) {
         // raw layout (no dome / symmetric fov) rendered at the recorded size: the plain path can still record
         const bool rawScaled = !dome.valid && !sym.valid && rpScaled;
         if (dome.valid || yt || ((vpW != W || vpH != H) && !rawScaled)) { SetMessage("re-projection setup failed"); return false; }   // VP sized for its output
@@ -1264,7 +1368,120 @@ bool Recorder::Impl::InitVideoProcessor() {
         }
     }
 
-    // NV12 pool
+    if (sharpOn) {
+        const DXGI_FORMAT readFmt = stage ? stageFmt : srgb ? fmt : linFmt;   // what the video processor would read
+        if (!InitSharpen(readFmt)) {
+            LOGW("recorder: sharpen disabled for this recording (setup failed)");
+            sharpOn = false;
+        }
+    }
+    if (InitPool()) return true;
+    if (!tenBit) return false;
+    LOGW("recorder: bit_depth = 10: no P010 surfaces -- recording 8-bit");
+    tenBit = false;
+    return InitPool();
+}
+
+// sharpen: the pass (kSharpenPs), its output texture shTex (vpW x vpH; R10G10B10A2 in 10-bit mode, else R8G8B8A8 for 8-bit
+// sources, else the source format) + the video processor's view of it, and the source views for each path.
+bool Recorder::Impl::InitSharpen(DXGI_FORMAT readFmt) {
+    ComPtr<ID3DBlob> vsCode, psCode, errs;
+    HRESULT hr = D3DCompile(kReprojVs, sizeof(kReprojVs) - 1, "sharpen_vs", nullptr, nullptr, "main", "vs_5_0",
+                            D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &vsCode, &errs);
+    if (SUCCEEDED(hr)) {
+        errs.Reset();
+        hr = D3DCompile(kSharpenPs, sizeof(kSharpenPs) - 1, "sharpen_ps", nullptr, nullptr, "main", "ps_5_0",
+                        D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &psCode, &errs);
+    }
+    if (FAILED(hr)) {
+        LOGE("recorder: sharpen shader compile failed hr=0x%08lx %s", (unsigned long)hr, errs ? (const char*)errs->GetBufferPointer() : "");
+        return false;
+    }
+    hr = enc->CreateVertexShader(vsCode->GetBufferPointer(), vsCode->GetBufferSize(), nullptr, &shVs);
+    if (SUCCEEDED(hr)) hr = enc->CreatePixelShader(psCode->GetBufferPointer(), psCode->GetBufferSize(), nullptr, &shPs);
+    // eye rectangles in the frame the video processor reads: dome left | right (VR180) or top / bottom (VR360); flat
+    // re-projection left | right or the YouTube top / bottom; the plain path the ring's left | right
+    UINT sx = outRightX, sy = outBottomY;
+    if (dome.valid) {
+        const bool v180 = s.dome.projection == DomeProjection::Vr180;
+        sx = v180 ? dome.eyeW : 0; sy = v180 ? 0 : dome.eyeH;
+    } else if (!stage) {
+        sx = leftW; sy = 0;
+    }
+    SharpenConstants sc{};
+    if (sy > 0) {
+        const int32_t r0[4] = {0, 0, (int32_t)vpW - 1, (int32_t)sy - 1}, r1[4] = {0, (int32_t)sy, (int32_t)vpW - 1, (int32_t)vpH - 1};
+        memcpy(sc.r0, r0, sizeof(r0)); memcpy(sc.r1, r1, sizeof(r1));
+    } else {
+        const int32_t r0[4] = {0, 0, (int32_t)sx - 1, (int32_t)vpH - 1}, r1[4] = {(int32_t)sx, 0, (int32_t)vpW - 1, (int32_t)vpH - 1};
+        memcpy(sc.r0, r0, sizeof(r0)); memcpy(sc.r1, r1, sizeof(r1));
+    }
+    const float strength = std::min(1.0f, s.sharpen);
+    sc.p[0] = -0.2f * strength;
+    if (SUCCEEDED(hr)) {
+        D3D11_BUFFER_DESC bd{};
+        bd.ByteWidth = sizeof(sc);
+        bd.Usage = D3D11_USAGE_IMMUTABLE;
+        bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        D3D11_SUBRESOURCE_DATA init{&sc, 0, 0};
+        hr = enc->CreateBuffer(&bd, &init, &shCb);
+    }
+    const DXGI_FORMAT shFmt = tenBit && r10In ? DXGI_FORMAT_R10G10B10A2_UNORM : Fmt8Bit(readFmt) ? DXGI_FORMAT_R8G8B8A8_UNORM : readFmt;
+    if (SUCCEEDED(hr)) {
+        D3D11_TEXTURE2D_DESC d{};
+        d.Width = vpW; d.Height = vpH; d.MipLevels = 1; d.ArraySize = 1; d.Format = shFmt; d.SampleDesc.Count = 1;
+        d.Usage = D3D11_USAGE_DEFAULT; d.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        hr = enc->CreateTexture2D(&d, nullptr, &shTex);
+    }
+    if (SUCCEEDED(hr)) hr = enc->CreateRenderTargetView(shTex.Get(), nullptr, &shRtv);
+    if (SUCCEEDED(hr)) {
+        UINT sup = 0;
+        venum->CheckVideoProcessorFormat(shFmt, &sup);
+        if (!(sup & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT)) {
+            LOGW("recorder: sharpen: the video processor cannot read %s", DxgiFormatName(shFmt));
+            hr = E_FAIL;
+        }
+    }
+    if (SUCCEEDED(hr)) {
+        D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC iv{};
+        iv.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
+        hr = vdev->CreateVideoProcessorInputView(shTex.Get(), venum.Get(), &iv, &shView);
+    }
+    shRingSrv.clear();
+    if (SUCCEEDED(hr)) {
+        if (stage) {
+            hr = enc->CreateShaderResourceView(rpTex.Get(), nullptr, &shStageSrv);
+        } else if (!srgb) {
+            hr = enc->CreateShaderResourceView(linTex.Get(), nullptr, &shLinSrv);
+        } else {
+            for (size_t i = 0; SUCCEEDED(hr) && i < ring.tex.size(); ++i) {
+                D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
+                sd.Format = fmt;   // typed member of the copy family: the bytes as stored (no sRGB decode)
+                sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+                sd.Texture2D.MipLevels = 1;
+                ComPtr<ID3D11ShaderResourceView> v;
+                hr = enc->CreateShaderResourceView(ring.tex[i].Get(), &sd, &v);
+                shRingSrv.push_back(v);
+            }
+        }
+    }
+    if (FAILED(hr)) {
+        LOGE("recorder: sharpen setup failed hr=0x%08lx", (unsigned long)hr);
+        shVs.Reset(); shPs.Reset(); shCb.Reset(); shTex.Reset(); shRtv.Reset(); shView.Reset();
+        shStageSrv.Reset(); shLinSrv.Reset(); shRingSrv.clear();
+        return false;
+    }
+    LOGI("recorder: sharpen %.2f (contrast-adaptive, per eye) on the %ux%u frame before the colour conversion: %s -> %s, +%.0f MB VRAM",
+         strength, vpW, vpH, stage ? (dome.valid ? "dome output" : "re-projection output") : !srgb ? "linear pre-pass output" : "ring",
+         DxgiFormatName(shFmt), (double)vpW * vpH * (shFmt == DXGI_FORMAT_R16G16B16A16_FLOAT ? 8 : 4) / (1024.0 * 1024.0));
+    return true;
+}
+
+// The encoder's input surfaces (kNv12Pool): NV12, or P010 for bit_depth = 10. Called again with NV12 when no encoder takes
+// 10-bit (Init, before any frame).
+bool Recorder::Impl::InitPool() {
+    HRESULT hr = S_OK;
+    const DXGI_FORMAT poolFmt = tenBit ? DXGI_FORMAT_P010 : DXGI_FORMAT_NV12;
     nv12.clear(); outViews.clear(); poolCb.clear();
     pool = std::make_shared<Nv12Pool>();
     pool->busy.assign(kNv12Pool, false);
@@ -1272,7 +1489,7 @@ bool Recorder::Impl::InitVideoProcessor() {
     ov.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
     for (UINT i = 0; i < kNv12Pool; ++i) {
         D3D11_TEXTURE2D_DESC d{};
-        d.Width = outW; d.Height = outH; d.MipLevels = 1; d.ArraySize = 1; d.Format = DXGI_FORMAT_NV12;
+        d.Width = outW; d.Height = outH; d.MipLevels = 1; d.ArraySize = 1; d.Format = poolFmt;
         d.SampleDesc.Count = 1; d.Usage = D3D11_USAGE_DEFAULT;
         d.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_VIDEO_ENCODER;
         ComPtr<ID3D11Texture2D> t;
@@ -1283,7 +1500,11 @@ bool Recorder::Impl::InitVideoProcessor() {
         }
         ComPtr<ID3D11VideoProcessorOutputView> v;
         if (SUCCEEDED(hr)) hr = vdev->CreateVideoProcessorOutputView(t.Get(), venum.Get(), &ov, &v);
-        if (FAILED(hr)) { LOGE("recorder: NV12 surface %ux%u failed hr=0x%08lx", outW, outH, (unsigned long)hr); SetMessage("NV12 surface"); return false; }
+        if (FAILED(hr)) {
+            LOGE("recorder: %s surface %ux%u failed hr=0x%08lx", DxgiFormatName(poolFmt), outW, outH, (unsigned long)hr);
+            SetMessage(tenBit ? "P010 surface" : "NV12 surface");
+            return false;
+        }
         nv12.push_back(t);
         outViews.push_back(v);
         ComPtr<IMFAsyncCallback> cb;
@@ -1305,7 +1526,7 @@ bool Recorder::Impl::InitLinearPass() {
     }
     hr = enc->CreateComputeShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, &linCs);
     D3D11_TEXTURE2D_DESC d{};
-    d.Width = W; d.Height = H; d.MipLevels = 1; d.ArraySize = 1; d.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    d.Width = W; d.Height = H; d.MipLevels = 1; d.ArraySize = 1; d.Format = linFmt;   // R10G10B10A2 for bit_depth = 10
     d.SampleDesc.Count = 1; d.Usage = D3D11_USAGE_DEFAULT;
     d.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
     if (SUCCEEDED(hr)) hr = enc->CreateTexture2D(&d, nullptr, &linTex);
@@ -1321,7 +1542,7 @@ bool Recorder::Impl::InitLinearPass() {
         linSrv.push_back(v);
     }
     if (FAILED(hr)) { LOGE("recorder: linear->sRGB pre-pass setup failed hr=0x%08lx", (unsigned long)hr); SetMessage("linear pre-pass"); return false; }
-    LOGI("recorder: linear swapchain format -> sRGB-encoding pre-pass (compute) on the encoder device");
+    LOGI("recorder: linear swapchain format -> sRGB-encoding pre-pass (compute) on the encoder device -> %s", DxgiFormatName(linFmt));
     return true;
 }
 
@@ -1648,8 +1869,9 @@ HRESULT Recorder::Impl::CreateWriter(VideoCodec c, bool hardware, std::string& w
     MFSetAttributeRatio(out.Get(), MF_MT_FRAME_RATE, fps, 1);
     MFSetAttributeRatio(out.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
     out->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
-    out->SetUINT32(MF_MT_MPEG2_PROFILE, c == VideoCodec::Av1    ? (UINT32)eAVEncAV1VProfile_Main_420_8
-                                        : c == VideoCodec::Hevc ? (UINT32)eAVEncH265VProfile_Main_420_8
+    // tenBit: HEVC Main10 / AV1 Main 10-bit, fed P010 (InitPool; H.264 never gets here in 10-bit, see Init)
+    out->SetUINT32(MF_MT_MPEG2_PROFILE, c == VideoCodec::Av1    ? (UINT32)(tenBit ? eAVEncAV1VProfile_Main_420_10 : eAVEncAV1VProfile_Main_420_8)
+                                        : c == VideoCodec::Hevc ? (UINT32)(tenBit ? eAVEncH265VProfile_Main_420_10 : eAVEncH265VProfile_Main_420_8)
                                                                 : (UINT32)eAVEncH264VProfile_High);
     setColour(out.Get());
     hr = w->AddStream(out.Get(), &vStream);
@@ -1661,7 +1883,7 @@ HRESULT Recorder::Impl::CreateWriter(VideoCodec c, bool hardware, std::string& w
 
     MFCreateMediaType(&in);
     in->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-    in->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12);
+    in->SetGUID(MF_MT_SUBTYPE, tenBit ? MFVideoFormat_P010 : MFVideoFormat_NV12);
     MFSetAttributeSize(in.Get(), MF_MT_FRAME_SIZE, outW, outH);
     MFSetAttributeRatio(in.Get(), MF_MT_FRAME_RATE, fps, 1);
     MFSetAttributeRatio(in.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
@@ -1764,7 +1986,7 @@ HRESULT Recorder::Impl::CreateWriter(VideoCodec c, bool hardware, std::string& w
         rcText = std::string("encoder default (rate_control ") + RateControlKey(rc) + " not accepted)";
         hr = w->SetInputMediaType(vStream, in.Get(), nullptr);
     }
-    if (FAILED(hr)) { why = "SetInputMediaType(video NV12)"; return hr; }
+    if (FAILED(hr)) { why = tenBit ? "SetInputMediaType(video P010)" : "SetInputMediaType(video NV12)"; return hr; }
 
     if (hasAudio) {
         ComPtr<IMFMediaType> ao, ai;
@@ -1803,7 +2025,8 @@ HRESULT Recorder::Impl::CreateWriter(VideoCodec c, bool hardware, std::string& w
     if (rc == RateControl::Qp && rcText.compare(0, 9, "constant ") == 0)
         LOGI("recorder: rate_control = qp: %s (qp 0 = best, 51 = worst) -- bitrate_mbps is ignored, the file size follows the "
              "content", rcText.c_str());
-    LOGI("recorder: sink writer ready (%s, %s transforms, rate control %s%s)", VideoCodecName(c), hardware ? "hardware" : "software",
+    LOGI("recorder: sink writer ready (%s%s, %s transforms, rate control %s%s)", VideoCodecName(c), tenBit ? " 10-bit" : "",
+         hardware ? "hardware" : "software",
          rcText.c_str(),
          hasAudio ? (aacBytes >= 32000 ? ", AAC 256 kb/s" : aacBytes >= 24000 ? ", AAC 192 kb/s" : ", AAC <192 kb/s") : ", no audio");
     return S_OK;
@@ -1980,7 +2203,7 @@ void Recorder::Impl::Process(const Item& it) {
         rpSrc = rpRingSrv[it.slot].Get();
     } else {
         view = inViews[it.slot].Get();
-        if (!localCopies.empty()) encCtx->CopyResource(localCopies[it.slot].Get(), ring.tex[it.slot].Get());
+        if (!localCopies.empty() && !sharpOn) encCtx->CopyResource(localCopies[it.slot].Get(), ring.tex[it.slot].Get());
     }
     if (stage && dome.valid) {
         const int64_t c0 = QpcNow100ns();
@@ -2030,6 +2253,12 @@ void Recorder::Impl::Process(const Item& it) {
         Reproject(&rpSrc, 1, &rtv, 1, &rc, sizeof(rc));   // after the pre-pass (linear formats), so the colour path is unchanged
         view = rpView.Get();
         cpuTicks += QpcNow100ns() - c0;
+    }
+    if (sharpOn) {   // sharpen: the frame the video processor would read -> shTex, which it reads instead
+        ID3D11ShaderResourceView* ssrv = stage ? shStageSrv.Get() : !srgb ? shLinSrv.Get() : shRingSrv[it.slot].Get();
+        ID3D11RenderTargetView* srt = shRtv.Get();
+        ReprojDraw(encCtx.Get(), shVs.Get(), shPs.Get(), shCb.Get(), nullptr, &ssrv, 1, &srt, 1, vpW, vpH);
+        view = shView.Get();
     }
     D3D11_VIDEO_PROCESSOR_STREAM st{};
     st.Enable = TRUE;
@@ -2191,6 +2420,8 @@ void Recorder::Impl::Cleanup() {
     localCopies.clear();
     ov.Release();   // the ready mask stays for the summary line; Start resets it
     linView.Reset(); linUav.Reset(); linTex.Reset(); linSrv.clear(); linCs.Reset();
+    shVs.Reset(); shPs.Reset(); shCb.Reset(); shTex.Reset(); shRtv.Reset(); shView.Reset();
+    shStageSrv.Reset(); shLinSrv.Reset(); shRingSrv.clear();
     rpView.Reset(); rpRtv.Reset(); rpTex.Reset(); rpRingSrv.clear(); rpLinSrv.Reset(); rpQ.clear();
     rpCb.Reset(); rpSmp.Reset(); rpVs.Reset(); rpPs.Reset();
     for (int i = 0; i < 2; ++i) {
