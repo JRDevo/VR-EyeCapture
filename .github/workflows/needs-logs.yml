@@ -1,0 +1,85 @@
+# Log check for bug reports: a bug report without eye_capture.log gets the labels "needs-logs" + "needs-info" and one
+# friendly comment that asks for the files (needs-info.yml then reminds / closes it as for any issue that waits for the reporter).
+#   - issue opened or edited     : the body is checked
+#   - anyone comments            : the body + every non-maintainer comment are checked; with a log, "needs-logs" is removed
+#   - workflow_dispatch          : every open bug report is checked (the comment is still written only once per issue)
+# A log counts when the text has an attached .log / .zip / .7z file, or the pasted "==== VR EyeCapture ... loaded" line.
+# Feature requests and pull requests are not checked. On an issue the maintainer opened the bot never asks, but it still
+# removes "needs-logs" once a log is there. Issues opened before ASK_FROM (when this bot came in) are never asked.
+name: Needs-logs check
+
+on:
+  issues:
+    types: [opened, edited, labeled]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+
+permissions:
+  issues: write
+
+jobs:
+  check:
+    if: github.event_name == 'workflow_dispatch' || !github.event.issue.pull_request
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const MARK = '<!-- needs-logs-bot -->';
+            const ASK_FROM = Date.parse('2026-10-23T00:00:00Z');   // older issues: the maintainer asks by hand
+            const LOG_RE = [
+              /user-attachments\/(files|assets)\/\d+\/[^\s)\]]*\.(log|zip|7z|rar)\b/i,
+              /\[[^\]]*(eye_capture|tray)[^\]]*\]\(http/i,
+              /==== VR EyeCapture[^\n]*loaded/i,
+            ];
+            const hasLog = t => !!t && LOG_RE.some(r => r.test(t));
+            const { owner, repo } = context.repo;
+
+            async function check(issue) {
+              const labels = issue.labels.map(l => typeof l === 'string' ? l : l.name);
+              const isBug = labels.includes('bug') || /^\s*\[bug\]/i.test(issue.title);
+              if (!isBug || issue.pull_request || issue.state !== 'open') return;
+              const MAINT = ['OWNER', 'MEMBER', 'COLLABORATOR'];
+              const byMaint = MAINT.includes(issue.author_association);
+
+              const comments = await github.paginate(github.rest.issues.listComments,
+                { owner, repo, issue_number: issue.number, per_page: 100 });
+              const texts = [issue.body, ...comments.filter(c => !MAINT.includes(c.author_association) &&
+                                                               c.user.type !== 'Bot').map(c => c.body)];
+              const n = issue.number;
+
+              if (texts.some(hasLog)) {
+                if (labels.includes('needs-logs')) {
+                  await github.rest.issues.removeLabel({ owner, repo, issue_number: n, name: 'needs-logs' }).catch(() => {});
+                  core.info(`#${n}: log found, needs-logs removed`);
+                }
+                return;
+              }
+              if (labels.includes('needs-logs')) { core.info(`#${n}: still no log, already labelled`); return; }
+              if (byMaint) return;                       // the maintainer's own issue: asks by hand
+              if (Date.parse(issue.created_at) < ASK_FROM) { core.info(`#${n}: opened before the bot, not asked`); return; }
+
+              await github.rest.issues.addLabels({ owner, repo, issue_number: n, labels: ['needs-logs', 'needs-info'] });
+              if (comments.some(c => c.body && c.body.includes(MARK))) return;
+              await github.rest.issues.createComment({ owner, repo, issue_number: n, body: MARK + `
+            Hi @${issue.user.login}, thanks a lot for reporting this! VR EyeCapture is a free community project, and reports like yours are how it gets better for everyone.
+
+            To find out what happens, I need your log files. It only takes a minute (the steps are also in the README, [Reporting a problem (what to upload)](https://github.com/${owner}/${repo}#reporting-a-problem-what-to-upload)):
+
+            1. Make the problem happen once more (start the game, record, stop).
+            2. Open the log folder: paste \`%LOCALAPPDATA%\\VR EyeCapture\\logs\` into the Explorer address bar (or app window, Advanced, **Open log**).
+            3. Drag \`eye_capture.log\` and \`tray.log\` into a comment here, plus your \`config.ini\` (usually \`%APPDATA%\\VR EyeCapture\\config.ini\`). Please attach them as files; do not paste the text.
+
+            **Privacy:** the logs contain folder paths with your Windows user name. Open them and check (or edit them) before uploading. If there is no \`eye_capture.log\` at all, just tell me: then the layer did not load, and that is useful to know too. Thanks!` });
+              core.info(`#${n}: no log, labelled and asked`);
+            }
+
+            if (context.eventName === 'workflow_dispatch') {
+              const issues = await github.paginate(github.rest.issues.listForRepo,
+                { owner, repo, state: 'open', labels: 'bug', per_page: 100 });
+              for (const i of issues) await check(i);
+            } else {
+              const { data: issue } = await github.rest.issues.get({ owner, repo, issue_number: context.issue.number });
+              await check(issue);
+            }
