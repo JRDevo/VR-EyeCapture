@@ -844,36 +844,49 @@ int TestDrive(DWORD pid, bool leaveSlider) {
         UpdateWindow(pv);
         // mouse on the preview: click / drag place the dot (X / Y; Z kept), the wheel over it changes Z (angles kept). The circle
         // is +-50 degrees: half the radius = 25 degrees = tan(25) x 0.8 m = 0.37 m; past the edge = 50 degrees = 0.95 m.
+        // A click lands on a whole pixel (and the circle's inset is DPI-scaled), so "half way" is 25 degrees only up to one
+        // pixel: X / Y may read 0.36 .. 0.38. The checks allow 0.01; Z and the zero axis must be exact.
         {
             const std::wstring y0 = GetEdit(d, settings::ID_INDY);
             RECT cr{};
             GetClientRect(pv, &cr);
-            const int pcx = cr.right / 2, pcy = cr.bottom / 2, R = (cr.right < cr.bottom ? cr.right : cr.bottom) / 2 - 4;
+            const UINT dpi = GetDpiForWindow(pv) ? GetDpiForWindow(pv) : 96;
+            const int pcx = cr.right / 2, pcy = cr.bottom / 2,
+                      R = (cr.right < cr.bottom ? cr.right : cr.bottom) / 2 - (int)std::lround(4 * dpi / 96.0);
             auto click = [&](int x, int y) {
                 SendMessageW(pv, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(x, y));
                 SendMessageW(pv, WM_LBUTTONUP, 0, MAKELPARAM(x, y));
             };
-            auto at = [&](const wchar_t* x, const wchar_t* y, const wchar_t* z) {
-                return GetEdit(d, settings::ID_INDX) == x && GetEdit(d, settings::ID_INDY) == y && GetEdit(d, settings::ID_INDZ) == z;
+            auto num = [&](int id) { return std::wcstod(GetEdit(d, id).c_str(), nullptr); };
+            auto at = [&](double x, double y, const wchar_t* z) {   // x / y within 0.01 (one pixel), z exact
+                const bool ok = std::fabs(num(settings::ID_INDX) - x) < 0.0151 && std::fabs(num(settings::ID_INDY) - y) < 0.0151 &&
+                                GetEdit(d, settings::ID_INDZ) == z;
+                if (!ok)
+                    wprintf(L"    preview: got X %s Y %s Z %s\n", GetEdit(d, settings::ID_INDX).c_str(),
+                            GetEdit(d, settings::ID_INDY).c_str(), GetEdit(d, settings::ID_INDZ).c_str());
+                return ok;
             };
             SetEdit(d, settings::ID_INDZ, L"0.3");   // behind you: a click first brings the dot to 0.8 m
             click(pcx, pcy);
-            Check(at(L"0.00", L"0.00", L"-0.80"), "preview click in the centre (dot was behind you): X 0.00, Y 0.00, Z -0.80");
+            Check(at(0, 0, L"-0.80") && GetEdit(d, settings::ID_INDX) == L"0.00",
+                  "preview click in the centre (dot was behind you): X 0.00, Y 0.00, Z -0.80");
             click(pcx + R / 2, pcy);
-            Check(at(L"0.37", L"0.00", L"-0.80"), "preview click half way right: X 0.37 (25 deg at 0.8 m), Y 0.00, Z kept");
+            Check(at(0.37, 0, L"-0.80"), "preview click half way right: X 0.37 (25 deg at 0.8 m), Y 0.00, Z kept");
             click(pcx, pcy - R / 2);
-            Check(at(L"0.00", L"0.37", L"-0.80"), "preview click half way up: Y +0.37 (up is +Y)");
+            Check(at(0, 0.37, L"-0.80"), "preview click half way up: Y +0.37 (up is +Y)");
             SendMessageW(pv, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(pcx, pcy));
             SendMessageW(pv, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(pcx, pcy + R / 2));
             SendMessageW(pv, WM_LBUTTONUP, 0, MAKELPARAM(pcx, pcy + R / 2));
-            Check(at(L"0.00", L"-0.37", L"-0.80"), "preview drag from the centre down: Y -0.37");
+            Check(at(0, -0.37, L"-0.80"), "preview drag from the centre down: Y -0.37");
             click(pcx + 3 * R, pcy);
-            Check(at(L"0.95", L"0.00", L"-0.80"), "preview click past the edge: held on the circle (50 deg = X 0.95)");
+            Check(at(0.95, 0, L"-0.80") && GetEdit(d, settings::ID_INDX) == L"0.95",
+                  "preview click past the edge: held on the circle (50 deg = X 0.95)");
             click(pcx + R / 2, pcy);
+            const double xBefore = num(settings::ID_INDX);
             POINT sp{pcx, pcy};
             ClientToScreen(pv, &sp);
             SendMessageW(d, WM_MOUSEWHEEL, MAKEWPARAM(0, WHEEL_DELTA), MAKELPARAM(sp.x, sp.y));
-            Check(at(L"0.35", L"0.00", L"-0.75"), "mouse wheel up over the preview: Z -0.75 (5 cm nearer), X 0.35 (same angle)");
+            Check(at(xBefore * 0.75 / 0.8, 0, L"-0.75"), "mouse wheel up over the preview: Z -0.75 (5 cm nearer), X x 0.75 / 0.8 (same angle)");
             SetEdit(d, settings::ID_INDY, y0.c_str());
         }
         SetEdit(d, settings::ID_INDX, x0.c_str());
