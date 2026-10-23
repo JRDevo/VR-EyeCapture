@@ -718,6 +718,12 @@ HWND WaitDialog(DWORD pid, bool wantOpen, int ms = 5000) {
     }
     return FindDialog(pid);
 }
+// The window has tabs: show the tab that holds `c` (kMsgShowTabOf), then whether `c` is visible.
+bool OnTab(HWND c) {
+    if (!c) return false;
+    SendMessageW(GetParent(c), settings::kMsgShowTabOf, (WPARAM)GetDlgCtrlID(c), 0);
+    return IsWindowVisible(c) != FALSE;
+}
 void SetEdit(HWND d, int id, const wchar_t* t) { SendMessageW(GetDlgItem(d, id), WM_SETTEXT, 0, (LPARAM)t); }
 std::wstring GetEdit(HWND d, int id) {
     wchar_t b[512] = L"";
@@ -784,7 +790,7 @@ int TestDrive(DWORD pid, bool leaveSlider) {
         const HWND lp = GetDlgItem(d, settings::ID_LAYOUTPREVIEW);
         RECT lr{};
         if (lp) GetWindowRect(lp, &lr);
-        Check(lp != nullptr && IsWindowVisible(lp) && lr.right - lr.left >= 200 && lr.bottom - lr.top >= 130,
+        Check(lp != nullptr && OnTab(lp) && lr.right - lr.left >= 200 && lr.bottom - lr.top >= 130,
               "3D layout preview control exists and is visible");
         const WPARAM lay0 = (WPARAM)SendMessageW(GetDlgItem(d, settings::ID_LAYOUT3D), CB_GETCURSEL, 0, 0);
         SendMessageW(GetDlgItem(d, settings::ID_LAYOUT3D), CB_SETCURSEL, 1, 0);   // sbs_half: repaint must not crash
@@ -800,7 +806,7 @@ int TestDrive(DWORD pid, bool leaveSlider) {
         const HWND pv = GetDlgItem(d, settings::ID_INDPREVIEW);
         RECT pr{};
         if (pv) GetWindowRect(pv, &pr);
-        Check(pv != nullptr && IsWindowVisible(pv) && pr.right - pr.left >= 100 && pr.right - pr.left == pr.bottom - pr.top,
+        Check(pv != nullptr && OnTab(pv) && pr.right - pr.left >= 100 && pr.right - pr.left == pr.bottom - pr.top,
               "indicator preview control exists, visible and square");
         const std::wstring x0 = GetEdit(d, settings::ID_INDX), z0 = GetEdit(d, settings::ID_INDZ);
         SetEdit(d, settings::ID_INDX, L"0.5");
@@ -888,7 +894,7 @@ int TestDrive(DWORD pid, bool leaveSlider) {
     {
         const std::wstring fs = GetEdit(d, settings::ID_OUTFREE);
         printf("    free space line: '%s'\n", N(fs).c_str());
-        Check(IsWindowVisible(GetDlgItem(d, settings::ID_OUTFREE)) && fs.size() > 3 && fs[1] == L':' && fs.find(L" free") != std::wstring::npos,
+        Check(OnTab(GetDlgItem(d, settings::ID_OUTFREE)) && fs.size() > 3 && fs[1] == L':' && fs.find(L" free") != std::wstring::npos,
               "free-space line shows '<drive>: <n> GB free' for the output folder");
         const std::wstring keep = GetEdit(d, settings::ID_OUTDIR);
         SetEdit(d, settings::ID_OUTDIR, L"Q:\\no-such-drive\\x");   // EN_CHANGE -> refreshed once typing pauses (400 ms debounce)
@@ -913,7 +919,7 @@ int TestDrive(DWORD pid, bool leaveSlider) {
         if (ll) GetWindowRect(ll, &llr);
         printf("    Output layout combo at (%ld,%ld), Eye crop at (%ld,%ld), YouTube output at (%ld,%ld)\n", lr.left, lr.top, er.left, er.top,
                yr.left, yr.top);
-        Check(IsWindowVisible(GetDlgItem(d, settings::ID_LAYOUT3D)) && lr.left == er.left && er.top - lr.top == 30 && lr.left == yr.left &&
+        Check(OnTab(GetDlgItem(d, settings::ID_LAYOUT3D)) && lr.left == er.left && er.top - lr.top == 30 && lr.left == yr.left &&
                   lr.top > yr.top && ll && llr.top > lr.top - 8 && llr.bottom < lr.bottom + 8,
               "Output layout (combo + label) sits in the Export group, in the YouTube output column, one row above Eye crop");
     }
@@ -948,7 +954,7 @@ int TestDrive(DWORD pid, bool leaveSlider) {
         GetWindowTextW(ovc, txt, 96);
         printf("    Include overlay layers check: '%s', %s\n", N(txt).c_str(),
                SendMessageW(ovc, BM_GETCHECK, 0, 0) == BST_CHECKED ? "checked" : "unchecked");
-        Check(ovc != nullptr && IsWindowVisible(ovc) && SendMessageW(ovc, BM_GETCHECK, 0, 0) == BST_CHECKED &&
+        Check(ovc != nullptr && OnTab(ovc) && SendMessageW(ovc, BM_GETCHECK, 0, 0) == BST_CHECKED &&
                   wcscmp(txt, L"Include overlay layers (menus, mod panels)") == 0,
               "Include overlay layers check shows record_overlays = 1 from the file");
         SendMessageW(ovc, BM_SETCHECK, BST_UNCHECKED, 0);
@@ -963,7 +969,7 @@ int TestDrive(DWORD pid, bool leaveSlider) {
         if (vh) GetWindowRect(vh, &rv);
         if (he) GetWindowRect(he, &rh);
         printf("    Controllers drop-down: '%s', %d items\n", N(txt).c_str(), vh ? (int)SendMessageW(vh, CB_GETCOUNT, 0, 0) : -1);
-        Check(vh && IsWindowVisible(vh) && SendMessageW(vh, CB_GETCOUNT, 0, 0) == 5 && wcscmp(txt, L"Both stick clicks") == 0 &&
+        Check(vh && OnTab(vh) && SendMessageW(vh, CB_GETCOUNT, 0, 0) == 5 && wcscmp(txt, L"Both stick clicks") == 0 &&
                   rv.left > rh.right && rv.top < rh.bottom && rv.bottom > rh.top,
               "Controllers drop-down (vr_hotkey) shows 'Both stick clicks' on the Hotkey row, right of the hotkey field");
     }
@@ -972,7 +978,7 @@ int TestDrive(DWORD pid, bool leaveSlider) {
     const HWND y8 = GetDlgItem(d, settings::ID_YT8KBITRATE);
     Check(y8 && !IsWindowEnabled(y8), "8K bitrate drop-down is greyed while YouTube output has no 8K file");
     const HWND y8c = GetDlgItem(d, settings::ID_YT8KCODEC);
-    Check(y8c && IsWindowVisible(y8c) && !IsWindowEnabled(y8c), "8K codec drop-down exists and is greyed while YouTube output has no 8K file");
+    Check(y8c && OnTab(y8c) && !IsWindowEnabled(y8c), "8K codec drop-down exists and is greyed while YouTube output has no 8K file");
     const HWND y8l = ChildByText(d, L"8K bitrate:"), y8cl = ChildByText(d, L"8K codec:");
     Check(y8l && y8cl && !IsWindowEnabled(y8l) && !IsWindowEnabled(y8cl), "'8K bitrate:' / '8K codec:' labels are greyed with their drop-downs");
     SendMessageW(GetDlgItem(d, settings::ID_YTMODE), CB_SETCURSEL, 2, 0);
@@ -1011,7 +1017,7 @@ int TestDrive(DWORD pid, bool leaveSlider) {
         wchar_t rt[96] = L"";
         GetWindowTextW(ryt, rt, 96);
         printf("    Record for YouTube check: '%s', %s\n", N(rt).c_str(), SendMessageW(ryt, BM_GETCHECK, 0, 0) == BST_CHECKED ? "checked" : "unchecked");
-        Check(IsWindowVisible(ryt) && SendMessageW(ryt, BM_GETCHECK, 0, 0) == BST_UNCHECKED &&
+        Check(OnTab(ryt) && SendMessageW(ryt, BM_GETCHECK, 0, 0) == BST_UNCHECKED &&
                   wcscmp(rt, L"Record directly in the YouTube layout (no re-encode)") == 0,
               "'Record directly in the YouTube layout (no re-encode)' check exists and shows record_for_youtube = 0 from the file");
         {
@@ -1077,7 +1083,7 @@ int TestDrive(DWORD pid, bool leaveSlider) {
         const int sel = (int)SendMessageW(mw, CB_GETCURSEL, 0, 0);
         if (sel >= 0) SendMessageW(mw, CB_GETLBTEXT, (WPARAM)sel, (LPARAM)item);
         printf("    Resolution drop-down: %d items, selected %d '%s'\n", (int)SendMessageW(mw, CB_GETCOUNT, 0, 0), sel, N(item).c_str());
-        Check(mw != nullptr && IsWindowVisible(mw) && SendMessageW(mw, CB_GETCOUNT, 0, 0) == 5 && sel == 4 &&
+        Check(mw != nullptr && OnTab(mw) && SendMessageW(mw, CB_GETCOUNT, 0, 0) == 5 && sel == 4 &&
                   wcscmp(item, L"Custom (3000 px)") == 0,
               "Resolution drop-down shows max_width = 3000 from the file as 'Custom (3000 px)'");
     }
@@ -1087,7 +1093,7 @@ int TestDrive(DWORD pid, bool leaveSlider) {
         const HWND sb = GetDlgItem(d, settings::ID_OPENSTEAMVR);
         wchar_t t[64] = L"";
         if (sb) GetWindowTextW(sb, t, 64);
-        Check(sb != nullptr && IsWindowVisible(sb) && IsWindowEnabled(sb) && wcscmp(t, L"SteamVR games...") == 0,
+        Check(sb != nullptr && OnTab(sb) && IsWindowEnabled(sb) && wcscmp(t, L"SteamVR games...") == 0,
               "'SteamVR games...' button exists, visible and enabled");
         if (sb) {
             RECT br{}, wr2{};
@@ -1123,12 +1129,12 @@ int TestDrive(DWORD pid, bool leaveSlider) {
         const HWND cp = GetDlgItem(d, settings::ID_CONVERTPICK);
         wchar_t t[64] = L"";
         if (cp) GetWindowTextW(cp, t, 64);
-        Check(cp != nullptr && IsWindowVisible(cp) && IsWindowEnabled(cp) && wcscmp(t, L"Convert a recording...") == 0,
+        Check(cp != nullptr && OnTab(cp) && IsWindowEnabled(cp) && wcscmp(t, L"Convert a recording...") == 0,
               "'Convert a recording...' button exists, visible and enabled");
         const HWND aq = GetDlgItem(d, settings::ID_ADDQUEUE);
         wchar_t at[64] = L"";
         if (aq) GetWindowTextW(aq, at, 64);
-        Check(aq != nullptr && IsWindowVisible(aq) && IsWindowEnabled(aq) && wcscmp(at, L"Add to queue...") == 0,
+        Check(aq != nullptr && OnTab(aq) && IsWindowEnabled(aq) && wcscmp(at, L"Add to queue...") == 0,
               "'Add to queue...' button exists, visible and enabled");
         wchar_t st[32] = L"", sa[32] = L"";
         GetWindowTextW(GetDlgItem(d, settings::ID_QSTART), st, 32);
@@ -1142,14 +1148,14 @@ int TestDrive(DWORD pid, bool leaveSlider) {
         if (ql && SendMessageW(ql, LB_GETCOUNT, 0, 0) > 0) SendMessageW(ql, LB_GETTEXT, 0, (LPARAM)first);
         printf("    queue view: status '%s', list %d item(s), first '%s'\n", N(status).c_str(), ql ? (int)SendMessageW(ql, LB_GETCOUNT, 0, 0) : -1,
                N(first).c_str());
-        Check(qs && IsWindowVisible(qs) && status.compare(0, 22, L"Nothing is converting.") == 0, "queue view: status says 'Nothing is converting.'");
-        Check(qp && IsWindowVisible(qp) && SendMessageW(qp, PBM_GETPOS, 0, 0) == 0, "queue view: progress bar exists at 0");
-        Check(ql && IsWindowVisible(ql) && SendMessageW(ql, LB_GETCOUNT, 0, 0) == 1 && wcscmp(first, L"(no recordings waiting)") == 0,
+        Check(qs && OnTab(qs) && status.compare(0, 22, L"Nothing is converting.") == 0, "queue view: status says 'Nothing is converting.'");
+        Check(qp && OnTab(qp) && SendMessageW(qp, PBM_GETPOS, 0, 0) == 0, "queue view: progress bar exists at 0");
+        Check(ql && OnTab(ql) && SendMessageW(ql, LB_GETCOUNT, 0, 0) == 1 && wcscmp(first, L"(no recordings waiting)") == 0,
               "queue view: waiting list exists and is empty ('(no recordings waiting)')");
         bool greyed = true;
         for (int id : {settings::ID_QPAUSE, settings::ID_QCANCEL, settings::ID_QSTART, settings::ID_QSTARTALL, settings::ID_QREMOVE}) {
             const HWND bt = GetDlgItem(d, id);
-            if (!bt || !IsWindowVisible(bt) || IsWindowEnabled(bt)) greyed = false;
+            if (!bt || !OnTab(bt) || IsWindowEnabled(bt)) greyed = false;
         }
         Check(greyed, "queue view: Pause / Cancel / Start / Start all / Remove exist and are greyed with nothing queued");
         RECT wr{};

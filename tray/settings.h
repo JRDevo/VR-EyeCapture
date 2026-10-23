@@ -141,7 +141,11 @@ enum : int {
     , ID_VRHOTKEY               // "Controllers:" drop-down on the Hotkey row, bound to [capture] vr_hotkey (appended)
     , ID_BITDEPTH               // "Colour depth:" drop-down on the Resolution row, bound to [capture] bit_depth (appended)
     , ID_SHARPEN                // "Sharpen:" drop-down on the Projection row, bound to [capture] sharpen (appended)
+    , ID_TABS                   // owner-drawn tab strip under the header (Recording / Video / Export / App; not a config key; appended)
 };
+// Sent to the window: show the tab that holds control `wParam` (a control id). Returns the tab index, -1 = not on a tab
+// (header, Description, footer: always shown). Tests send it before they look at a control (IsWindowVisible).
+const UINT kMsgShowTabOf = WM_APP + 30;
 // ID_QSTART reads "Start" and acts on every selected item of ID_QLIST (a multi-select list box: LB_SETSEL / LB_GETSELITEMS).
 extern const wchar_t* const kWindowTitle;
 

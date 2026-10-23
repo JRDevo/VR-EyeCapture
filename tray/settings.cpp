@@ -4,7 +4,9 @@
 #include <shellapi.h>
 #include <shlobj.h>
 #include <shobjidl.h>
+#include <shellscalingapi.h>
 #include <uxtheme.h>
+#include <algorithm>
 #include <cmath>
 #include <cwctype>
 #include <cstdio>
@@ -17,7 +19,13 @@
 #include "install.h"
 #include "log.h"
 #include "postprocess.h"
+#pragma warning(push)
+#pragma warning(disable : 4458)   // gdiplus headers: declaration hides class member
+#include <objidl.h>
+#include <gdiplus.h>
+#pragma warning(pop)
 
+#pragma comment(lib, "shcore.lib")   // GetDpiForMonitor
 #pragma comment(linker, "\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
 namespace settings {
@@ -522,6 +530,7 @@ HWND                g_dlg = nullptr;
 HWND                g_tip = nullptr;            // the tooltip window (owned by the dialog)
 HFONT               g_font = nullptr;
 HFONT               g_odFont = nullptr;     // g_font with grey (not ClearType) smoothing: the owner-drawn previews (glass two-pass alpha)
+HFONT               g_odFontLg = nullptr;   // g_odFont at 96 DPI: text drawn through a scaling world transform (the previews)
 HFONT               g_logoFont = nullptr;      // the bold wordmark font of the logo (ID_LOGO): the message font at 20 px, FW_BOLD
 HWND                g_hover = nullptr;          // the control the help panel last followed (mouse or keyboard focus)
 const wchar_t*      g_shown = nullptr;          // the text now in the help panel (pointer compare: no flicker)
@@ -557,21 +566,42 @@ int                 g_helpPad = 0;          // help edit client height minus its
 int                 g_naturalH = 0;         // content height with the help edit at g_helpMinH (independent of the window size)
 size_t              g_contentEnd = 0;       // g_made index of the first footer control (set by the Create pass)
 bool                g_footerRaised = false; // the footer is above the content in the z-order (only while scrolling)
+// Tabs: every control made by Builder::Make belongs to one tab (g_madeTab, same index as g_made) or to none (-1: header,
+// tab strip, Description, footer). Only the controls of g_tab are shown. A control the code hides on its own (the update
+// line, the frame-rate warning, Register...) is in g_wantHidden, so a tab switch does not show it again (SetShown).
+const int           kTabCount = 4;
+const wchar_t* const kTabNames[kTabCount] = {L"Recording", L"Video", L"Export", L"App"};
+const wchar_t* const kTabIcons[kTabCount] = {L"\xE7C8", L"\xE714", L"\xE898", L"\xE713"};   // Segoe Fluent Icons / MDL2: Record, Video, Upload, Settings
+int                 g_tab = 0;              // the tab shown (kept while the tray runs: the window reopens on it)
+int                 g_tabHover = -1;        // the tab under the mouse (-1 = none)
+std::vector<int>    g_madeTab;              // tab of g_made[i]
+std::vector<HWND>   g_wantHidden;           // controls hidden by their own logic
+HFONT               g_tabFont = nullptr;    // semibold message font, grey smoothing (owner-drawn tab strip)
+HFONT               g_iconFont = nullptr;   // Segoe Fluent Icons (Windows 11) / Segoe MDL2 Assets (Windows 10); nullptr = no icons
 const int           kLayoutW = 1140;        // the narrowest layout: client width without the scroll bar
 const int           kMinClientH = 400;      // minimum client height (the content scrolls below its natural height)
 const int           kFooterH = 64;
 const int           kFooterBgId = 3001;     // opaque owner-drawn strip behind the footer buttons
-// The client is never narrower than kLayoutW, even with the vertical scroll bar shown.
-int MinClientW() { return kLayoutW + GetSystemMetrics(SM_CXVSCROLL); }
+// DPI: the window is made per-monitor DPI-aware (ShowDialog), so Windows does not stretch it and its text is sharp. The
+// layout works in 96-DPI units ("layout units": every constant in BuildControls); Builder::Make turns them into device pixels
+// at the DPI of the screen the window is on (WM_DPICHANGED when it moves to another one).
+double              g_s = 1.0;              // device pixels per layout unit (the window's DPI / 96)
+UINT Dpi() { return (UINT)std::lround(g_s * 96); }
+int Px(int v) { return (int)std::lround(v * g_s); }
+int Lg(int px) { return (int)std::ceil(px / g_s - 1e-6); }   // device pixels -> layout units, rounded up (text never cut)
+// The client is never narrower than kLayoutW, even with the vertical scroll bar shown (layout units).
+int MinClientW() { return kLayoutW + Lg(GetSystemMetricsForDpi(SM_CXVSCROLL, Dpi())); }
 // The window rectangle for a client rectangle: AdjustWindowRectEx without the title bar (DlgProc WM_NCCALCSIZE removes it).
 void AdjustFrame(RECT& r, DWORD style) {
     const LONG top = r.top;
-    AdjustWindowRectEx(&r, style, FALSE, WS_EX_APPWINDOW);
+    AdjustWindowRectExForDpi(&r, style, FALSE, WS_EX_APPWINDOW, Dpi());
     r.top = top;
 }
 void Relayout();
 void TryClose();
 void ApplyGlassTheme();
+void MakeFonts(UINT dpi);
+void MeasureHelp();
 
 
 // ---- help texts: hover tooltip + the "Description" panel. Written for people, not for the log: a short first line that says what
@@ -753,7 +783,7 @@ const Help kHelp[] = {
                 L"Crop and AV1 add tags to the name (_4x3, _full, _AV1)."},
     {ID_TAG3DMP4, L"Writes the 3D tag (and the VR180 / VR360 tag) into the recorded MP4, so players and YouTube show it in 3D." HELP_BR
                   L"Clear it to get a plain MP4. Video editors (for example DaVinci Resolve) open a plain MP4 more easily." HELP_BR
-                  L"The 3D MKV still gets its own 3D tag. To add the tag to a plain MP4 later, use Tag as 3D... in Advanced."},
+                  L"The 3D MKV still gets its own 3D tag. To add the tag to a plain MP4 later, use Tag as 3D... on the App tab."},
     {ID_RECORDYT, L"Records straight into the YouTube layout, so nothing is re-encoded afterwards." HELP_BR
                   L"• Each frame is written in the Output layout, with Eye crop applied, 4320 px on the short side (Quest 3 at 16:9: 7680x4320)."
                   HELP_LI L"The tray only copies it into the 3D MKV (seconds). Upload that MKV."
@@ -836,6 +866,8 @@ const Help kHelp[] = {
     {ID_OPENSTEAMVR, L"Opens the SteamVR games window: tick the SteamVR games to record, or choose Quick mode. OpenXR games need nothing there."},
     {ID_SAVE, L"Saves the changes to config.ini. The window stays open. The next recording uses them."},
     {ID_MINIMIZE, L"Minimizes the window to the taskbar."},
+    {ID_TABS, L"The pages of this window: Recording, Video, Export and App." HELP_BR
+              L"Click a tab, or press Ctrl+Tab / Ctrl+Shift+Tab. Save saves the settings of all pages."},
     {ID_CANCEL, L"Closes the window. If you have unsaved changes, it asks first. The tray app keeps running."},
     {ID_ABOUTLINK, L"The project page on GitHub: downloads, the manual and bug reports." HELP_BR
                    L"• License: PolyForm Noncommercial 1.0.0. Copyright (c) 2026 JRDevo."
@@ -890,6 +922,207 @@ std::wstring GetText(int id) {
     wchar_t b[1024];
     GetWindowTextW(Ctl(id), b, 1024);
     return b;
+}
+
+// ---- tabs (g_tab, g_madeTab, g_wantHidden)
+int TabOf(HWND c) {
+    for (size_t i = 0; i < g_made.size() && i < g_madeTab.size(); ++i)
+        if (g_made[i] == c) return g_madeTab[i];
+    return -1;
+}
+bool WantHidden(HWND c) { return std::find(g_wantHidden.begin(), g_wantHidden.end(), c) != g_wantHidden.end(); }
+// Shows / hides a control on its own account (its tab still decides whether it is on screen).
+void SetShown(HWND c, bool show) {
+    if (!c) return;
+    const auto it = std::find(g_wantHidden.begin(), g_wantHidden.end(), c);
+    if (show && it != g_wantHidden.end()) g_wantHidden.erase(it);
+    if (!show && it == g_wantHidden.end()) g_wantHidden.push_back(c);
+    const int t = TabOf(c);
+    const bool vis = show && (t < 0 || t == g_tab);
+    if (((GetWindowLongW(c, GWL_STYLE) & WS_VISIBLE) != 0) != vis) ShowWindow(c, vis ? SW_SHOWNA : SW_HIDE);
+}
+// Shows the controls of g_tab and hides the others; the keyboard focus leaves a control that is now hidden.
+void ApplyTab() {
+    if (!g_dlg) return;
+    for (size_t i = 0; i < g_made.size() && i < g_madeTab.size(); ++i) {
+        HWND c = g_made[i];
+        const bool vis = (g_madeTab[i] < 0 || g_madeTab[i] == g_tab) && !WantHidden(c);
+        if (((GetWindowLongW(c, GWL_STYLE) & WS_VISIBLE) != 0) != vis) ShowWindow(c, vis ? SW_SHOWNA : SW_HIDE);
+    }
+    HWND f = GetFocus();
+    if (f && IsChild(g_dlg, f) && !IsWindowVisible(f) && IsWindowVisible(g_dlg)) SetFocus(Ctl(ID_TABS));
+    RedrawWindow(g_dlg, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+}
+void SetTab(int t) {
+    t = (t % kTabCount + kTabCount) % kTabCount;
+    if (t == g_tab) return;
+    g_tab = t;
+    ApplyTab();
+}
+
+// The tab strip (ID_TABS, owner-drawn): a rounded track across the content width, split into kTabCount equal segments. The
+// selected segment is a raised pill (a card colour, a hairline edge and a soft shadow line) with a short accent bar under its
+// text, like the Windows 11 selector bar; the hovered one gets a light tint. Shapes in GDI+ (anti-aliased, in layout units
+// through a scale transform), text in GDI at the real size (sharp): the selected name semibold, the others regular.
+RECT TabRect(const RECT& rc, int i) {
+    const int w = rc.right - rc.left;
+    return RECT{rc.left + w * i / kTabCount, rc.top, rc.left + w * (i + 1) / kTabCount, rc.bottom};
+}
+int TabAt(HWND strip, POINT pt) {
+    RECT rc{};
+    GetClientRect(strip, &rc);
+    if (!PtInRect(&rc, pt)) return -1;
+    for (int i = 0; i < kTabCount; ++i) {
+        const RECT r = TabRect(rc, i);
+        if (pt.x >= r.left && pt.x < r.right) return i;
+    }
+    return -1;
+}
+void DrawTabs(const DRAWITEMSTRUCT* di) {
+    const RECT rc = di->rcItem;
+    const int w = rc.right - rc.left, h = rc.bottom - rc.top;   // device pixels
+    if (w <= 0 || h <= 0) return;
+    const glass::Theme& th = glass::Current();
+    using Gdiplus::Color;
+    auto argb = [](COLORREF c, BYTE a) { return Color(a, GetRValue(c), GetGValue(c), GetBValue(c)); };
+    auto round = [](Gdiplus::GraphicsPath& p, float x, float y, float rw, float rh, float r) {
+        const float d = 2 * r;
+        p.AddArc(x, y, d, d, 180, 90);
+        p.AddArc(x + rw - d, y, d, d, 270, 90);
+        p.AddArc(x + rw - d, y + rh - d, d, d, 0, 90);
+        p.AddArc(x, y + rh - d, d, d, 90, 90);
+        p.CloseFigure();
+    };
+    {
+        HBRUSH bg = CreateSolidBrush((COLORREF)di->itemData);   // glass: black, then white (alpha from the two passes)
+        FillRect(di->hDC, &rc, bg);
+        DeleteObject(bg);
+    }
+    const bool focused = GetFocus() == di->hwndItem;
+    const float k = (float)g_s, lw = w / k, lh = h / k;   // layout units
+    const float pad = 4, barW = 20, barH = 3;
+    {
+        Gdiplus::Graphics g(di->hDC);
+        g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+        g.ScaleTransform(k, k);
+        // the track: the colours of a glass card
+        {
+            Gdiplus::GraphicsPath p;
+            round(p, 0.5f, 0.5f, lw - 1, lh - 1, 8);
+            Gdiplus::SolidBrush b(th.dark ? Color(0x0D, 255, 255, 255) : Color(0xB3, 255, 255, 255));
+            g.FillPath(&b, &p);
+            Gdiplus::Pen pen(th.dark ? Color(0x26, 0, 0, 0) : Color(0x12, 0, 0, 0), 1.f);
+            g.DrawPath(&pen, &p);
+        }
+        for (int i = 0; i < kTabCount; ++i) {
+            const float x0 = lw * i / kTabCount, x1 = lw * (i + 1) / kTabCount;
+            const float x = x0 + pad, y = pad, pw = x1 - x0 - 2 * pad, ph = lh - 2 * pad;
+            if (i == g_tab) {
+                // shadow line under the pill, the pill, its hairline edge
+                {
+                    Gdiplus::GraphicsPath sp;
+                    round(sp, x, y + 1, pw, ph, 6);
+                    Gdiplus::SolidBrush sb(th.dark ? Color(0x40, 0, 0, 0) : Color(0x14, 0, 0, 0));
+                    g.FillPath(&sb, &sp);
+                }
+                Gdiplus::GraphicsPath p;
+                round(p, x, y, pw, ph, 6);
+                Gdiplus::SolidBrush fill(th.dark ? Color(0x1F, 255, 255, 255) : Color(0xFF, 255, 255, 255));
+                g.FillPath(&fill, &p);
+                Gdiplus::Pen edge(th.dark ? Color(0x17, 255, 255, 255) : Color(0x0F, 0, 0, 0), 1.f);
+                g.DrawPath(&edge, &p);
+                if (focused) {   // keyboard focus: the Windows 11 focus ring around the selected pill
+                    Gdiplus::GraphicsPath fp;
+                    round(fp, x - 2, y - 2, pw + 4, ph + 4, 8);
+                    Gdiplus::Pen fr(argb(th.text, 0xFF), 2.f);
+                    g.DrawPath(&fr, &fp);
+                }
+                Gdiplus::GraphicsPath bar;
+                round(bar, x + (pw - barW) / 2, y + ph - barH - 3, barW, barH, barH / 2);
+                Gdiplus::SolidBrush ab(argb(th.accent, 0xFF));
+                g.FillPath(&ab, &bar);
+            } else if (i == g_tabHover) {
+                Gdiplus::GraphicsPath p;
+                round(p, x, y, pw, ph, 6);
+                Gdiplus::SolidBrush b(th.dark ? Color(0x0F, 255, 255, 255) : Color(0x0A, 0, 0, 0));
+                g.FillPath(&b, &p);
+            }
+        }
+    }
+    // icon + name, centred in each segment and a little above the middle (room for the accent bar); grey smoothing: the glass
+    // two-pass alpha needs the same text pixels on black and on white
+    SetBkMode(di->hDC, TRANSPARENT);
+    const int textBottom = h - Px(3);
+    for (int i = 0; i < kTabCount; ++i) {
+        const RECT r = TabRect(RECT{0, 0, w, h}, i);
+        const bool sel = i == g_tab, hot = i == g_tabHover;
+        HFONT nameFont = sel && g_tabFont ? g_tabFont : g_odFont;
+        HGDIOBJ old = SelectObject(di->hDC, nameFont);
+        SIZE ns{};
+        GetTextExtentPoint32W(di->hDC, kTabNames[i], (int)wcslen(kTabNames[i]), &ns);
+        SIZE is{};
+        if (g_iconFont) {
+            SelectObject(di->hDC, g_iconFont);
+            GetTextExtentPoint32W(di->hDC, kTabIcons[i], 1, &is);
+        }
+        const int gap = g_iconFont ? Px(8) : 0, total = is.cx + gap + ns.cx;
+        int x = r.left + ((r.right - r.left) - total) / 2;
+        if (g_iconFont) {
+            ::SetTextColor(di->hDC, sel ? th.accent : hot ? th.text : th.textDim);
+            RECT ir{x, 0, x + is.cx + 2, textBottom};
+            DrawTextW(di->hDC, kTabIcons[i], 1, &ir, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+            x += is.cx + gap;
+        }
+        SelectObject(di->hDC, nameFont);
+        ::SetTextColor(di->hDC, sel || hot ? th.text : th.textDim);
+        RECT tr{x, 0, x + ns.cx + 2, textBottom};
+        DrawTextW(di->hDC, kTabNames[i], -1, &tr, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+        SelectObject(di->hDC, old);
+    }
+}
+// Mouse and keyboard on the tab strip: click / arrow keys / Home / End pick a tab; the hover tint follows the mouse.
+LRESULT CALLBACK TabsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR) {
+    switch (msg) {
+    case WM_LBUTTONDOWN: {
+        const int t = TabAt(h, POINT{(short)LOWORD(lp), (short)HIWORD(lp)});
+        SetFocus(h);
+        if (t >= 0) SetTab(t);
+        InvalidateRect(h, nullptr, FALSE);
+        return 0;
+    }
+    case WM_MOUSEMOVE: {
+        const int t = TabAt(h, POINT{(short)LOWORD(lp), (short)HIWORD(lp)});
+        if (t != g_tabHover) {
+            g_tabHover = t;
+            InvalidateRect(h, nullptr, FALSE);
+        }
+        TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, h, 0};
+        TrackMouseEvent(&tme);
+        break;
+    }
+    case WM_MOUSELEAVE:
+        if (g_tabHover >= 0) {
+            g_tabHover = -1;
+            InvalidateRect(h, nullptr, FALSE);
+        }
+        break;
+    case WM_GETDLGCODE:
+        return DLGC_WANTARROWS;
+    case WM_KEYDOWN:
+        if (wp == VK_LEFT || wp == VK_UP) { SetTab(g_tab - 1); InvalidateRect(h, nullptr, FALSE); return 0; }
+        if (wp == VK_RIGHT || wp == VK_DOWN) { SetTab(g_tab + 1); InvalidateRect(h, nullptr, FALSE); return 0; }
+        if (wp == VK_HOME) { SetTab(0); InvalidateRect(h, nullptr, FALSE); return 0; }
+        if (wp == VK_END) { SetTab(kTabCount - 1); InvalidateRect(h, nullptr, FALSE); return 0; }
+        break;
+    case WM_SETFOCUS:
+    case WM_KILLFOCUS:
+        InvalidateRect(h, nullptr, FALSE);
+        break;
+    default:
+        break;
+    }
+    return DefSubclassProc(h, msg, wp, lp);
 }
 
 // "Make for YouTube" drop-down <-> the two hidden checks bound to post_mkv / post_yt8k.
@@ -963,10 +1196,11 @@ COLORREF Mix(COLORREF bg, COLORREF fg, double a) {
 
 void DrawPreview(const DRAWITEMSTRUCT* di) {
     const RECT rc = di->rcItem;
-    const int w = rc.right - rc.left, h = rc.bottom - rc.top;
+    const int pw = rc.right - rc.left, ph = rc.bottom - rc.top;   // device pixels
+    const int w = (int)(pw / g_s), h = (int)(ph / g_s);           // layout units (the world transform scales)
     const double kPi = 3.14159265358979323846;
     HDC dc = CreateCompatibleDC(di->hDC);
-    HBITMAP bmp = CreateCompatibleBitmap(di->hDC, w, h);
+    HBITMAP bmp = CreateCompatibleBitmap(di->hDC, pw, ph);
     HGDIOBJ oldBmp = SelectObject(dc, bmp);
     const bool on = g_prev.on;
     // the window's card shows through: bg = the colour glass asks for (black, then white: alpha from the two passes)
@@ -975,11 +1209,14 @@ void DrawPreview(const DRAWITEMSTRUCT* di) {
     const COLORREF edge = on ? (dark ? RGB(140, 146, 162) : RGB(120, 126, 140)) : (dark ? RGB(95, 95, 95) : RGB(170, 170, 170));
     const COLORREF cross = dark ? RGB(70, 72, 80) : RGB(205, 208, 215), txt = glass::Current().textDim;
     HBRUSH bgBrush = CreateSolidBrush(bg);
-    const RECT all{0, 0, w, h};
+    const RECT all{0, 0, pw, ph};
     FillRect(dc, &all, bgBrush);
     DeleteObject(bgBrush);
+    SetGraphicsMode(dc, GM_ADVANCED);
+    const XFORM xf{(FLOAT)g_s, 0, 0, (FLOAT)g_s, 0, 0};
+    SetWorldTransform(dc, &xf);
     SetBkMode(dc, TRANSPARENT);
-    HGDIOBJ oldFont = g_odFont ? SelectObject(dc, g_odFont) : nullptr;
+    HGDIOBJ oldFont = g_odFontLg ? SelectObject(dc, g_odFontLg) : nullptr;
 
     const int cx = w / 2, cy = h / 2, R = (w < h ? w : h) / 2 - 4;
     const double pxPerDeg = R / kPreviewHalfFovDeg;
@@ -1032,7 +1269,8 @@ void DrawPreview(const DRAWITEMSTRUCT* di) {
         DrawTextW(dc, note, -1, &t2, DT_CENTER | DT_SINGLELINE | DT_NOPREFIX);
     }
     if (oldFont) SelectObject(dc, oldFont);
-    BitBlt(di->hDC, rc.left, rc.top, w, h, dc, 0, 0, SRCCOPY);
+    ModifyWorldTransform(dc, nullptr, MWT_IDENTITY);
+    BitBlt(di->hDC, rc.left, rc.top, pw, ph, dc, 0, 0, SRCCOPY);
     SelectObject(dc, oldBmp);
     DeleteObject(bmp);
     DeleteDC(dc);
@@ -1045,7 +1283,7 @@ void PreviewCircle(HWND h, double& cx, double& cy, double& R) {
     RECT rc{};
     GetClientRect(h, &rc);
     const int w = rc.right - rc.left, hh = rc.bottom - rc.top;
-    cx = w / 2; cy = hh / 2; R = (w < hh ? w : hh) / 2 - 4;
+    cx = w / 2; cy = hh / 2; R = (w < hh ? w : hh) / 2 - Px(4);   // device pixels: DrawPreview's circle
 }
 
 void SetFieldNumber(int id, double v) {
@@ -1225,15 +1463,14 @@ void UpdateFpsWarning() {
     wchar_t cur[256] = L"";
     GetWindowTextW(c, cur, 256);
     if (t != cur) SetWindowTextW(c, t.c_str());
-    const bool vis = (GetWindowLongW(c, GWL_STYLE) & WS_VISIBLE) != 0;
-    if (vis == t.empty()) ShowWindow(c, t.empty() ? SW_HIDE : SW_SHOWNA);
+    SetShown(c, !t.empty());
 }
 
 void UpdateLayoutPreview() {
     if (g_dlg && Ctl(ID_LAYOUTPREVIEW)) InvalidateRect(Ctl(ID_LAYOUTPREVIEW), nullptr, FALSE);
 }
 
-// The "update available" SysLink on the Advanced group's top edge and the "Check now" button. Reads the tray's update
+// The "update available" SysLink at the right end of the header and the "Check now" button (App tab). Reads the tray's update
 // state through g_update (no hook = no updater, e.g. settings_test: the line stays hidden and the button is greyed).
 void UpdateUpdateLine() {
     if (!g_dlg) return;
@@ -1249,29 +1486,30 @@ void UpdateUpdateLine() {
         wchar_t cur[256] = L"";
         GetWindowTextW(link, cur, 256);
         if (t != cur) SetWindowTextW(link, t.c_str());
-        const bool vis = (GetWindowLongW(link, GWL_STYLE) & WS_VISIBLE) != 0;
-        if (vis != show) ShowWindow(link, show ? SW_SHOWNA : SW_HIDE);
+        SetShown(link, show);
     }
 }
 
 // ---- the logo at the top of the window (ID_LOGO, owner-drawn): the mark of scripts\make_logo.py (VR goggles, a 256-unit design box),
-// the wordmark in bold and the tagline in grey. GDI has no anti-aliasing: everything is drawn SS times bigger into a memory bitmap
-// and StretchBlt'ed down with HALFTONE. The layout (logoW) in BuildControls must match the x positions used here.
+// the wordmark in bold and the tagline in grey. The mark is drawn SS times bigger into a memory bitmap and StretchBlt'ed down
+// with HALFTONE (GDI has no anti-aliasing); the words are drawn straight onto the item at the real size, so they stay sharp.
+// The layout (logoW) in BuildControls must match the x positions used here: the mark is the square (0, 0, h, h), then 6, the
+// wordmark, 16, the tagline (layout units).
 void DrawLogo(const DRAWITEMSTRUCT* di) {
     const int SS = 4;
     const RECT rc = di->rcItem;
     const int w = rc.right - rc.left, h = rc.bottom - rc.top;
     if (w <= 0 || h <= 0) return;
-    const int W = w * SS, H = h * SS;
+    const int H = h * SS;
     HDC dc = CreateCompatibleDC(di->hDC);
-    HBITMAP bmp = CreateCompatibleBitmap(di->hDC, W, H);
+    HBITMAP bmp = CreateCompatibleBitmap(di->hDC, H, H);
     HGDIOBJ oldBmp = SelectObject(dc, bmp);
-    const RECT all{0, 0, W, H};
+    const RECT all{0, 0, H, H};
     HBRUSH bgBrush = CreateSolidBrush((COLORREF)di->itemData);   // glass: black, then white (alpha from the two passes)
     FillRect(dc, &all, bgBrush);
     DeleteObject(bgBrush);
 
-    const double s = (double)H / 256.0;   // the mark is the square (0, 0, H, H)
+    const double s = (double)H / 256.0;
     auto U = [&](double v) { return (int)(v * s + 0.5); };
     const COLORREF grey = RGB(154, 163, 178), blue = RGB(59, 139, 255), coral = RGB(255, 107, 107), red = RGB(255, 59, 59);
     HGDIOBJ oldPen = SelectObject(dc, GetStockObject(NULL_PEN));
@@ -1329,55 +1567,53 @@ void DrawLogo(const DRAWITEMSTRUCT* di) {
     disc(222, 50, 13, red);
     SelectObject(dc, oldPen);
     SelectObject(dc, oldBrush);
-
-    // wordmark (bold) and tagline (grey), vertically centred on the lens row
-    SetBkMode(dc, TRANSPARENT);
-    const UINT fmt = DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX;
-    int x = (32 + 6) * SS;
-    auto line = [&](HFONT base, const wchar_t* t, COLORREF c) {
-        LOGFONTW lf{};
-        if (!base || !GetObjectW(base, sizeof(lf), &lf)) return;
-        lf.lfHeight *= SS;
-        lf.lfQuality = ANTIALIASED_QUALITY;   // grey smoothing: the glass two-pass alpha needs the same text on black and white
-        HFONT f = CreateFontIndirectW(&lf);
-        HGDIOBJ of = SelectObject(dc, f);
-        SetTextColor(dc, c);
-        SIZE sz{};
-        GetTextExtentPoint32W(dc, t, (int)wcslen(t), &sz);
-        RECT r{x, 0, x + sz.cx + SS, H};
-        DrawTextW(dc, t, -1, &r, fmt);
-        x += sz.cx;
-        SelectObject(dc, of);
-        DeleteObject(f);
-    };
-    line(g_logoFont, L"VR EyeCapture", glass::Current().text);
-    x += 16 * SS;
-    line(g_font, L"Stereo 3D recorder for VR games", glass::Current().textDim);
-
     SetStretchBltMode(di->hDC, HALFTONE);
     SetBrushOrgEx(di->hDC, 0, 0, nullptr);
-    StretchBlt(di->hDC, rc.left, rc.top, w, h, dc, 0, 0, W, H, SRCCOPY);
+    StretchBlt(di->hDC, rc.left, rc.top, h, h, dc, 0, 0, H, H, SRCCOPY);
     SelectObject(dc, oldBmp);
     DeleteObject(bmp);
     DeleteDC(dc);
+
+    // wordmark (bold) and tagline (grey), vertically centred on the mark; grey smoothing: the glass two-pass alpha needs the
+    // same text pixels on black and on white
+    SetBkMode(di->hDC, TRANSPARENT);
+    int x = rc.left + h + Px(6);
+    auto line = [&](HFONT f, const wchar_t* t, COLORREF c) {
+        if (!f) return;
+        HGDIOBJ of = SelectObject(di->hDC, f);
+        SetTextColor(di->hDC, c);
+        SIZE sz{};
+        GetTextExtentPoint32W(di->hDC, t, (int)wcslen(t), &sz);
+        RECT r{x, rc.top, x + sz.cx + 2, rc.bottom};
+        DrawTextW(di->hDC, t, -1, &r, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+        x += sz.cx;
+        SelectObject(di->hDC, of);
+    };
+    line(g_logoFont, L"VR EyeCapture", glass::Current().text);
+    x += Px(16);
+    line(g_odFont, L"Stereo 3D recorder for VR games", glass::Current().textDim);
 }
 
 void DrawLayoutPreview(const DRAWITEMSTRUCT* di) {
     const RECT rc = di->rcItem;
-    const int w = rc.right - rc.left, h = rc.bottom - rc.top;
+    const int pw = rc.right - rc.left, ph = rc.bottom - rc.top;   // device pixels
+    const int w = (int)(pw / g_s);                                // layout units (the world transform scales)
     HDC dc = CreateCompatibleDC(di->hDC);
-    HBITMAP bmp = CreateCompatibleBitmap(di->hDC, w, h);
+    HBITMAP bmp = CreateCompatibleBitmap(di->hDC, pw, ph);
     HGDIOBJ oldBmp = SelectObject(dc, bmp);
     const bool dark = glass::Current().dark;
     const COLORREF bg = (COLORREF)di->itemData;   // the card shows through (glass two-pass alpha)
     const COLORREF edge = dark ? RGB(150, 158, 180) : RGB(110, 116, 130), txt = glass::Current().text, dim = glass::Current().textDim;
     const COLORREF colL = RGB(56, 88, 140), colR = RGB(140, 66, 66);
-    const RECT all{0, 0, w, h};
+    const RECT all{0, 0, pw, ph};
     HBRUSH bgBrush = CreateSolidBrush(bg);
     FillRect(dc, &all, bgBrush);
     DeleteObject(bgBrush);
+    SetGraphicsMode(dc, GM_ADVANCED);
+    const XFORM xf{(FLOAT)g_s, 0, 0, (FLOAT)g_s, 0, 0};
+    SetWorldTransform(dc, &xf);
     SetBkMode(dc, TRANSPARENT);
-    HGDIOBJ oldFont = g_odFont ? SelectObject(dc, g_odFont) : nullptr;
+    HGDIOBJ oldFont = g_odFontLg ? SelectObject(dc, g_odFontLg) : nullptr;
 
     auto text = [&](int x, int y, int x2, const wchar_t* t, COLORREF c, UINT fmt = DT_LEFT) {
         SetTextColor(dc, c);
@@ -1543,7 +1779,8 @@ void DrawLayoutPreview(const DRAWITEMSTRUCT* di) {
         }
     }
     if (oldFont) SelectObject(dc, oldFont);
-    BitBlt(di->hDC, rc.left, rc.top, w, h, dc, 0, 0, SRCCOPY);
+    ModifyWorldTransform(dc, nullptr, MWT_IDENTITY);
+    BitBlt(di->hDC, rc.left, rc.top, pw, ph, dc, 0, 0, SRCCOPY);
     SelectObject(dc, oldBmp);
     DeleteObject(bmp);
     DeleteDC(dc);
@@ -1744,7 +1981,7 @@ void UpdateToolButtons() {
     EnableWindow(Ctl(ID_TAG3D), (bool)g_tools.tag3d);
     const int rs = g_tools.regState ? g_tools.regState() : 0;
     if (HWND rb = Ctl(ID_REGLAYER)) {
-        ShowWindow(rb, rs ? SW_SHOWNA : SW_HIDE);
+        SetShown(rb, rs != 0);
         SetTextIfChanged(rb, rs == 2 ? L"Unregister from VR games..." : L"Register for VR games...");
     }
 }
@@ -2040,14 +2277,17 @@ void ScrollContent(int pos) {
     Relayout();
     SetScrollPos(g_dlg, SB_VERT, pos, TRUE);
 }
-// Keyboard focus moved to `c`: scroll it into view.
+// Keyboard focus moved to `c`: show its tab and scroll it into view.
 void EnsureVisible(HWND c) {
-    if (g_scrollMax <= 0 || !c || !g_dlg) return;
+    if (!c || !g_dlg) return;
+    if (const int t = TabOf(c); t >= 0) SetTab(t);
+    if (g_scrollMax <= 0) return;
     RECT r;
     GetWindowRect(c, &r);
     MapWindowPoints(nullptr, g_dlg, (POINT*)&r, 2);
-    if (r.top < 0) ScrollContent(g_scrollY + r.top - 8);
-    else if (r.bottom > g_viewH) ScrollContent(g_scrollY + r.bottom - g_viewH + 8);
+    const int top = (int)std::floor(r.top / g_s), bottom = (int)std::ceil(r.bottom / g_s);   // layout units
+    if (top < 0) ScrollContent(g_scrollY + top - 8);
+    else if (bottom > g_viewH) ScrollContent(g_scrollY + bottom - g_viewH + 8);
 }
 
 void CommandHandler(int id, int code) {
@@ -2084,7 +2324,13 @@ void CommandHandler(int id, int code) {
     case ID_SAVE: DoSave(); break;
     case ID_CANCEL: TryClose(); break;
     case ID_MINIMIZE: ShowWindow(g_dlg, SW_MINIMIZE); break;
-    case ID_OPENSTEAMVR: if (g_openSteamVr) g_openSteamVr(); break;
+    case ID_OPENSTEAMVR:
+        if (g_openSteamVr) {   // that window lays out in 96-DPI pixels: it is made DPI-unaware like the rest of the tray
+            const DPI_AWARENESS_CONTEXT old = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_UNAWARE);
+            g_openSteamVr();
+            if (old) SetThreadDpiAwarenessContext(old);
+        }
+        break;
     case ID_UPDATENOW: if (code == BN_CLICKED && g_update.checkNow) g_update.checkNow(); break;
     case ID_OPENLOG: if (code == BN_CLICKED && g_tools.openLog) g_tools.openLog(); break;
     case ID_REGLAYER: if (code == BN_CLICKED && g_tools.toggleReg) g_tools.toggleReg(); break;
@@ -2177,7 +2423,7 @@ void ApplyGlassTheme() {
     for (HWND d : g_dim) glass::SetDim(d, true);
     if (HWND w = Ctl(ID_FPSWARN)) glass::SetTextColor(w, glass::Current().dark ? RGB(255, 153, 164) : RGB(196, 43, 28));
     if (HWND f = Ctl(kFooterBgId)) glass::SetPanel(f);
-    for (int id : {ID_LOGO, ID_INDPREVIEW, ID_LAYOUTPREVIEW})
+    for (int id : {ID_LOGO, ID_INDPREVIEW, ID_LAYOUTPREVIEW, ID_TABS})
         if (HWND l = Ctl(id)) glass::SetOwnerDrawTransparent(l);
     if (g_tip) SetWindowTheme(g_tip, glass::Current().dark ? L"DarkMode_Explorer" : nullptr, nullptr);
     if (g_dlg) SetWindowTheme(g_dlg, glass::Current().dark ? L"DarkMode_Explorer" : nullptr, nullptr);   // the window's scroll bar
@@ -2218,7 +2464,7 @@ LRESULT CALLBACK DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         // over the dot preview: the wheel moves the dot nearer / farther instead of scrolling the window
         POINT pt{(short)LOWORD(lp), (short)HIWORD(lp)};
         RECT pr{};
-        if (HWND pv = Ctl(ID_INDPREVIEW); pv && GetWindowRect(pv, &pr) && PtInRect(&pr, pt)) {
+        if (HWND pv = Ctl(ID_INDPREVIEW); pv && IsWindowVisible(pv) && GetWindowRect(pv, &pr) && PtInRect(&pr, pt)) {
             PreviewWheel(GET_WHEEL_DELTA_WPARAM(wp));
             return 0;
         }
@@ -2242,7 +2488,14 @@ LRESULT CALLBACK DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         if (wp == ID_INDPREVIEW) { DrawPreview((const DRAWITEMSTRUCT*)lp); return TRUE; }
         if (wp == ID_LAYOUTPREVIEW) { DrawLayoutPreview((const DRAWITEMSTRUCT*)lp); return TRUE; }
         if (wp == ID_LOGO) { DrawLogo((const DRAWITEMSTRUCT*)lp); return TRUE; }
+        if (wp == ID_TABS) { DrawTabs((const DRAWITEMSTRUCT*)lp); return TRUE; }
         return DefWindowProcW(h, msg, wp, lp);
+    case kMsgShowTabOf: {
+        const int t = TabOf(Ctl((int)wp));
+        if (t >= 0) SetTab(t);
+        if (HWND s = Ctl(ID_TABS)) InvalidateRect(s, nullptr, FALSE);
+        return t;
+    }
     case WM_ACTIVATE:
         if (LOWORD(wp) == WA_INACTIVE && g_capturing) ArmCapture(0);
         return 0;
@@ -2308,9 +2561,31 @@ LRESULT CALLBACK DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_SIZE:
         if (wp != SIZE_MINIMIZED) Relayout();
         return 0;
+    case WM_DPICHANGED: {
+        // moved to a screen with another scale: new fonts for every control, the drop-down lists widened to match, the size
+        // Windows suggests (the layout units stay, so the content scales with the window), the help panel measured again
+        const double old = g_s;
+        g_s = HIWORD(wp) / 96.0;
+        MakeFonts(HIWORD(wp));
+        for (HWND c = GetWindow(h, GW_CHILD); c; c = GetWindow(c, GW_HWNDNEXT)) {
+            wchar_t cls[32] = L"";
+            GetClassNameW(c, cls, 32);
+            if (!_wcsicmp(cls, glass::kCombo)) {
+                const int dw = (int)SendMessageW(c, CB_GETDROPPEDWIDTH, 0, 0);
+                if (dw > 0) SendMessageW(c, CB_SETDROPPEDWIDTH, (WPARAM)std::lround(dw * g_s / old), 0);
+            }
+        }
+        if (g_tip) SendMessageW(g_tip, TTM_SETMAXTIPWIDTH, 0, Px(380));
+        const RECT* r = (const RECT*)lp;
+        SetWindowPos(h, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top, SWP_NOZORDER | SWP_NOACTIVATE);
+        Relayout();
+        MeasureHelp();
+        Relayout();
+        return 0;
+    }
     case WM_GETMINMAXINFO: {
         MINMAXINFO* mm = (MINMAXINFO*)lp;
-        RECT r{0, 0, MinClientW(), kMinClientH};
+        RECT r{0, 0, Px(MinClientW()), Px(kMinClientH)};
         AdjustFrame(r, (DWORD)GetWindowLongW(h, GWL_STYLE));
         mm->ptMinTrackSize.x = r.right - r.left;
         mm->ptMinTrackSize.y = r.bottom - r.top;
@@ -2335,11 +2610,11 @@ LRESULT CALLBACK DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         ScreenToClient(h, &pt);
         RECT rc{};
         GetClientRect(h, &rc);
-        if (!IsZoomed(h) && pt.y < 6) return pt.x < 12 ? HTTOPLEFT : pt.x >= rc.right - 12 ? HTTOPRIGHT : HTTOP;
-        // the header (logo, config path: they let the mouse through) and the footer's free space drag the window
+        if (!IsZoomed(h) && pt.y < Px(6)) return pt.x < Px(12) ? HTTOPLEFT : pt.x >= rc.right - Px(12) ? HTTOPRIGHT : HTTOP;
+        // the header (the logo lets the mouse through) and the footer's free space drag the window
         RECT lr{};
         if (HWND logo = Ctl(ID_LOGO)) { GetWindowRect(logo, &lr); MapWindowPoints(nullptr, h, (POINT*)&lr, 2); }
-        if (pt.y < lr.bottom + 4 || pt.y >= rc.bottom - g_footerH) return HTCAPTION;
+        if (pt.y < lr.bottom + Px(4) || pt.y >= rc.bottom - Px(g_footerH)) return HTCAPTION;
         return r;
     }
     case WM_CLOSE:
@@ -2366,6 +2641,9 @@ LRESULT CALLBACK DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         g_dim.clear();
         g_footer.clear();
         g_made.clear();
+        g_madeTab.clear();
+        g_wantHidden.clear();
+        g_tabHover = -1;
         g_domeLabels.clear();
         g_qpLabels.clear();
         g_helpMinH = g_helpPad = g_naturalH = 0;
@@ -2388,23 +2666,25 @@ struct Builder {
     size_t step = 0;        // Move: index of the next control in g_made
     HDWP dwp = nullptr;     // Move: the batched moves (nullptr = SetWindowPos one by one)
     int dy = 0;             // vertical offset added to every y (-scroll offset for the content, 0 for the footer)
+    int tab = -1;           // Create: the tab the next controls belong to (-1 = always shown)
     HWND Make(const wchar_t* cls, const wchar_t* text, DWORD style, int x, int y, int w, int hgt, int id, DWORD ex = 0) {
         if (pass == Pass::Move) {
             if (step >= g_made.size()) { ++step; return nullptr; }   // a sequence mismatch: BuildControls logs it
             HWND c = g_made[step++];
-            if (dwp) dwp = DeferWindowPos(dwp, c, nullptr, x, y + dy, w, hgt, SWP_NOZORDER | SWP_NOACTIVATE);
-            if (!dwp) SetWindowPos(c, nullptr, x, y + dy, w, hgt, SWP_NOZORDER | SWP_NOACTIVATE);
+            if (dwp) dwp = DeferWindowPos(dwp, c, nullptr, Px(x), Px(y + dy), Px(w), Px(hgt), SWP_NOZORDER | SWP_NOACTIVATE);
+            if (!dwp) SetWindowPos(c, nullptr, Px(x), Px(y + dy), Px(w), Px(hgt), SWP_NOZORDER | SWP_NOACTIVATE);
             return c;
         }
-        HWND c = CreateWindowExW(ex, GlassClass(cls), text, WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | style, x, y + dy, w, hgt, parent,
+        HWND c = CreateWindowExW(ex, GlassClass(cls), text, WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | style, Px(x), Px(y + dy), Px(w), Px(hgt), parent,
                                  (HMENU)(INT_PTR)id, GetModuleHandleW(nullptr), nullptr);
         if (g_font) SendMessageW(c, WM_SETFONT, (WPARAM)g_font, TRUE);
         if (!_wcsicmp(cls, L"EDIT") || !_wcsicmp(cls, L"LISTBOX")) glass::FrameEdit(c);
         g_made.push_back(c);
+        g_madeTab.push_back(tab);
         return c;
     }
     void Tip(HWND c, const wchar_t* t) { if (pass == Pass::Create) AddTip(c, t); }
-    // Width of `t` in the dialog font (no padding).
+    // Width of `t` in the dialog font (no padding), in layout units.
     int TextW(const wchar_t* t, HFONT font = g_font) {
         HDC dc = GetDC(parent);
         HGDIOBJ old = font ? SelectObject(dc, font) : nullptr;
@@ -2412,12 +2692,12 @@ struct Builder {
         GetTextExtentPoint32W(dc, t, (int)wcslen(t), &s);
         if (old) SelectObject(dc, old);
         ReleaseDC(parent, dc);
-        return s.cx;
+        return Lg(s.cx);
     }
     // A row label (text height 16, centred on a 23 px control that starts at y). helpId != 0: hovering the label shows the help of
     // that control (the label keeps the id in GWLP_USERDATA).
     HWND Label(int x, int y, int w, const wchar_t* t, int helpId = 0) {
-        HWND c = Make(L"STATIC", t, SS_LEFT | SS_NOPREFIX | (helpId ? SS_NOTIFY : 0), x, y + 4, w, 16, -1);
+        HWND c = Make(L"STATIC", t, SS_LEFT | SS_NOPREFIX | (helpId ? SS_NOTIFY : 0), x, y + 4, w, TextH(), -1);
         if (helpId) {
             SetWindowLongPtrW(c, GWLP_USERDATA, helpId);
             Tip(c, HelpText(helpId));
@@ -2444,8 +2724,12 @@ struct Builder {
         Tip(Make(L"BUTTON", t, WS_TABSTOP | BS_NOTIFY | (def ? BS_DEFPUSHBUTTON : BS_PUSHBUTTON), x, y - 2, w, 26, id), HelpText(id));
     }
     int ButtonW(const wchar_t* t) { const int w = TextW(t) + 28; return w < 88 ? 88 : w; }
-    // Height of one text line in the dialog font (what a multi-line edit / static advances per line).
-    int LineH() {
+    // Height of a one-line text control: 16 layout units, or a line of the font if that is taller (fonts do not scale exactly).
+    int TextH() { const int l = LineH(); return l > 16 ? l : 16; }
+    // Height of one text line in the dialog font (what a multi-line edit / static advances per line), in layout units /
+    // in device pixels (the help edit's formatting rectangle).
+    int LineH() { return Lg(LineHPx()); }
+    int LineHPx() {
         HDC dc = GetDC(parent);
         HGDIOBJ old = g_font ? SelectObject(dc, g_font) : nullptr;
         TEXTMETRICW tm{};
@@ -2490,7 +2774,7 @@ struct Builder {
             pos = bar + 1;
         }
         const int dw = widest + 28;   // the glass list: 14 px text inset + 8 px right + the scroll indicator
-        SendMessageW(c, CB_SETDROPPEDWIDTH, (WPARAM)(dw > w ? dw : w), 0);
+        SendMessageW(c, CB_SETDROPPEDWIDTH, (WPARAM)Px(dw > w ? dw : w), 0);
     }
 };
 
@@ -2503,11 +2787,15 @@ struct Builder {
 // buttons 26 px tall and at least 88 px wide. The sequence of Make calls must not depend on the pass or the size.
 int BuildControls(HWND dlg, Builder::Pass pass, int clientW, int clientH, int scrollY, int* naturalH) {
     const bool create = pass == Builder::Pass::Create;
+    clientW = (int)(clientW / g_s);   // device pixels -> layout units
+    clientH = (int)(clientH / g_s);
     Builder b{dlg, pass};
     auto keep = [&](std::vector<HWND>& v, HWND c) { if (create) v.push_back(c); return c; };
     g_footerH = kFooterH;
     if (create) {
         g_made.clear();
+        g_madeTab.clear();
+        g_wantHidden.clear();
         g_dim.clear();
         g_footer.clear();
         g_domeLabels.clear();
@@ -2516,7 +2804,7 @@ int BuildControls(HWND dlg, Builder::Pass pass, int clientW, int clientH, int sc
                                 CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, dlg, nullptr, GetModuleHandleW(nullptr), nullptr);
         if (g_tip) {
             SetWindowPos(g_tip, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-            SendMessageW(g_tip, TTM_SETMAXTIPWIDTH, 0, 380);
+            SendMessageW(g_tip, TTM_SETMAXTIPWIDTH, 0, Px(380));
             SendMessageW(g_tip, TTM_SETDELAYTIME, TTDT_AUTOPOP, MAKELONG(30000, 0));
             if (glass::Current().dark) SetWindowTheme(g_tip, L"DarkMode_Explorer", nullptr);
         }
@@ -2524,11 +2812,13 @@ int BuildControls(HWND dlg, Builder::Pass pass, int clientW, int clientH, int sc
         b.dwp = BeginDeferWindowPos((int)g_made.size());
     }
     b.dy = -scrollY;
-    // Two columns of group boxes (left: Recording, Video, Stereo 3D; right: Recording Indicator, Export, Advanced), then the
-    // Description and the footer across the full width. setCol() moves the grid to a column: label column at lx, controls at cx.
+    // The header (logo, update line), the tab strip, then one page per tab: two columns of group boxes (Recording | Recording
+    // Indicator, Video | Stereo 3D, Export | Conversions, App | Advanced). Every group is as tall as the tallest one (Export),
+    // so the Description and the footer below stay put when the tab changes. setCol() moves the grid to a column: label
+    // column at lx, controls at cx.
     const int margin = 12, colGap = 12, fullW = clientW - 2 * margin, colW = (fullW - colGap) / 2;
     const int colWMin = (kLayoutW - 2 * margin - colGap) / 2;
-    const int extraW = colW > colWMin ? colW - colWMin : 0;   // the previews grow with the column
+    const int extraW = colW > colWMin ? colW - colWMin : 0;   // the layout preview grows with the column
     int gx = margin, gw = colW, lx = 0, cx = 0, cw = 0;
     const int labelW = 108;
     auto setCol = [&](int x, int w) { gx = x; gw = w; lx = gx + 12; cx = gx + 132; cw = gx + gw - 12 - cx; };
@@ -2536,34 +2826,33 @@ int BuildControls(HWND dlg, Builder::Pass pass, int clientW, int clientH, int sc
     const int pitch = 30, top = 22, gap = 8;
     auto groupH = [&](int rows) { return top + rows * pitch + 2; };
     const int unitGap = 6;
-    // column heights (rows): left Recording 7 + Video 5 + Stereo 3D 4; right Recording Indicator 4 + Export + Advanced 2. The
-    // shorter column's groups get the difference (left: leftEx on Stereo 3D; right: spare, below).
-    const int kExportRows = 10, kRecordingRows = 8, kVideoRows = 5, kStereoRows = 4;   // Recording's last row is "Updates:"
-    const int leftH = groupH(kRecordingRows) + gap + groupH(kVideoRows) + gap + groupH(kStereoRows) + gap;
-    const int rightH = groupH(4) + gap + groupH(kExportRows) + gap + groupH(3) + gap;
-    const int leftEx = rightH > leftH ? rightH - leftH : 0;
+    const int kExportRows = 11;                      // the tallest group: it sets the page height
+    const int pageH = groupH(kExportRows) + 6;
     int y = 6;
 
-    // ---- header: the logo (mark + wordmark + tagline, owner-drawn by DrawLogo) and, to its right, the config file path
+    // ---- header: the logo (mark + wordmark + tagline, owner-drawn by DrawLogo) and, at its right end, the "update available"
+    // line (hidden until a newer release is known)
     {
         const int logoW = 32 + 6 + b.TextW(L"VR EyeCapture", g_logoFont) + 16 + b.TextW(L"Stereo 3D recorder for VR games") + 2;
         b.Make(L"STATIC", L"", SS_OWNERDRAW, gx, y, logoW, 32, ID_LOGO);
-        const wchar_t* t = L"Configuration file:";
-        const int tw = b.TextW(t) + 6;
-        const int hx = gx + logoW + 24, hy = y + (32 - 16) / 2;
-        b.Make(L"STATIC", t, SS_LEFT | SS_NOPREFIX, hx, hy, tw, 16, -1);
-        // the theme drop-down at the right end of the header; the config path takes the room left of it (path ellipsis)
-        const int thW = b.TextW(L"Same as Windows") + GetSystemMetrics(SM_CXVSCROLL) + 14, thLw = b.TextW(L"Theme:") + 6;
-        const int thX = gx + fullW - thW, pathW = thX - thLw - 16 - (hx + tw);
-        keep(g_dim, b.Make(L"STATIC", g_path.c_str(), SS_LEFT | SS_NOPREFIX | SS_PATHELLIPSIS, hx + tw, hy, pathW > 0 ? pathW : 0, 16, -1));
-        b.Label(thX - thLw, y + 3, thLw, L"Theme:", ID_THEME);
-        b.Combo(ID_THEME, thX, y + 3, thW);
+        const int ux = gx + logoW + 24;
+        HWND ul = b.Make(WC_LINK, L"", WS_TABSTOP | LWS_RIGHT, ux, y + (32 - 16) / 2, gx + fullW - ux, b.TextH(), ID_UPDATELINK);
+        b.Tip(ul, HelpText(ID_UPDATELINK));
+        if (create) SetShown(ul, false);
     }
-    y += 32 + 4;
+    y += 32 + 8;
+
+    // ---- the tab strip (DrawTabs / TabsProc)
+    {
+        HWND ts = b.Make(L"STATIC", L"", SS_OWNERDRAW | SS_NOTIFY | WS_TABSTOP, gx, y, fullW, 40, ID_TABS);
+        b.Tip(ts, HelpText(ID_TABS));
+        if (create && ts) SetWindowSubclass(ts, TabsProc, 1, 0);
+    }
+    y += 40 + 10;
     const int yTop = y;
 
     // Rows that carry two settings (Audio + Device, Codec + Encoder preset, Resolution + Colour depth, Frame rate limit +
-    // Constant frame rate, Projection + Sharpen, Head smoothing + FOV scale) keep both columns at 16 rows, so the window still fits a 1920x1080 screen. Texts that depend on
+    // Constant frame rate, Projection + Sharpen, Head smoothing + FOV scale) keep the groups short. Texts that depend on
     // the room are picked for the NARROWEST layout (cwMin), so the Create and Move passes always agree.
     const int cwMin = colWMin - 12 - 132;
     auto pickText = [&](int room, std::initializer_list<const wchar_t*> texts, int pad) {
@@ -2583,17 +2872,13 @@ int BuildControls(HWND dlg, Builder::Pass pass, int clientW, int clientH, int sc
             if (t > w) w = t;
             pos = bar + 1;
         }
-        return w + GetSystemMetrics(SM_CXVSCROLL) + 14;
+        return w + Lg(GetSystemMetricsForDpi(SM_CXVSCROLL, Dpi())) + 14;
     };
 
+    // ================================ tab 0: Recording
+    b.tab = 0;
     // ---- Recording
-    b.Group(gx, y, gw, groupH(kRecordingRows), L"Recording");
-    {   // "update available" line on the group's top edge (right of the "Recording" title), hidden until a newer release is known
-        const int adtW = b.TextW(L"Recording") + 12;
-        HWND ul = b.Make(WC_LINK, L"", WS_TABSTOP | LWS_RIGHT, gx + 12 + adtW, y, gw - 24 - adtW, 16, ID_UPDATELINK);
-        b.Tip(ul, HelpText(ID_UPDATELINK));
-        if (b.pass == Builder::Pass::Create) ShowWindow(ul, SW_HIDE);
-    }
+    b.Group(gx, y, gw, pageH, L"Recording");
     int r = y + top;
     b.Label(lx, r, labelW, L"Hotkey:", ID_HOTKEY);
     {   // one row: the keyboard / pad hotkey, then the VR controller combination (vr_hotkey) at the right end
@@ -2633,16 +2918,53 @@ int BuildControls(HWND dlg, Builder::Pass pass, int clientW, int clientH, int sc
     r += pitch;
     b.Label(lx, r, labelW, L"Beeps:", ID_BEEPS);
     b.Check(ID_BEEPS, cx, r, L"Beep in the headset when recording starts / stops");
-    r += pitch;
-    b.Label(lx, r, labelW, L"Updates:", ID_CHECKUPDATES);
-    {   // check_updates + a "Check now" button (a manual check works even when the automatic one is off)
-        const int cuw = b.Check(ID_CHECKUPDATES, cx, r, L"Check for updates automatically");
-        b.Button(ID_UPDATENOW, cx + cuw + 12, r, b.ButtonW(L"Check now"), L"Check now");
-    }
-    y += groupH(kRecordingRows) + gap;
 
+    // ---- Recording Indicator (the fields, then the live preview of the view below them: square, centred in the group)
+    setCol(margin + colW + colGap, colW);
+    b.Group(gx, y, gw, pageH, L"Recording Indicator");
+    r = y + top;
+    b.Label(lx, r, labelW, L"Indicator:", ID_INDICATOR);
+    {   // one row: the dot itself, then its violet "OBS is watching" state (indicator_live)
+        const int iw = b.Check(ID_INDICATOR, cx, r, L"Show in headset");
+        b.Check(ID_INDLIVE, cx + iw + 16, r, L"Violet for OBS");
+    }
+    r += pitch;
+    b.Label(lx, r, labelW, L"Size:", ID_INDSIZE);
+    b.Edit(ID_INDSIZE, cx, r, 60);
+    b.Label(cx + 60 + unitGap, r, 20, L"m", ID_INDSIZE);
+    r += pitch;
+    b.Label(lx, r, labelW, L"Opacity:", ID_INDOPACITY);
+    b.Edit(ID_INDOPACITY, cx, r, 60);
+    b.Hint(cx + 60 + 8, r, 100, L"0.0 – 1.0", ID_INDOPACITY);
+    r += pitch;
+    b.Label(lx, r, labelW, L"Position (m):", ID_INDX);
+    {
+        int x = cx;
+        b.Label(x, r, 12, L"X", ID_INDX);
+        b.Edit(ID_INDX, x + 16, r, 52);
+        x += 84;
+        b.Label(x, r, 12, L"Y", ID_INDY);
+        b.Edit(ID_INDY, x + 16, r, 52);
+        x += 84;
+        b.Label(x, r, 12, L"Z", ID_INDZ);
+        b.Edit(ID_INDZ, x + 16, r, 52);
+    }
+    r += pitch;
+    {
+        const int room = y + pageH - 12 - (r + 2);
+        int prevSize = room < gw - 24 ? room : gw - 24;
+        if (prevSize > 220) prevSize = 220;
+        HWND pv = b.Make(L"STATIC", L"", SS_OWNERDRAW | SS_NOTIFY, gx + (gw - prevSize) / 2, r + 2 + (room - prevSize) / 2, prevSize,
+                         prevSize, ID_INDPREVIEW);
+        b.Tip(pv, HelpText(ID_INDPREVIEW));
+        if (create && pv) SetWindowSubclass(pv, PreviewProc, 1, 0);   // click / drag / wheel places the dot
+    }
+
+    // ================================ tab 1: Video
+    b.tab = 1;
+    setCol(margin, colW);
     // ---- Video (the QP edit is greyed unless Rate control is Constant QP, the Bitrate drop-down greyed for it)
-    b.Group(gx, y, gw, groupH(kVideoRows), L"Video");
+    b.Group(gx, y, gw, pageH, L"Video");
     r = y + top;
     b.Label(lx, r, labelW, L"Codec:", ID_CODEC);
     {   // one row: Codec, then "Encoder preset:" (quality_vs_speed), which takes the rest of the row
@@ -2689,11 +3011,11 @@ int BuildControls(HWND dlg, Builder::Pass pass, int clientW, int clientH, int sc
         b.Check(ID_CFR, fx, r, pickText(cwMin - (fx - cx), {L"Constant frame rate (for video editors such as DaVinci Resolve)",
                                                              L"Constant frame rate (for video editors)", L"Constant frame rate"}, 24));
     }
-    y += groupH(kVideoRows) + gap;
 
     // ---- Stereo 3D (Output layout lives in the Export group: it only shapes the files made for YouTube, or the recording
     // itself with record_for_youtube). Dome fill / Fade after are greyed unless Projection is VR180 / VR360.
-    b.Group(gx, y, gw, groupH(kStereoRows) + leftEx, L"Stereo 3D");
+    setCol(margin + colW + colGap, colW);
+    b.Group(gx, y, gw, pageH, L"Stereo 3D");
     r = y + top;
     b.Label(lx, r, labelW, L"Projection:", ID_PROJECTION);
     {   // one row: Projection, then "Sharpen:" (sharpen; every layout, most useful for the domes)
@@ -2733,70 +3055,24 @@ int BuildControls(HWND dlg, Builder::Pass pass, int clientW, int clientH, int sc
             SendMessageW(tb, TBM_SETPAGESIZE, 0, 2);
             SendMessageW(tb, TBM_SETLINESIZE, 0, 1);
         }
-        b.Make(L"STATIC", L"0.00", SS_LEFT | SS_NOPREFIX, cx + sw + 8, r + 4, 44, 16, ID_SMOOTHVAL);
+        b.Make(L"STATIC", L"0.00", SS_LEFT | SS_NOPREFIX, cx + sw + 8, r + 4, 44, b.TextH(), ID_SMOOTHVAL);
         const int fx = cx + sw + 8 + 44 + 16;
         b.Label(fx, r, flw, fl, ID_FOVSCALE);
         b.Edit(ID_FOVSCALE, fx + flw, r, 60);
     }
-    y += groupH(kStereoRows) + leftEx + gap;
-    const int yLeftEnd = y;
-    y = yTop;
-    setCol(margin + colW + colGap, colW);
-    // when the right column is shorter, the spare height is shared by its three groups (rows stay on top, previews are
-    // centred); when it is longer, the Stereo 3D group takes the difference (leftEx). Today both are 16 rows (576 px): 0 / 0.
-    const int spare = yLeftEnd - (yTop + rightH);
-    const int ex1 = spare > 0 ? spare / 3 : 0, ex2 = ex1, ex3 = spare > 0 ? spare - 2 * ex1 : 0;
 
-    // ---- Recording Indicator (fields on the left, the live preview of the view on the right; square, it grows with the
-    // column up to the inside of the group)
-    int prevGrow = groupH(4) + ex1 - top - 10 - 112;
-    prevGrow = prevGrow < 0 ? 0 : (extraW < prevGrow ? extraW : prevGrow);
-    const int prevSize = 112 + prevGrow, prevY = ex1 > prevGrow ? (ex1 - prevGrow) / 2 : 0;
-    b.Group(gx, y, gw, groupH(4) + ex1, L"Recording Indicator");
-    r = y + top;
-    b.Label(lx, r, labelW, L"Indicator:", ID_INDICATOR);
-    {   // one row: the dot itself, then its violet "OBS is watching" state (indicator_live); the preview takes the right side
-        const int iw = b.Check(ID_INDICATOR, cx, r, L"Show in headset");
-        b.Check(ID_INDLIVE, cx + iw + 16, r, L"Violet for OBS");
-    }
-    r += pitch;
-    b.Label(lx, r, labelW, L"Size:", ID_INDSIZE);
-    b.Edit(ID_INDSIZE, cx, r, 60);
-    b.Label(cx + 60 + unitGap, r, 20, L"m", ID_INDSIZE);
-    r += pitch;
-    b.Label(lx, r, labelW, L"Opacity:", ID_INDOPACITY);
-    b.Edit(ID_INDOPACITY, cx, r, 60);
-    b.Hint(cx + 60 + 8, r, 100, L"0.0 – 1.0", ID_INDOPACITY);
-    r += pitch;
-    b.Label(lx, r, labelW, L"Position (m):", ID_INDX);
-    {
-        int x = cx;
-        b.Label(x, r, 12, L"X", ID_INDX);
-        b.Edit(ID_INDX, x + 16, r, 52);
-        x += 84;
-        b.Label(x, r, 12, L"Y", ID_INDY);
-        b.Edit(ID_INDY, x + 16, r, 52);
-        x += 84;
-        b.Label(x, r, 12, L"Z", ID_INDZ);
-        b.Edit(ID_INDZ, x + 16, r, 52);
-    }
-    {
-        HWND pv = b.Make(L"STATIC", L"", SS_OWNERDRAW | SS_NOTIFY, gx + gw - 12 - prevSize, y + top + prevY, prevSize, prevSize,
-                         ID_INDPREVIEW);
-        b.Tip(pv, HelpText(ID_INDPREVIEW));
-        if (create && pv) SetWindowSubclass(pv, PreviewProc, 1, 0);   // click / drag / wheel places the dot
-    }
-    y += groupH(4) + ex1 + gap;
-
+    // ================================ tab 2: Export
+    b.tab = 2;
+    setCol(margin, colW);
     // ---- Export (fields on the left, the live layout preview on the right). The preview is 213 px wide at the minimum width and
     // grows with the column by up to 40 px (its text lines need that room; DrawLayoutPreview draws at fixed pixel positions, so
     // more would only add empty space); it stays right-aligned in the column and the combos left of it (`ecw`) take the rest.
     const int lpW = 213 + (extraW < 40 ? extraW : 40), lpH = 140;
     const int ecw = gx + gw - 12 - lpW - 12 - cx;   // combo width that leaves a gap before the preview
     // rows: YouTube output, Convert, 8K bitrate, 8K codec, the 2D check (left of the preview: their texts fit `ecw`), Keep MP4,
-    // Output layout, Eye crop (below the preview: the layout items are wider than `ecw`), the record_for_youtube check, the two
-    // conversion buttons
-    b.Group(gx, y, gw, groupH(kExportRows) + ex2, L"Export");
+    // Output layout, Eye crop (below the preview: the layout items are wider than `ecw`), the record_for_youtube check, the
+    // tag_3d check, the two conversion buttons
+    b.Group(gx, y, gw, pageH, L"Export");
     r = y + top;
     b.Label(lx, r, labelW, L"YouTube output:", ID_YTMODE);
     b.Combo(ID_YTMODE, cx, r, ecw, L"3D MKV|8K 3D MKV|3D MKV + 8K 3D MKV|None");
@@ -2834,18 +3110,68 @@ int BuildControls(HWND dlg, Builder::Pass pass, int clientW, int clientH, int sc
     }
     {   // the frame-rate warning: sits on the group box's top edge right of the "Export" title (opaque, so it interrupts the line);
         // empty and hidden until UpdateFpsWarning finds a game at an uneven rate
-        HWND wl = b.Make(L"STATIC", L"", SS_LEFT | SS_NOPREFIX | SS_NOTIFY, gx + 62, y, gw - 62 - 12, 16, ID_FPSWARN);
+        HWND wl = b.Make(L"STATIC", L"", SS_LEFT | SS_NOPREFIX | SS_NOTIFY, gx + 62, y, gw - 62 - 12, b.TextH(), ID_FPSWARN);
         b.Tip(wl, HelpText(ID_FPSWARN));
-        if (b.pass == Builder::Pass::Create) ShowWindow(wl, SW_HIDE);
+        if (create) SetShown(wl, false);
     }
     b.HiddenCheck(ID_POSTMKV);     // bound to post_mkv / post_yt8k, set from / read into the drop-down
     b.HiddenCheck(ID_POSTYT8K);
-    b.Tip(b.Make(L"STATIC", L"", SS_OWNERDRAW | SS_NOTIFY, gx + gw - 12 - lpW, y + top + ex2 / 2, lpW, lpH, ID_LAYOUTPREVIEW),
+    b.Tip(b.Make(L"STATIC", L"", SS_OWNERDRAW | SS_NOTIFY, gx + gw - 12 - lpW, y + top, lpW, lpH, ID_LAYOUTPREVIEW),
           HelpText(ID_LAYOUTPREVIEW));
-    y += groupH(kExportRows) + ex2 + gap;
+
+    // ---- Conversions (right column, top to bottom): the running job (three status lines: file, format, step / progress /
+    // time left; progress bar; Pause / Cancel), then the waiting list (multi-select, scrolls sideways for long rows) with
+    // Start / Start all / Remove beside it. Filled by UpdateQueueView.
+    setCol(margin + colW + colGap, colW);
+    b.Group(gx, y, gw, pageH, L"Conversions");
+    {
+        const int lh = b.LineH();
+        const int stH = 3 * lh, pbY = stH + 6, btY = pbY + 14 + 8;
+        r = y + top;
+        b.Label(lx, r, labelW, L"Running:", ID_QSTATUS);
+        b.Tip(b.Make(L"STATIC", L"", SS_LEFT | SS_NOPREFIX | SS_NOTIFY, cx, r + 2, cw, stH, ID_QSTATUS), HelpText(ID_QSTATUS));
+        HWND pb = b.Make(PROGRESS_CLASSW, L"", PBS_SMOOTH, cx, r + 2 + pbY, cw, 14, ID_QPROGRESS);
+        if (create) SendMessageW(pb, PBM_SETRANGE32, 0, 100);
+        b.Tip(pb, HelpText(ID_QPROGRESS));
+        b.Button(ID_QPAUSE, cx, r + 2 + btY, 96, L"Pause");
+        b.Button(ID_QCANCEL, cx + 96 + 8, r + 2 + btY, 96, L"Cancel");
+        r += btY + 26 + 18;
+        b.Label(lx, r, labelW, L"Waiting:", ID_QLIST);
+        int qbW = b.ButtonW(L"Start all");
+        for (const wchar_t* t : {L"Start", L"Remove"}) if (b.ButtonW(t) > qbW) qbW = b.ButtonW(t);
+        const int lbW = cw - qbW - 8, listH = y + pageH - 12 - r;
+        b.Tip(b.Make(L"LISTBOX", L"", WS_TABSTOP | WS_VSCROLL | WS_HSCROLL | LBS_NOTIFY | LBS_EXTENDEDSEL | LBS_NOINTEGRALHEIGHT, cx, r,
+                     lbW, listH, ID_QLIST, WS_EX_CLIENTEDGE),
+              HelpText(ID_QLIST));
+        b.Button(ID_QSTART, cx + lbW + 8, r + 2, qbW, L"Start");
+        b.Button(ID_QSTARTALL, cx + lbW + 8, r + 2 + 34, qbW, L"Start all");
+        b.Button(ID_QREMOVE, cx + lbW + 8, r + 2 + 68, qbW, L"Remove");
+    }
+
+    // ================================ tab 3: App
+    b.tab = 3;
+    setCol(margin, colW);
+    // ---- App: the look, startup, updates and the config file
+    b.Group(gx, y, gw, pageH, L"App");
+    r = y + top;
+    b.Label(lx, r, labelW, L"Theme:", ID_THEME);
+    b.Combo(ID_THEME, cx, r, comboW(ID_THEME, nullptr));
+    r += pitch;
+    b.Label(lx, r, labelW, L"Startup:", ID_AUTOSTART);
+    b.Check(ID_AUTOSTART, cx, r, L"Start with Windows");
+    r += pitch;
+    b.Label(lx, r, labelW, L"Updates:", ID_CHECKUPDATES);
+    {   // check_updates + a "Check now" button (a manual check works even when the automatic one is off)
+        const int cuw = b.Check(ID_CHECKUPDATES, cx, r, L"Check for updates automatically");
+        b.Button(ID_UPDATENOW, cx + cuw + 12, r, b.ButtonW(L"Check now"), L"Check now");
+    }
+    r += pitch;
+    b.Label(lx, r, labelW, L"Config file:");
+    keep(g_dim, b.Make(L"STATIC", g_path.c_str(), SS_LEFT | SS_NOPREFIX | SS_PATHELLIPSIS, cx, r + 4, cw, b.TextH(), -1));
 
     // ---- Advanced
-    b.Group(gx, y, gw, groupH(3) + ex3, L"Advanced");
+    setCol(margin + colW + colGap, colW);
+    b.Group(gx, y, gw, pageH, L"Advanced");
     r = y + top;
     b.HiddenCheck(ID_REQTRAY);   // require_tray stays a config.ini key (default 1); the tray is required anyway, so no checkbox
     b.Label(lx, r, labelW, L"SteamVR games:", ID_SVRMODE);
@@ -2853,11 +3179,6 @@ int BuildControls(HWND dlg, Builder::Pass pass, int clientW, int clientH, int sc
     r += pitch;
     b.Label(lx, r, labelW, L"Log level:", ID_LOGLEVEL);
     b.Combo(ID_LOGLEVEL, cx, r, 160);
-    {   // one row: "Startup:" + its check right of the Log level drop-down
-        const int sx = cx + 160 + 16, sw = b.TextW(L"Startup:") + 8;
-        b.Label(sx, r, sw, L"Startup:", ID_AUTOSTART);
-        b.Check(ID_AUTOSTART, sx + sw, r, L"Start with Windows");
-    }
     r += pitch;
     b.Label(lx, r, labelW, L"Tools:", ID_OPENLOG);
     {   // moved here from the tray menu: Open log, Tag as 3D (a small menu: side by side / top-bottom), Register / Unregister
@@ -2869,41 +3190,9 @@ int BuildControls(HWND dlg, Builder::Pass pass, int clientW, int clientH, int sc
         b.Button(ID_TAG3D, cx + w1 + 8, r, w2, L"Tag as 3D...");
         b.Button(ID_REGLAYER, cx + w1 + w2 + 16, r, w3, L"Register for VR games...");
     }
-    y += groupH(3) + ex3 + gap;
-    y = yLeftEnd > y ? yLeftEnd : y;
 
-    // ---- Conversions (full width; the same two-column grid as the groups above): left = the running job (three status lines:
-    // file, format, step / progress / time left; progress bar; Pause / Cancel), right = the waiting list (multi-select,
-    // scrolls sideways for long rows) with Start / Start all / Remove. Filled by UpdateQueueView.
-    {
-        const int lh = b.LineH();
-        const int stH = 3 * lh, pbY = stH + 6, btY = pbY + 14 + 8, listH = btY + 26;
-        const int qH = top + listH + 10;
-        setCol(margin, fullW);
-        b.Group(gx, y, gw, qH, L"Conversions");
-        r = y + top;
-        setCol(margin, colW);
-        b.Label(lx, r, labelW, L"Running:", ID_QSTATUS);
-        b.Tip(b.Make(L"STATIC", L"", SS_LEFT | SS_NOPREFIX | SS_NOTIFY, cx, r + 2, cw, stH, ID_QSTATUS), HelpText(ID_QSTATUS));
-        HWND pb = b.Make(PROGRESS_CLASSW, L"", PBS_SMOOTH, cx, r + 2 + pbY, cw, 14, ID_QPROGRESS);
-        if (create) SendMessageW(pb, PBM_SETRANGE32, 0, 100);
-        b.Tip(pb, HelpText(ID_QPROGRESS));
-        b.Button(ID_QPAUSE, cx, r + 2 + btY, 96, L"Pause");
-        b.Button(ID_QCANCEL, cx + 96 + 8, r + 2 + btY, 96, L"Cancel");
-        setCol(margin + colW + colGap, colW);
-        b.Label(lx, r, labelW, L"Waiting:", ID_QLIST);
-        int qbW = b.ButtonW(L"Start all");
-        for (const wchar_t* t : {L"Start", L"Remove"}) if (b.ButtonW(t) > qbW) qbW = b.ButtonW(t);
-        const int lbW = cw - qbW - 8;
-        b.Tip(b.Make(L"LISTBOX", L"", WS_TABSTOP | WS_VSCROLL | WS_HSCROLL | LBS_NOTIFY | LBS_EXTENDEDSEL | LBS_NOINTEGRALHEIGHT, cx, r,
-                     lbW, listH, ID_QLIST, WS_EX_CLIENTEDGE),
-              HelpText(ID_QLIST));
-        const int bstep = (listH - 26) / 2;
-        b.Button(ID_QSTART, cx + lbW + 8, r + 2, qbW, L"Start");
-        b.Button(ID_QSTARTALL, cx + lbW + 8, r + 2 + bstep, qbW, L"Start all");
-        b.Button(ID_QREMOVE, cx + lbW + 8, r + 2 + 2 * bstep, qbW, L"Remove");
-        y += qH + gap;
-    }
+    b.tab = -1;
+    y = yTop + pageH + gap;
     setCol(margin, fullW);
 
     // ---- Description panel (follows the mouse / keyboard focus, see Hover / ShowHelp). At least g_helpMinH tall (the longest
@@ -2924,11 +3213,12 @@ int BuildControls(HWND dlg, Builder::Pass pass, int clientW, int clientH, int sc
         }
         // the formatting rectangle: whole lines from the top, so the last visible line is never cut in half
         RECT fr{};
-        if (he) SendMessageW(he, EM_GETRECT, 0, (LPARAM)&fr);
-        if (create) g_helpPad = helpH > fr.bottom - fr.top ? helpH - (fr.bottom - fr.top) : 0;
-        const int lines = (fr.bottom - fr.top) / lh;
+        if (he) SendMessageW(he, EM_GETRECT, 0, (LPARAM)&fr);   // device pixels
+        const int frH = Lg(fr.bottom - fr.top), lhPx = b.LineHPx();
+        if (create) g_helpPad = helpH > frH ? helpH - frH : 0;
+        const int lines = (fr.bottom - fr.top) / lhPx;
         if (he && lines >= 1) {
-            fr.bottom = fr.top + lines * lh;
+            fr.bottom = fr.top + lines * lhPx;
             SendMessageW(he, EM_SETRECTNP, 0, (LPARAM)&fr);
         }
     }
@@ -2953,18 +3243,18 @@ int BuildControls(HWND dlg, Builder::Pass pass, int clientW, int clientH, int sc
     if (create) for (int id : {ID_OPENINI, ID_DEFAULTS, ID_OPENSTEAMVR, ID_SAVE, ID_MINIMIZE, ID_CANCEL}) g_footer.push_back(GetDlgItem(dlg, id));
     const wchar_t* const noteText = L"Changes apply to the next recording. Keyboard hotkeys and the indicator require a game restart.";
     const int noteW = b.TextW(noteText) + 4;
-    HWND note = b.Make(L"STATIC", noteText, SS_LEFT | SS_NOPREFIX, gx, fy + 9, noteW, 16, -1);
+    HWND note = b.Make(L"STATIC", noteText, SS_LEFT | SS_NOPREFIX, gx, fy + 9, noteW, b.TextH(), -1);
     keep(g_dim, note);
     keep(g_footer, note);
     // the project link and the copyright / licence line, right-aligned on the note's row (above the background strip)
     HWND about = b.Make(WC_LINK,
         L"<a href=\"https://github.com/JRDevo/VR-EyeCapture\">github.com/JRDevo/VR-EyeCapture</a> · Copyright (c) 2026 JRDevo · "
         L"<a href=\"https://github.com/JRDevo/VR-EyeCapture/blob/master/LICENSE.md\">License: noncommercial, recordings are yours</a>",
-        WS_TABSTOP | LWS_RIGHT, gx + noteW + 12, fy + 9, gw - noteW - 12, 16, ID_ABOUTLINK);
+        WS_TABSTOP | LWS_RIGHT, gx + noteW + 12, fy + 9, gw - noteW - 12, b.TextH(), ID_ABOUTLINK);
     b.Tip(about, HelpText(ID_ABOUTLINK));
     keep(g_footer, about);
     // created last = lowest of the footer: it only paints the background behind the note and the buttons
-    keep(g_footer, b.Make(L"STATIC", L"", SS_LEFT, 0, fy, clientW, g_footerH, kFooterBgId));
+    keep(g_footer, b.Make(L"STATIC", L"", SS_LEFT, 0, fy, clientW + 2, g_footerH + 2, kFooterBgId));
     if (create) {
         for (HWND g : b.groups) SetWindowPos(g, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         g_footerRaised = false;   // the footer stays below the content (Tab order) until scrolling needs it on top (RaiseFooter)
@@ -2979,6 +3269,52 @@ int BuildControls(HWND dlg, Builder::Pass pass, int clientW, int clientH, int sc
     return g_contentH + g_footerH;
 }
 
+// The window's fonts at `dpi` (the message font and its variants, the logo / tab / icon fonts). Replaces the old ones: every
+// control of the window gets the new message font.
+void MakeFonts(UINT dpi) {
+    const HFONT oldFonts[] = {g_font, g_odFont, g_odFontLg, g_logoFont, g_tabFont, g_iconFont};
+    g_font = g_odFont = g_odFontLg = g_logoFont = g_tabFont = g_iconFont = nullptr;
+    NONCLIENTMETRICSW ncm{sizeof(ncm)};
+    if (SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0, dpi)) {
+        g_font = CreateFontIndirectW(&ncm.lfMessageFont);
+        LOGFONTW gf = ncm.lfMessageFont;
+        gf.lfQuality = ANTIALIASED_QUALITY;
+        g_odFont = CreateFontIndirectW(&gf);
+        gf.lfHeight = (LONG)std::lround(gf.lfHeight / g_s);
+        g_odFontLg = CreateFontIndirectW(&gf);
+        LOGFONTW lf = ncm.lfMessageFont;
+        lf.lfHeight = -Px(20);
+        lf.lfWeight = FW_BOLD;
+        lf.lfQuality = ANTIALIASED_QUALITY;   // drawn straight onto the owner-drawn logo (glass two-pass alpha)
+        g_logoFont = CreateFontIndirectW(&lf);
+        LOGFONTW tf = ncm.lfMessageFont;
+        tf.lfWeight = FW_SEMIBOLD;
+        tf.lfQuality = ANTIALIASED_QUALITY;
+        g_tabFont = CreateFontIndirectW(&tf);
+        // the tab icons: the Windows 11 icon font, else the Windows 10 one (same code points); none = text-only tabs
+        for (const wchar_t* face : {L"Segoe Fluent Icons", L"Segoe MDL2 Assets"}) {
+            LOGFONTW icf{};
+            icf.lfHeight = ncm.lfMessageFont.lfHeight * 5 / 4;
+            icf.lfWeight = FW_NORMAL;
+            icf.lfCharSet = DEFAULT_CHARSET;
+            icf.lfQuality = ANTIALIASED_QUALITY;
+            wcscpy_s(icf.lfFaceName, face);
+            HFONT f = CreateFontIndirectW(&icf);
+            wchar_t got[LF_FACESIZE] = L"";
+            HDC dc = GetDC(nullptr);
+            HGDIOBJ old = SelectObject(dc, f);
+            GetTextFaceW(dc, LF_FACESIZE, got);
+            SelectObject(dc, old);
+            ReleaseDC(nullptr, dc);
+            if (!_wcsicmp(got, face)) { g_iconFont = f; break; }
+            DeleteObject(f);
+        }
+    }
+    if (g_dlg)
+        for (HWND c = GetWindow(g_dlg, GW_CHILD); c; c = GetWindow(c, GW_HWNDNEXT)) SendMessageW(c, WM_SETFONT, (WPARAM)g_font, TRUE);
+    for (HFONT f : oldFonts) if (f) DeleteObject(f);
+}
+
 // The height the help edit needs for the longest help text (kOverview and every kHelp text) at the current (narrowest) width:
 // DrawText DT_CALCRECT in the dialog font and the edit's own line count (its wrapping is the ground truth), the larger one.
 // Sets g_helpMinH; run right after the Create pass (client kLayoutW wide).
@@ -2986,7 +3322,7 @@ void MeasureHelp() {
     HWND he = Ctl(ID_HELPTEXT);
     if (!he) return;
     Builder b{g_dlg};
-    const int lh = b.LineH();
+    const int lh = b.LineHPx();   // device pixels, like the edit's formatting rectangle
     RECT fr{};
     SendMessageW(he, EM_GETRECT, 0, (LPARAM)&fr);
     const int width = fr.right - fr.left;
@@ -3008,7 +3344,7 @@ void MeasureHelp() {
     ReleaseDC(g_dlg, dc);
     SetWindowTextW(he, kOverview);
     g_shown = kOverview;
-    g_helpMinH = maxLines * lh + g_helpPad;
+    g_helpMinH = Lg(maxLines * lh) + g_helpPad;
     LOGI("settings: description panel: %d lines (longest help text id %d)", maxLines, maxId);
 }
 
@@ -3038,8 +3374,9 @@ void Relayout() {
     for (int i = 0; i < 3; ++i) {
         RECT rc{};
         GetClientRect(g_dlg, &rc);
-        const int cw = rc.right - rc.left, ch = rc.bottom - rc.top;
-        const int view = ch - g_footerH;
+        const int cw = rc.right - rc.left, ch = rc.bottom - rc.top;   // device pixels
+        const int chL = (int)(ch / g_s);
+        const int view = chL - g_footerH;
         const bool scroll = g_naturalH > view;
         g_viewH = view;
         g_scrollMax = scroll ? g_naturalH - view : 0;
@@ -3057,7 +3394,7 @@ void Relayout() {
             SCROLLINFO si{sizeof(si), SIF_RANGE | SIF_PAGE | SIF_POS};
             si.nMin = 0;
             si.nMax = g_naturalH + g_footerH - 1;
-            si.nPage = (UINT)ch;
+            si.nPage = (UINT)chL;
             si.nPos = g_scrollY;
             SetScrollInfo(g_dlg, SB_VERT, &si, TRUE);
         }
@@ -3084,7 +3421,9 @@ void CheckTextFit() {
         LOGW("settings: text does not fit: %s id %d '%s' needs %d px, has %d", what, GetDlgCtrlID(c), elog::Narrow(t).c_str(), need, have);
     };
     for (HWND c = GetWindow(g_dlg, GW_CHILD); c; c = GetWindow(c, GW_HWNDNEXT)) {
-        if (!(GetWindowLongW(c, GWL_STYLE) & WS_VISIBLE)) continue;   // the dialog itself is not shown yet: not IsWindowVisible
+        // shown on its tab (every tab is checked, not only the one on screen); the dialog itself is not shown yet: not IsWindowVisible
+        const int tab = TabOf(c);
+        if (tab >= 0 ? WantHidden(c) : !(GetWindowLongW(c, GWL_STYLE) & WS_VISIBLE)) continue;
         wchar_t cls[32] = L"";
         GetClassNameW(c, cls, 32);
         RECT rc{};
@@ -3106,11 +3445,11 @@ void CheckTextFit() {
             ++checked;
             const LONG type = style & BS_TYPEMASK;
             const int tw = textW(t);
-            if (type == BS_GROUPBOX) { if (tw + 16 > w) report(c, t, tw + 16, w, "group box"); }
+            if (type == BS_GROUPBOX) { if (tw + Px(16) > w) report(c, t, tw + Px(16), w, "group box"); }
             else if (type == BS_AUTOCHECKBOX || type == BS_CHECKBOX) {
-                const int need = tw + glass::kCheckTextX;
+                const int need = tw + Px(glass::kCheckTextX);
                 if (need > w) report(c, t, need, w, "check box");
-            } else if (tw + 12 > w) report(c, t, tw + 12, w, "button");
+            } else if (tw + Px(12) > w) report(c, t, tw + Px(12), w, "button");
         } else if (!_wcsicmp(cls, glass::kLink)) {
             if (t.empty()) continue;
             ++checked;
@@ -3124,7 +3463,7 @@ void CheckTextFit() {
         } else if (!_wcsicmp(cls, glass::kCombo)) {
             RECT wr{};
             GetWindowRect(c, &wr);
-            const int have = (wr.right - wr.left) - glass::kComboTextPad;   // the closed combo: minus the text inset and the chevron
+            const int have = (wr.right - wr.left) - Px(glass::kComboTextPad);   // the closed combo: minus the text inset and the chevron
             const int n = (int)SendMessageW(c, CB_GETCOUNT, 0, 0);
             for (int i = 0; i < n; ++i) {
                 wchar_t item[256] = L"";
@@ -3140,7 +3479,7 @@ void CheckTextFit() {
     if (HWND he = Ctl(ID_HELPTEXT)) {
         RECT fr{};
         SendMessageW(he, EM_GETRECT, 0, (LPARAM)&fr);
-        const int visible = (fr.bottom - fr.top) / Builder{g_dlg}.LineH();
+        const int visible = (fr.bottom - fr.top) / Builder{g_dlg}.LineHPx();
         auto checkHelp = [&](const wchar_t* t) {
             ++checked;
             SetWindowTextW(he, t);
@@ -3180,6 +3519,15 @@ void ShowDialog(const std::wstring& configPath, std::function<void(const std::ve
         SetForegroundWindow(g_dlg);
         return;
     }
+    // Per-monitor DPI-aware while the window lives: it draws at the real size of its screen, so its text is sharp (a
+    // DPI-unaware window is drawn at 96 DPI and stretched by Windows: blurry). The rest of the tray stays DPI-unaware; the
+    // thread's context goes back at the end. The window opens on the primary screen: its DPI first (checked again below).
+    const DPI_AWARENESS_CONTEXT oldDpiCtx = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    {
+        UINT dx = 96, dy = 96;
+        if (FAILED(GetDpiForMonitor(MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY), MDT_EFFECTIVE_DPI, &dx, &dy)) || !oldDpiCtx) dx = 96;
+        g_s = dx / 96.0;
+    }
     INITCOMMONCONTROLSEX icc{sizeof(icc), ICC_BAR_CLASSES | ICC_PROGRESS_CLASS | ICC_LINK_CLASS};
     InitCommonControlsEx(&icc);
     glass::Init();
@@ -3189,18 +3537,6 @@ void ShowDialog(const std::wstring& configPath, std::function<void(const std::ve
     g_onSaved = onSaved;
     g_done = false;
     g_capturing = 0;
-
-    NONCLIENTMETRICSW ncm{sizeof(ncm)};
-    if (SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0)) {
-        g_font = CreateFontIndirectW(&ncm.lfMessageFont);
-        LOGFONTW gf = ncm.lfMessageFont;
-        gf.lfQuality = ANTIALIASED_QUALITY;
-        g_odFont = CreateFontIndirectW(&gf);
-        LOGFONTW lf = ncm.lfMessageFont;
-        lf.lfHeight = -20;
-        lf.lfWeight = FW_BOLD;
-        g_logoFont = CreateFontIndirectW(&lf);
-    }
 
     static bool registered = false;
     if (!registered) {
@@ -3216,8 +3552,10 @@ void ShowDialog(const std::wstring& configPath, std::function<void(const std::ve
     }
     g_scrollY = g_scrollMax = g_viewH = 0;
     g_made.clear();
+    g_madeTab.clear();
+    g_wantHidden.clear();
     g_helpMinH = g_helpPad = g_naturalH = 0;
-    RECT rc{0, 0, kLayoutW, 700};   // provisional: resized below to the height BuildControls computed
+    RECT rc{0, 0, Px(kLayoutW), Px(700)};   // provisional: resized below to the height BuildControls computed
     // no WS_SYSMENU: DWM would draw its caption buttons over the header (WM_NCCALCSIZE removes the title bar; Minimize / Exit are in the footer)
     const DWORD style = WS_CAPTION | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_THICKFRAME;
     AdjustFrame(rc, style);
@@ -3226,22 +3564,26 @@ void ShowDialog(const std::wstring& configPath, std::function<void(const std::ve
     g_dlg = CreateWindowExW(WS_EX_APPWINDOW, L"EyeCaptureSettings", kWindowTitle, style, sx < 0 ? 0 : sx, sy < 0 ? 0 : sy,
                             w, hgt, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
     if (g_dlg) {
+        if (const UINT wd = glass::WindowDpi(g_dlg); wd && wd != Dpi()) g_s = wd / 96.0;
+        MakeFonts(Dpi());
+        LOGI("settings: window DPI %u (per-monitor aware: %s)", Dpi(), oldDpiCtx ? "yes" : "no");
         glass::ApplyWindow(g_dlg);
         // Create at the narrowest width, measure the help texts there, then one Move pass at the same provisional size: it
         // gives the natural content height with the measured Description panel (g_naturalH; independent of the window size).
         RECT pc{};
         GetClientRect(g_dlg, &pc);
         int natural = 0;
-        BuildControls(g_dlg, Builder::Pass::Create, kLayoutW, pc.bottom - pc.top, 0, &natural);
+        BuildControls(g_dlg, Builder::Pass::Create, Px(kLayoutW), pc.bottom - pc.top, 0, &natural);
+        ApplyTab();
         ApplyGlassTheme();
         MeasureHelp();
-        BuildControls(g_dlg, Builder::Pass::Move, kLayoutW, pc.bottom - pc.top, 0, &natural);
+        BuildControls(g_dlg, Builder::Pass::Move, Px(kLayoutW), pc.bottom - pc.top, 0, &natural);
         g_naturalH = natural;
         RECT wa{};
         if (!SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0)) wa = RECT{0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)};
         // the whole content without scrolling when the work area allows it; else as high as the work area (Relayout shows the
         // scroll bar; MinClientW() already leaves room for it)
-        RECT fit{0, 0, MinClientW(), g_naturalH + g_footerH};
+        RECT fit{0, 0, Px(MinClientW()), Px(g_naturalH + g_footerH)};
         AdjustFrame(fit, style);
         const int fw = fit.right - fit.left, maxH = wa.bottom - wa.top;
         const int fh = fit.bottom - fit.top < maxH ? fit.bottom - fit.top : maxH;
@@ -3268,6 +3610,14 @@ void ShowDialog(const std::wstring& configPath, std::function<void(const std::ve
             }
             if (m.message == WM_NULL) continue;
             if (g_dlg && CaptureKey(m)) continue;
+            // Ctrl+Tab / Ctrl+Shift+Tab / Ctrl+PageDown / Ctrl+PageUp: next / previous tab
+            if (g_dlg && m.message == WM_KEYDOWN && (GetKeyState(VK_CONTROL) & 0x8000) &&
+                (m.wParam == VK_TAB || m.wParam == VK_NEXT || m.wParam == VK_PRIOR) && (m.hwnd == g_dlg || IsChild(g_dlg, m.hwnd))) {
+                const bool back = m.wParam == VK_PRIOR || (m.wParam == VK_TAB && (GetKeyState(VK_SHIFT) & 0x8000));
+                SetTab(g_tab + (back ? -1 : 1));
+                if (HWND s = Ctl(ID_TABS)) InvalidateRect(s, nullptr, FALSE);
+                continue;
+            }
             if (g_dlg && IsDialogMessageW(g_dlg, &m)) continue;
             TranslateMessage(&m);
             DispatchMessageW(&m);
@@ -3276,10 +3626,14 @@ void ShowDialog(const std::wstring& configPath, std::function<void(const std::ve
     }
     if (g_font) { DeleteObject(g_font); g_font = nullptr; }
     if (g_odFont) { DeleteObject(g_odFont); g_odFont = nullptr; }
+    if (g_odFontLg) { DeleteObject(g_odFontLg); g_odFontLg = nullptr; }
     if (g_logoFont) { DeleteObject(g_logoFont); g_logoFont = nullptr; }
+    if (g_tabFont) { DeleteObject(g_tabFont); g_tabFont = nullptr; }
+    if (g_iconFont) { DeleteObject(g_iconFont); g_iconFont = nullptr; }
     g_dlg = nullptr;
     g_onSaved = nullptr;
     if (SUCCEEDED(co)) CoUninitialize();
+    if (oldDpiCtx) SetThreadDpiAwarenessContext(oldDpiCtx);
 }
 
 } // namespace settings

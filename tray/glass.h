@@ -43,9 +43,14 @@ extern const wchar_t* const kLink;
 extern const wchar_t* const kProgress;
 
 // Geometry the layout code relies on: a check box's text starts kCheckTextX px from its left edge; a closed drop-down shows
-// its text in (width - kComboTextPad) px.
+// its text in (width - kComboTextPad) px. 96-DPI units: a DPI-aware window (the Settings window) scales them (Scale).
 const int kCheckTextX = 22;
 const int kComboTextPad = 31;
+// `v` 96-DPI units in device pixels of window `h` (its DPI: 96 for a window made DPI-unaware, which Windows stretches).
+// The glass controls draw at their window's DPI, so text stays sharp in a DPI-aware window.
+int Scale(HWND h, int v);
+// The DPI window `h` draws at (GetDpiForWindow; the test hook EYECAP_TEST_DPI overrides it for DPI-aware windows).
+UINT WindowDpi(HWND h);
 
 struct Theme {
     bool dark = false;

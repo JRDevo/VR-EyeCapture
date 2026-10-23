@@ -155,10 +155,36 @@ void StrokeRound(Gdiplus::Graphics& g, const Color& c, float x, float y, float w
     g.DrawPath(&pen, &p);
 }
 
+// DPI: a window made in a DPI-aware thread context (the Settings window) has the screen's DPI and draws at that size; an
+// unaware one has 96 and Windows stretches its pixels. The drawing code works in 96-DPI units ("logical") and Canvas scales.
+// Test / screenshot hook: EYECAP_TEST_DPI = a DPI that every DPI-aware window uses instead of its screen's (e.g. 144 to see
+// the 150 % layout on a 100 % screen). Read once.
+UINT TestDpi() {
+    static const UINT v = [] {
+        wchar_t b[16] = L"";
+        return GetEnvironmentVariableW(L"EYECAP_TEST_DPI", b, 16) > 0 ? (UINT)_wtoi(b) : 0u;
+    }();
+    return v >= 48 && v <= 480 ? v : 0;
+}
+UINT DpiOf(HWND h) {
+    const UINT d = h ? GetDpiForWindow(h) : 0;
+    if (TestDpi() && h && GetAwarenessFromDpiAwarenessContext(GetWindowDpiAwarenessContext(h)) != DPI_AWARENESS_UNAWARE) return TestDpi();
+    return d ? d : 96;
+}
+// The DPI a new top-level window will get: 96 in a DPI-unaware thread context, else the owner's (it opens over it) or the
+// system's.
+UINT NewWindowDpi(HWND owner) {
+    if (GetAwarenessFromDpiAwarenessContext(GetThreadDpiAwarenessContext()) == DPI_AWARENESS_UNAWARE) return 96;
+    return owner ? DpiOf(owner) : GetDpiForSystem();
+}
+float ScaleOf(HWND h) { return DpiOf(h) / 96.f; }
+
 // One paint of a glass control: a premultiplied 32-bit buffer (alpha 0 = see-through) + GDI+ on it + composited text.
+// GDI+ draws in logical units (scaled to the window's DPI); Log() turns the client rectangle into logical units. Text()
+// takes a logical rectangle and draws with the window's font, which is already at the real size.
 class Canvas {
 public:
-    Canvas(HWND h, HDC target, const RECT& rc) : hwnd_(h), rc_(rc) {
+    Canvas(HWND h, HDC target, const RECT& rc, bool scaled = true) : hwnd_(h), rc_(rc), s_(scaled ? ScaleOf(h) : 1.f) {
         BP_PAINTPARAMS pp{sizeof(pp)};
         pp.dwFlags = BPPF_ERASE;
         pb_ = BeginBufferedPaint(target, &rc_, BPBF_TOPDOWNDIB, &pp, &dc_);
@@ -170,7 +196,7 @@ public:
         g_ = new Gdiplus::Graphics(bmp_);
         g_->SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
         g_->SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
-        g_->TranslateTransform((float)-rc_.left, (float)-rc_.top);
+        Scaled();
     }
     ~Canvas() {
         delete g_;
@@ -180,9 +206,17 @@ public:
     }
     bool Ok() const { return g_ != nullptr; }
     Gdiplus::Graphics& G() { return *g_; }
+    float S() const { return s_; }
+    RECT Log(const RECT& r) const {
+        return RECT{(LONG)std::lround(r.left / s_), (LONG)std::lround(r.top / s_), (LONG)std::lround(r.right / s_), (LONG)std::lround(r.bottom / s_)};
+    }
+    // device pixels (an owner-drawn bitmap) / back to logical units
+    void Unscaled() { g_->ResetTransform(); g_->TranslateTransform((float)-rc_.left, (float)-rc_.top); }
+    void Scaled() { Unscaled(); g_->ScaleTransform(s_, s_); }
     // Text in the window's font (GDI metrics), composited with alpha onto what is already drawn.
     void Text(const std::wstring& t, RECT r, COLORREF c, DWORD flags, HFONT font) {
         if (t.empty()) return;
+        if (s_ != 1.f) r = RECT{(LONG)std::lround(r.left * s_), (LONG)std::lround(r.top * s_), (LONG)std::lround(r.right * s_), (LONG)std::lround(r.bottom * s_)};
         g_->Flush(Gdiplus::FlushIntentionSync);
         if (!theme_) theme_ = OpenThemeData(hwnd_, L"WINDOW");
         HGDIOBJ old = font ? SelectObject(dc_, font) : nullptr;
@@ -197,6 +231,7 @@ public:
 private:
     HWND hwnd_;
     RECT rc_;
+    float s_ = 1.f;
     HDC dc_ = nullptr;
     HPAINTBUFFER pb_ = nullptr;
     Gdiplus::Bitmap* bmp_ = nullptr;
@@ -253,7 +288,8 @@ void PaintUnder(HWND h, Gdiplus::Graphics& g, const RECT& rc) {
         RECT gr;
         GetWindowRect(s, &gr);
         if (me.left >= gr.left && me.top >= gr.top + (group ? 8 : 0) && me.right <= gr.right && me.bottom <= gr.bottom) {
-            const RectF_ r{(float)rc.left, (float)rc.top, (float)(rc.right - rc.left), (float)(rc.bottom - rc.top)};
+            // one unit more on each side: `rc` is rounded to logical units, the paint buffer clips (no uncovered edge row)
+            const RectF_ r{(float)rc.left - 1, (float)rc.top - 1, (float)(rc.right - rc.left) + 2, (float)(rc.bottom - rc.top) + 2};
             Gdiplus::SolidBrush b(group ? Pal().card : PanelFill());
             g.FillRectangle(&b, r.x, r.y, r.w, r.h);
             return;
@@ -355,6 +391,7 @@ void PaintButton(HWND h, HDC dc) {
     GetClientRect(h, &rc);
     Canvas cv(h, dc, rc);
     if (!cv.Ok()) return;
+    rc = cv.Log(rc);
     auto& g = cv.G();
     PaintUnder(h, g, rc);
     const Theme& t = g_theme;
@@ -573,7 +610,9 @@ void PaintOwnerDraw(HWND h, Canvas& cv, const RECT& rc, bool transparent) {
             for (int k = 0; k < 3; ++k) if (p[k] > a) p[k] = (BYTE)a;   // keep it valid premultiplied data
         }
         Gdiplus::Bitmap img(w, hh, w * 4, PixelFormat32bppPARGB, bits[0]);
+        cv.Unscaled();
         cv.G().DrawImage(&img, rc.left, rc.top, w, hh);
+        cv.Scaled();
     }
     for (HBITMAP b : bmp) if (b) DeleteObject(b);
 }
@@ -594,6 +633,8 @@ LRESULT CALLBACK StaticProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 State* s = St(h);
                 const Theme& t = g_theme;
                 const LONG st = GetWindowLongW(h, GWL_STYLE);
+                const RECT prc = rc;   // device pixels: the owner-drawn bitmap
+                rc = cv.Log(rc);
                 PaintUnder(h, cv.G(), rc);
                 if (s->panel) {   // a layer strip (the footer): a lighter / darker fill and a divider at its top
                     const Palette p = Pal();
@@ -602,7 +643,7 @@ LRESULT CALLBACK StaticProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                     Gdiplus::Pen pen(p.cardStroke, 1.f);
                     cv.G().DrawLine(&pen, 0.f, 0.5f, (float)rc.right, 0.5f);
                 } else if ((st & SS_TYPEMASK) == SS_OWNERDRAW) {
-                    PaintOwnerDraw(h, cv, rc, s->odTransparent);
+                    PaintOwnerDraw(h, cv, prc, s->odTransparent);
                 } else {
                     COLORREF c = s->color != CLR_INVALID ? s->color : s->dim ? t.textDim : t.text;
                     if (!IsWindowEnabled(h)) c = t.textDisabled;
@@ -717,10 +758,13 @@ LRESULT CALLBACK LinkProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         {
             Canvas cv(h, dc, rc);
             if (cv.Ok()) {
-                PaintUnder(h, cv.G(), rc);
-                const Theme& t = g_theme;
                 std::vector<LinkSeg> segs = ParseLink(TextOf(h));
                 LayoutLink(h, segs, rc);
+                const float k = cv.S();
+                for (LinkSeg& g : segs) { g.x0 = (int)std::lround(g.x0 / k); g.x1 = (int)std::lround(g.x1 / k); }
+                rc = cv.Log(rc);
+                PaintUnder(h, cv.G(), rc);
+                const Theme& t = g_theme;
                 int li = 0;
                 const HFONT font = FontOf(h);
                 for (const LinkSeg& g : segs) {
@@ -793,6 +837,7 @@ LRESULT CALLBACK ProgressProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         {
             Canvas cv(h, dc, rc);
             if (cv.Ok()) {
+                rc = cv.Log(rc);
                 auto& g = cv.G();
                 PaintUnder(h, g, rc);
                 const Theme& t = g_theme;
@@ -833,6 +878,7 @@ void PaintCombo(HWND h, HDC dc) {
     GetClientRect(h, &rc);
     Canvas cv(h, dc, rc);
     if (!cv.Ok()) return;
+    rc = cv.Log(rc);
     auto& g = cv.G();
     PaintUnder(h, g, rc);
     const Theme& t = g_theme;
@@ -900,17 +946,19 @@ void PaintList(HWND l, HDC dc) {
     GetClientRect(l, &rc);
     Canvas cv(l, dc, rc);
     if (!cv.Ok()) return;
+    rc = cv.Log(rc);
+    const float ih = d->itemH / cv.S();
     auto& g = cv.G();
     const Theme& t = g_theme;
     const Palette p = Pal();
     g.Clear(p.popup);
     for (int i = 0; i < d->visible && d->top + i < (int)s->items.size(); ++i) {
         const int idx = d->top + i;
-        const float y = (float)(4 + i * d->itemH);
-        if (idx == d->hot) FillRound(g, p.itemHover, 4, y + 1, (float)rc.right - 8, (float)d->itemH - 2, 4);
-        else if (idx == s->sel) FillRound(g, p.itemSelected, 4, y + 1, (float)rc.right - 8, (float)d->itemH - 2, 4);
-        if (idx == s->sel) FillRound(g, Argb(t.accent), 4, y + d->itemH / 2.f - 8, 3, 16, 1.5f);
-        RECT tr{14, (LONG)y, rc.right - 8, (LONG)y + d->itemH};
+        const float y = 4 + i * ih;
+        if (idx == d->hot) FillRound(g, p.itemHover, 4, y + 1, (float)rc.right - 8, ih - 2, 4);
+        else if (idx == s->sel) FillRound(g, p.itemSelected, 4, y + 1, (float)rc.right - 8, ih - 2, 4);
+        if (idx == s->sel) FillRound(g, Argb(t.accent), 4, y + ih / 2.f - 8, 3, 16, 1.5f);
+        RECT tr{14, (LONG)std::lround(y), rc.right - 8, (LONG)std::lround(y + ih)};
         cv.Text(s->items[(size_t)idx], tr, t.text, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS, FontOf(d->combo));
     }
     if ((int)s->items.size() > d->visible) {   // a thin scroll indicator
@@ -953,7 +1001,7 @@ LRESULT CALLBACK ListProc(HWND l, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_MOUSEACTIVATE:
         return MA_NOACTIVATE;
     case WM_MOUSEMOVE: {
-        const int y = GET_Y_LPARAM(lp) - 4;
+        const int y = GET_Y_LPARAM(lp) - (int)std::lround(4 * ScaleOf(l));
         RECT rc;
         GetClientRect(l, &rc);
         POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
@@ -1000,7 +1048,7 @@ void OpenList(HWND h) {
     const int ih = ItemH(h);
     const int visible = std::min((int)s->items.size(), 12);
     const int w = std::max((int)(wr.right - wr.left), s->droppedW);
-    const int hgt = visible * ih + 8;
+    const int hgt = visible * ih + MulDiv(8, (int)DpiOf(h), 96);
     HMONITOR mon = MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST);
     MONITORINFO mi{sizeof(mi)};
     GetMonitorInfoW(mon, &mi);
@@ -1188,6 +1236,7 @@ void PaintSlider(HWND h, HDC dc) {
     GetClientRect(h, &rc);
     Canvas cv(h, dc, rc);
     if (!cv.Ok()) return;
+    rc = cv.Log(rc);
     auto& g = cv.G();
     PaintUnder(h, g, rc);
     const Theme& t = g_theme;
@@ -1228,8 +1277,9 @@ LRESULT CALLBACK SliderProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         if (s->drag) {
             RECT rc;
             GetClientRect(h, &rc);
-            const float l = 11, rr = (float)rc.right - 11;
-            const float f = std::max(0.f, std::min(1.f, (GET_X_LPARAM(lp) - l) / (rr - l)));
+            const float k = ScaleOf(h);
+            const float l = 11, rr = rc.right / k - 11;
+            const float f = std::max(0.f, std::min(1.f, (GET_X_LPARAM(lp) / k - l) / (rr - l)));
             SetPos(h, s->lo + (int)std::lround(f * (s->hi - s->lo)), TB_THUMBTRACK);
         }
         return 0;
@@ -1297,10 +1347,13 @@ LRESULT CALLBACK EditSubclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, 
             GetTextMetricsW(dc, &tm);
             SelectObject(dc, old);
             ReleaseDC(h, dc);
-            const int pad = std::max(2, ((int)(r->bottom - r->top) - (int)tm.tmHeight) / 2);
-            r->left += kEditPadX; r->right -= kEditPadX; r->top += pad; r->bottom -= pad;
-        } else {
-            r->left += 6; r->right -= 2; r->top += 2; r->bottom -= 1;   // multi-line / list: thin (no taller than a client edge)
+            const int dpi = (int)DpiOf(h);
+            const int pad = std::max(MulDiv(2, dpi, 96), ((int)(r->bottom - r->top) - (int)tm.tmHeight) / 2);
+            const int px = MulDiv(kEditPadX, dpi, 96);
+            r->left += px; r->right -= px; r->top += pad; r->bottom -= pad;
+        } else {   // multi-line / list: thin (no taller than a client edge)
+            const int dpi = (int)DpiOf(h);
+            r->left += MulDiv(6, dpi, 96); r->right -= MulDiv(2, dpi, 96); r->top += MulDiv(2, dpi, 96); r->bottom -= MulDiv(1, dpi, 96);
         }
         if (r->right < r->left) r->right = r->left;
         if (r->bottom < r->top) r->bottom = r->top;
@@ -1320,6 +1373,7 @@ LRESULT CALLBACK EditSubclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, 
         {
             Canvas cv(h, wdc, rc);
             if (cv.Ok()) {
+                rc = cv.Log(rc);
                 auto& g = cv.G();
                 const Theme& t = g_theme;
                 const Palette p = Pal();
@@ -1407,7 +1461,7 @@ LRESULT CALLBACK MsgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         RECT rc;
         GetClientRect(h, &rc);
         {
-            Canvas cv(h, dc, rc);
+            Canvas cv(h, dc, rc, false);   // its layout (footerY, iconRc) is in device pixels already
             if (cv.Ok() && d) {
                 auto& g = cv.G();
                 const Theme& t = g_theme;
@@ -1429,7 +1483,7 @@ LRESULT CALLBACK MsgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                     }
                     const wchar_t* glyph = d->iconKind == 1 ? L"i" : d->iconKind == 2 ? L"!" : d->iconKind == 3 ? L"×" : L"?";
                     RECT gr = ir;
-                    if (d->iconKind == 2) gr.top += 5;
+                    if (d->iconKind == 2) gr.top += MulDiv(5, (int)DpiOf(h), 96);
                     cv.Text(glyph, gr, d->iconKind == 2 && t.dark ? RGB(0, 0, 0) : RGB(255, 255, 255), DT_CENTER | DT_VCENTER | DT_SINGLELINE, d->iconFont);
                 }
             }
@@ -1500,6 +1554,9 @@ void Init() {
 }
 
 const Theme& Current() { return g_theme; }
+
+int Scale(HWND h, int v) { return MulDiv(v, (int)DpiOf(h), 96); }
+UINT WindowDpi(HWND h) { return DpiOf(h); }
 
 bool Reload() {
     const Theme t = ReadTheme();
@@ -1685,18 +1742,21 @@ int MessageBox(HWND owner, const std::wstring& text, const std::wstring& title, 
     case MB_ICONINFORMATION: d.iconKind = 1; break;
     }
 
+    // device pixels at the DPI the dialog gets (the message font at that DPI too)
+    const int dpi = (int)NewWindowDpi(owner);
+    auto S = [dpi](int v) { return MulDiv(v, dpi, 96); };
     NONCLIENTMETRICSW ncm{sizeof(ncm)};
-    SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0);
+    SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0, (UINT)dpi);
     d.font = CreateFontIndirectW(&ncm.lfMessageFont);
     LOGFONTW lf = ncm.lfMessageFont;
-    lf.lfHeight = -18;
+    lf.lfHeight = -S(18);
     lf.lfWeight = FW_BOLD;
     d.iconFont = CreateFontIndirectW(&lf);
 
     // measure: the text wraps at 440 px; buttons at least 96 px wide
     HDC sdc = GetDC(nullptr);
     HGDIOBJ old = SelectObject(sdc, d.font);
-    RECT tr{0, 0, 440, 0};
+    RECT tr{0, 0, S(440), 0};
     DrawTextW(sdc, text.c_str(), (int)text.size(), &tr, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX | DT_EXPANDTABS);
     std::vector<int> bw;
     int btnTotal = 0;
@@ -1705,17 +1765,17 @@ int MessageBox(HWND owner, const std::wstring& text, const std::wstring& title, 
         for (const wchar_t* p = b.text; *p; ++p) if (*p != L'&') s += *p;
         SIZE sz{};
         GetTextExtentPoint32W(sdc, s.c_str(), (int)s.size(), &sz);
-        bw.push_back(std::max(96, (int)sz.cx + 32));
-        btnTotal += bw.back() + 8;
+        bw.push_back(std::max(S(96), (int)sz.cx + S(32)));
+        btnTotal += bw.back() + S(8);
     }
-    btnTotal -= 8;
+    btnTotal -= S(8);
     SelectObject(sdc, old);
     ReleaseDC(nullptr, sdc);
-    const int m = 24, icon = d.iconKind ? 32 : 0, tx = m + (icon ? icon + 16 : 0);
-    const int textW = std::max(200, (int)tr.right), textH = std::max(16, (int)tr.bottom);
+    const int m = S(24), icon = d.iconKind ? S(32) : 0, tx = m + (icon ? icon + S(16) : 0);
+    const int textW = std::max(S(200), (int)tr.right), textH = std::max(S(16), (int)tr.bottom);
     const int contentH = std::max(textH, icon);
     d.footerY = m + contentH + m;
-    const int footerH = 30 + 2 * 18;
+    const int footerH = S(30) + 2 * S(18);
     const int cw = std::max(tx + textW + m, btnTotal + 2 * m), ch = d.footerY + footerH;
     d.iconRc = RECT{m, m, m + icon, m + icon};
 
@@ -1754,10 +1814,10 @@ int MessageBox(HWND owner, const std::wstring& text, const std::wstring& title, 
     for (size_t i = 0; i < btns.size(); ++i) {
         const bool isDef = btns[i].id == d.defId;
         HWND b = CreateWindowExW(0, kButton, btns[i].text, WS_CHILD | WS_VISIBLE | WS_TABSTOP | (isDef ? BS_DEFPUSHBUTTON : BS_PUSHBUTTON),
-                                 bx, d.footerY + 18, bw[i], 30, dlg, (HMENU)(INT_PTR)btns[i].id, GetModuleHandleW(nullptr), nullptr);
+                                 bx, d.footerY + S(18), bw[i], S(30), dlg, (HMENU)(INT_PTR)btns[i].id, GetModuleHandleW(nullptr), nullptr);
         SendMessageW(b, WM_SETFONT, (WPARAM)d.font, FALSE);
         if (isDef) defBtn = b;
-        bx += bw[i] + 8;
+        bx += bw[i] + S(8);
     }
     if (!d.hasCancel && (flags & MB_TYPEMASK) != MB_OK) EnableMenuItem(GetSystemMenu(dlg, FALSE), SC_CLOSE, MF_BYCOMMAND | MF_GRAYED);
     const bool ownerWasEnabled = owner && IsWindowEnabled(owner);
