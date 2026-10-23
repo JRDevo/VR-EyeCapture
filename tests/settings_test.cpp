@@ -613,6 +613,32 @@ int TestSave(const std::wstring& path) {
                   "tag_3d back to 1: changed in place ('tag_3d 0->1')");
             DeleteFileW(pt.c_str());
         }
+        // 14c. dome_shared_view (the "Both eyes only (shared view)" check): default 1; 0 is appended to [dome]; 1 again in place
+        {
+            Config def;
+            Check(def.dome.sharedView, "dome_shared_view defaults to 1");
+            const std::wstring pd = path + L".sharedview-test.ini";
+            { std::ofstream f(pd, std::ios::binary); f << "[dome]\r\nfill = black\r\n"; }
+            Config n;
+            ParseHotkey(kDefaultHotkey, n.hotkey);
+            n.dome.fill = DomeFill::Black;
+            n.dome.sharedView = false;
+            settings::SaveResult r1;
+            const bool ok1 = settings::SaveSettingsToFile(pd, n, r1);
+            Config back;
+            std::vector<std::wstring> prb;
+            ParseConfigFile(pd, back, prb);
+            Check(ok1 && r1.changed.size() == 1 && prb.empty() && !back.dome.sharedView &&
+                      ReadAll(pd) == "[dome]\r\nfill = black\r\ndome_shared_view = 0\r\n",
+                  "dome_shared_view = 0: appended to [dome] and read back as off");
+            n.dome.sharedView = true;
+            settings::SaveResult r2;
+            const bool ok2 = settings::SaveSettingsToFile(pd, n, r2);
+            ParseConfigFile(pd, back, prb);
+            Check(ok2 && r2.changed.size() == 1 && r2.changed[0] == L"dome_shared_view 0->1" && back.dome.sharedView,
+                  "dome_shared_view back to 1: changed in place ('dome_shared_view 0->1')");
+            DeleteFileW(pd.c_str());
+        }
         Check(VideoCodecDefaultMbps(VideoCodec::Av1) == 80 && VideoCodecDefaultMbps(VideoCodec::Hevc) == 120 &&
                   VideoCodecDefaultMbps(VideoCodec::H264) == 80 && VideoCodecMaxSide(VideoCodec::Av1) == 8192 &&
                   VideoCodecMaxSide(VideoCodec::H264) == 4096,

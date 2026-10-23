@@ -81,6 +81,7 @@ const Field kFields[] = {
      L"Top/bottom, half height (YouTube)|Side by side, half width|Side by side, full|Top/bottom, full"},
     {L"fill",              L"dome",            Kind::Combo, ID_FILL,       L"black|last_seen", L"Black|Hold last seen view"},
     {L"fill_fade_s",       L"dome",            Kind::Edit,  ID_FILLFADE,   nullptr},
+    {L"dome_shared_view",  L"dome",            Kind::Check, ID_SHAREDVIEW, nullptr},
     {L"vr_indicator",      L"indicator",       Kind::Check, ID_INDICATOR,  nullptr},
     {L"indicator_x",       L"indicator",       Kind::Edit,  ID_INDX,       nullptr},
     {L"indicator_y",       L"indicator",       Kind::Edit,  ID_INDY,       nullptr},
@@ -351,6 +352,7 @@ KeyValues FromConfig(const Config& c) {
     kv.emplace_back(L"layout_3d", yl[(int)c.layout3d >= 0 && (int)c.layout3d < 4 ? (int)c.layout3d : 0]);
     kv.emplace_back(L"fill", c.dome.fill == DomeFill::LastSeen ? L"last_seen" : L"black");
     kv.emplace_back(L"fill_fade_s", FloatText(c.dome.fadeS));
+    kv.emplace_back(L"dome_shared_view", B(c.dome.sharedView));
     kv.emplace_back(L"vr_indicator", B(c.indicator.enabled));
     kv.emplace_back(L"indicator_x", FloatText(c.indicator.x));
     kv.emplace_back(L"indicator_y", FloatText(c.indicator.y));
@@ -733,6 +735,10 @@ const Help kHelp[] = {
               HELP_LI L"Black: only the live view; the rest is black."},
     {ID_FILLFADE, L"VR180 / VR360 only: how many seconds an older area stays before it fades to black (the fade takes 2 seconds)." HELP_BR
                   L"0 = never fade."},
+    {ID_SHAREDVIEW, L"VR180 / VR360 only: each eye shows only the part of the view that the other eye also sees." HELP_BR
+                    L"• Ticked (recommended): no one-eye strips at the sides. Easy on the eyes."
+                    HELP_LI L"Cleared: each eye shows its full view. The video is wider (on a Quest 3 about 14 degrees more on each "
+                    L"outer side), but only one eye sees those outer strips, which can strain the eyes."},
     {ID_SYMFOV, L"Makes the 3D comfortable to watch (flat stereo only)." HELP_BR
                 L"The headset draws each eye with a lopsided view (wider on the outside). This turns both eyes into one even view, so a 3D "
                 L"player can show them without eye strain. Costs a little GPU time. Clear it only to record the raw eye images."},
@@ -1130,7 +1136,7 @@ LRESULT CALLBACK TabsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWOR
 HWND g_layoutLabel = nullptr;   // label of the 3D layout drop-down (greyed together with it)
 std::vector<HWND> g_domeLabels;  // "Dome fill:", "Fade after:", "s": greyed with the dome fields (UpdateLayoutEnabled)
 // The 3D layout and "Record directly in the YouTube layout" only apply to flat recordings: VR180 / VR360 (projection items 1
-// and 2) have fixed layouts. The other way round, Dome fill / Fade after only apply to VR180 / VR360. Called on CBN_SELCHANGE of
+// and 2) have fixed layouts. The other way round, Dome fill / Fade after / Shared view only apply to VR180 / VR360. Called on CBN_SELCHANGE of
 // ID_PROJECTION and from SetControls.
 void UpdateLayoutEnabled() {
     const bool flat = (int)SendMessageW(Ctl(ID_PROJECTION), CB_GETCURSEL, 0, 0) <= 0;
@@ -1139,6 +1145,7 @@ void UpdateLayoutEnabled() {
     EnableWindow(Ctl(ID_RECORDYT), flat);
     EnableWindow(Ctl(ID_FILL), !flat);
     EnableWindow(Ctl(ID_FILLFADE), !flat);
+    EnableWindow(Ctl(ID_SHAREDVIEW), !flat);
     for (HWND l : g_domeLabels) EnableWindow(l, !flat);
 }
 // record_for_youtube is ticked (and the projection is flat: dome projections ignore the key)
@@ -3013,7 +3020,7 @@ int BuildControls(HWND dlg, Builder::Pass pass, int clientW, int clientH, int sc
     }
 
     // ---- Stereo 3D (Output layout lives in the Export group: it only shapes the files made for YouTube, or the recording
-    // itself with record_for_youtube). Dome fill / Fade after are greyed unless Projection is VR180 / VR360.
+    // itself with record_for_youtube). Dome fill / Fade after / Shared view are greyed unless Projection is VR180 / VR360.
     setCol(margin + colW + colGap, colW);
     b.Group(gx, y, gw, pageH, L"Stereo 3D");
     r = y + top;
@@ -3032,6 +3039,9 @@ int BuildControls(HWND dlg, Builder::Pass pass, int clientW, int clientH, int sc
         keep(g_domeLabels, b.Label(fx, r, fw, L"Fade after:", ID_FILLFADE));
         b.Edit(ID_FILLFADE, fx + fw + 2, r, 50);
         keep(g_domeLabels, b.Label(fx + fw + 2 + 50 + unitGap, r, 14, L"s", ID_FILLFADE));
+        // same row, after the "s": the dome_shared_view check
+        const int sx = fx + fw + 2 + 50 + unitGap + 14 + 16;
+        b.Check(ID_SHAREDVIEW, sx, r, pickText(cwMin - (sx - cx), {L"Both eyes only (shared view)", L"Shared view"}, 24));
     }
     r += pitch;
     b.Label(lx, r, labelW, L"Options:", ID_SYMFOV);

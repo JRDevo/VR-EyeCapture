@@ -142,6 +142,7 @@ enum : int {
     , ID_BITDEPTH               // "Colour depth:" drop-down on the Resolution row, bound to [capture] bit_depth (appended)
     , ID_SHARPEN                // "Sharpen:" drop-down on the Projection row, bound to [capture] sharpen (appended)
     , ID_TABS                   // owner-drawn tab strip under the header (Recording / Video / Export / App; not a config key; appended)
+    , ID_SHAREDVIEW             // "Both eyes only (shared view)" check on the Dome fill row, bound to [dome] dome_shared_view (appended)
 };
 // Sent to the window: show the tab that holds control `wParam` (a control id). Returns the tab index, -1 = not on a tab
 // (header, Description, footer: always shown). Tests send it before they look at a control (IsWindowVisible).
