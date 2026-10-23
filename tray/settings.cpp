@@ -735,7 +735,10 @@ const Help kHelp[] = {
                  L"Ticked games still record per game."
                  HELP_LI L"Off: SteamVR games are not recorded." HELP_BR
                  L"The same setting as the drop-down at the top of the SteamVR games window."},
-    {ID_INDPREVIEW, L"Where the dot is in your view. The circle is your field of view; the centre is straight ahead."},
+    {ID_INDPREVIEW, L"Where the dot is in your view. The circle is your field of view; the centre is straight ahead." HELP_BR
+                    L"• Click or drag: put the dot there (X and Y follow)."
+                    HELP_LI L"Mouse wheel: move it nearer or farther (Z)." HELP_BR
+                    L"Click Save. The game uses the new place the next time it starts."},
     {ID_LAYOUTPREVIEW, L"A drawing of the files the tray makes, with their sizes in pixels." HELP_BR
                        L"• Left: the recording (example from a Quest 3: 8192x4630, both eyes side by side). Eye crop removes the hatched part."
                        HELP_LI L"Right: the 3D copy for YouTube, with the left (L) and right (R) eye placed as set in Output layout."
@@ -1033,6 +1036,72 @@ void DrawPreview(const DRAWITEMSTRUCT* di) {
     SelectObject(dc, oldBmp);
     DeleteObject(bmp);
     DeleteDC(dc);
+}
+
+// Mouse on the preview (subclassed in the Create pass): click or drag = the dot goes there (X / Y fields follow; the distance
+// Z is kept), the wheel = nearer / farther (Z, 5 cm a notch; the angles are kept). The inverse of DrawPreview's mapping,
+// clamped to the view circle and to the config ranges (x / y -2..2, z -10..-0.05). The fields' EN_CHANGE repaints.
+void PreviewCircle(HWND h, double& cx, double& cy, double& R) {
+    RECT rc{};
+    GetClientRect(h, &rc);
+    const int w = rc.right - rc.left, hh = rc.bottom - rc.top;
+    cx = w / 2; cy = hh / 2; R = (w < hh ? w : hh) / 2 - 4;
+}
+
+void SetFieldNumber(int id, double v) {
+    wchar_t b[32];
+    swprintf_s(b, L"%.2f", std::fabs(v) < 0.005 ? 0.0 : v);   // no "-0.00"
+    SetWindowTextW(Ctl(id), b);
+}
+
+void PreviewPlace(HWND h, int mx, int my) {
+    double cx, cy, R;
+    PreviewCircle(h, cx, cy, R);
+    if (R <= 0) return;
+    double dx = mx - cx, dy = my - cy;
+    const double len = std::sqrt(dx * dx + dy * dy);
+    if (len > R) { dx *= R / len; dy *= R / len; }
+    const double radPerPx = kPreviewHalfFovDeg / R * 3.14159265358979323846 / 180.0;
+    const bool newZ = g_prev.z > -0.05;   // behind you / at the eye: put it at the default distance first
+    const double d = newZ ? 0.8 : -g_prev.z;
+    auto clamp2 = [](double v) { return v < -2.0 ? -2.0 : (v > 2.0 ? 2.0 : v); };
+    SetFieldNumber(ID_INDX, clamp2(std::tan(dx * radPerPx) * d));
+    SetFieldNumber(ID_INDY, clamp2(std::tan(-dy * radPerPx) * d));
+    if (newZ) SetFieldNumber(ID_INDZ, -d);
+}
+
+void PreviewWheel(int delta) {
+    if (g_prev.z > -0.05) return;
+    const double d0 = -g_prev.z;
+    double d1 = d0 - 0.05 * delta / WHEEL_DELTA;   // wheel up = nearer
+    d1 = d1 < 0.05 ? 0.05 : (d1 > 10.0 ? 10.0 : d1);
+    auto clamp2 = [](double v) { return v < -2.0 ? -2.0 : (v > 2.0 ? 2.0 : v); };
+    const double k = d1 / d0;   // same angles: x and y scale with the distance
+    SetFieldNumber(ID_INDX, clamp2(g_prev.x * k));
+    SetFieldNumber(ID_INDY, clamp2(g_prev.y * k));
+    SetFieldNumber(ID_INDZ, -d1);
+}
+
+LRESULT CALLBACK PreviewProc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR) {
+    switch (msg) {
+    case WM_LBUTTONDOWN:
+        SetCapture(h);
+        PreviewPlace(h, (short)LOWORD(lp), (short)HIWORD(lp));
+        return 0;
+    case WM_MOUSEMOVE:
+        if (GetCapture() == h && (wp & MK_LBUTTON)) PreviewPlace(h, (short)LOWORD(lp), (short)HIWORD(lp));
+        return 0;
+    case WM_LBUTTONUP:
+        if (GetCapture() == h) ReleaseCapture();
+        return 0;
+    case WM_SETCURSOR:
+        SetCursor(LoadCursorW(nullptr, IDC_CROSS));
+        return TRUE;
+    case WM_NCDESTROY:
+        RemoveWindowSubclass(h, PreviewProc, 1);
+        break;
+    }
+    return DefSubclassProc(h, msg, wp, lp);
 }
 
 // ---- live preview of the 3D layout (ID_LAYOUTPREVIEW, owner-drawn): the sizes come from pp::PredictLayout, the same arithmetic the
@@ -2145,9 +2214,17 @@ LRESULT CALLBACK DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             ScrollContent(pos);
         }
         return 0;
-    case WM_MOUSEWHEEL:
+    case WM_MOUSEWHEEL: {
+        // over the dot preview: the wheel moves the dot nearer / farther instead of scrolling the window
+        POINT pt{(short)LOWORD(lp), (short)HIWORD(lp)};
+        RECT pr{};
+        if (HWND pv = Ctl(ID_INDPREVIEW); pv && GetWindowRect(pv, &pr) && PtInRect(&pr, pt)) {
+            PreviewWheel(GET_WHEEL_DELTA_WPARAM(wp));
+            return 0;
+        }
         if (g_scrollMax > 0) { ScrollContent(g_scrollY - (int)GET_WHEEL_DELTA_WPARAM(wp) * 30 / WHEEL_DELTA); return 0; }
         return DefWindowProcW(h, msg, wp, lp);
+    }
     case WM_NOTIFY: {
         const NMHDR* nh = (const NMHDR*)lp;
         if (nh && nh->idFrom == ID_UPDATELINK && (nh->code == NM_CLICK || nh->code == NM_RETURN)) {
@@ -2703,8 +2780,12 @@ int BuildControls(HWND dlg, Builder::Pass pass, int clientW, int clientH, int sc
         b.Label(x, r, 12, L"Z", ID_INDZ);
         b.Edit(ID_INDZ, x + 16, r, 52);
     }
-    b.Tip(b.Make(L"STATIC", L"", SS_OWNERDRAW | SS_NOTIFY, gx + gw - 12 - prevSize, y + top + prevY, prevSize, prevSize, ID_INDPREVIEW),
-          HelpText(ID_INDPREVIEW));
+    {
+        HWND pv = b.Make(L"STATIC", L"", SS_OWNERDRAW | SS_NOTIFY, gx + gw - 12 - prevSize, y + top + prevY, prevSize, prevSize,
+                         ID_INDPREVIEW);
+        b.Tip(pv, HelpText(ID_INDPREVIEW));
+        if (create && pv) SetWindowSubclass(pv, PreviewProc, 1, 0);   // click / drag / wheel places the dot
+    }
     y += groupH(4) + ex1 + gap;
 
     // ---- Export (fields on the left, the live layout preview on the right). The preview is 213 px wide at the minimum width and

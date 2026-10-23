@@ -810,6 +810,40 @@ int TestDrive(DWORD pid, bool leaveSlider) {
         SendMessageW(GetDlgItem(d, settings::ID_INDICATOR), BM_CLICK, 0, 0);   // off
         SendMessageW(GetDlgItem(d, settings::ID_INDICATOR), BM_CLICK, 0, 0);   // on again
         UpdateWindow(pv);
+        // mouse on the preview: click / drag place the dot (X / Y; Z kept), the wheel over it changes Z (angles kept). The circle
+        // is +-50 degrees: half the radius = 25 degrees = tan(25) x 0.8 m = 0.37 m; past the edge = 50 degrees = 0.95 m.
+        {
+            const std::wstring y0 = GetEdit(d, settings::ID_INDY);
+            RECT cr{};
+            GetClientRect(pv, &cr);
+            const int pcx = cr.right / 2, pcy = cr.bottom / 2, R = (cr.right < cr.bottom ? cr.right : cr.bottom) / 2 - 4;
+            auto click = [&](int x, int y) {
+                SendMessageW(pv, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(x, y));
+                SendMessageW(pv, WM_LBUTTONUP, 0, MAKELPARAM(x, y));
+            };
+            auto at = [&](const wchar_t* x, const wchar_t* y, const wchar_t* z) {
+                return GetEdit(d, settings::ID_INDX) == x && GetEdit(d, settings::ID_INDY) == y && GetEdit(d, settings::ID_INDZ) == z;
+            };
+            SetEdit(d, settings::ID_INDZ, L"0.3");   // behind you: a click first brings the dot to 0.8 m
+            click(pcx, pcy);
+            Check(at(L"0.00", L"0.00", L"-0.80"), "preview click in the centre (dot was behind you): X 0.00, Y 0.00, Z -0.80");
+            click(pcx + R / 2, pcy);
+            Check(at(L"0.37", L"0.00", L"-0.80"), "preview click half way right: X 0.37 (25 deg at 0.8 m), Y 0.00, Z kept");
+            click(pcx, pcy - R / 2);
+            Check(at(L"0.00", L"0.37", L"-0.80"), "preview click half way up: Y +0.37 (up is +Y)");
+            SendMessageW(pv, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(pcx, pcy));
+            SendMessageW(pv, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(pcx, pcy + R / 2));
+            SendMessageW(pv, WM_LBUTTONUP, 0, MAKELPARAM(pcx, pcy + R / 2));
+            Check(at(L"0.00", L"-0.37", L"-0.80"), "preview drag from the centre down: Y -0.37");
+            click(pcx + 3 * R, pcy);
+            Check(at(L"0.95", L"0.00", L"-0.80"), "preview click past the edge: held on the circle (50 deg = X 0.95)");
+            click(pcx + R / 2, pcy);
+            POINT sp{pcx, pcy};
+            ClientToScreen(pv, &sp);
+            SendMessageW(d, WM_MOUSEWHEEL, MAKEWPARAM(0, WHEEL_DELTA), MAKELPARAM(sp.x, sp.y));
+            Check(at(L"0.35", L"0.00", L"-0.75"), "mouse wheel up over the preview: Z -0.75 (5 cm nearer), X 0.35 (same angle)");
+            SetEdit(d, settings::ID_INDY, y0.c_str());
+        }
         SetEdit(d, settings::ID_INDX, x0.c_str());
         SetEdit(d, settings::ID_INDZ, z0.c_str());
         Check(IsWindow(d) && GetEdit(d, settings::ID_INDX) == x0, "indicator edits / check toggle with the preview open leave the window sane");
