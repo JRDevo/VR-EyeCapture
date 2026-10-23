@@ -3041,7 +3041,7 @@ int BuildControls(HWND dlg, Builder::Pass pass, int clientW, int clientH, int sc
         keep(g_domeLabels, b.Label(fx + fw + 2 + 50 + unitGap, r, 14, L"s", ID_FILLFADE));
         // same row, after the "s": the dome_shared_view check
         const int sx = fx + fw + 2 + 50 + unitGap + 14 + 16;
-        b.Check(ID_SHAREDVIEW, sx, r, pickText(cwMin - (sx - cx), {L"Both eyes only (shared view)", L"Shared view"}, 24));
+        b.Check(ID_SHAREDVIEW, sx, r, L"Shared view");
     }
     r += pitch;
     b.Label(lx, r, labelW, L"Options:", ID_SYMFOV);

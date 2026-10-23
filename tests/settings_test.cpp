@@ -613,7 +613,7 @@ int TestSave(const std::wstring& path) {
                   "tag_3d back to 1: changed in place ('tag_3d 0->1')");
             DeleteFileW(pt.c_str());
         }
-        // 14c. dome_shared_view (the "Both eyes only (shared view)" check): default 1; 0 is appended to [dome]; 1 again in place
+        // 14c. dome_shared_view (the "Shared view" check): default 1; 0 is appended to [dome]; 1 again in place
         {
             Config def;
             Check(def.dome.sharedView, "dome_shared_view defaults to 1");
