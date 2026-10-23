@@ -5,11 +5,12 @@
     right -40/+50, +-45 deg). layer_e2e --jitter renders a world-locked grid (background 40, a 90 line every 10 deg of
     yaw / pitch) and a white marker at the world direction -Z (at infinity) for the located pose, like a game.
 
-    Four recordings (11.5 s each, XR_EYE_CAPTURE_CONFIG overrides):
-        vr180         projection = vr180 (fill last_seen, fill_fade_s 8, window_feather_deg 1: the defaults)
+    Five recordings (11.5 s each, XR_EYE_CAPTURE_CONFIG overrides):
+        vr180         projection = vr180 (fill last_seen, fill_fade_s 8, window_feather_deg 1, dome_shared_view 1: the defaults)
         vr180_black   projection = vr180, fill = black
         vr180_fade1   projection = vr180, fill_fade_s = 1
         vr360         projection = vr360 (fill last_seen)
+        vr180_full    projection = vr180, dome_shared_view = 0 (each eye paints its full fov)
     Each video is decoded (ffmpeg, Y plane); the marker is located per frame in both eyes (weighted centroid of Y > 150
     inside lon +-20 / lat +-10 deg around the dome centre); video time -> motion time through the layer's "first video
     frame ... displayTime" line and layer_e2e's E2E_T0_NS (same mapping as run_jitter.ps1).
@@ -27,6 +28,8 @@
           (vr360): mean |dx|, |dy| <= 0.3 px and per-frame std-dev <= 0.15 px (each eye's centroid has ~0.05 px of its
           own raster noise -- the mock draws an aliased disk at a different sub-pixel phase per eye -- so the per-frame
           max over ~1000 frames is ~0.3 px; it is printed).
+      (f) shared view: lon -45 / lat 0 of the left eye (inside the left eye's -50 fov, outside the right eye's -40)
+          over t in [1.0, 3.9]: black in vr180 (dome_shared_view = 1, the default), painted in vr180_full (= 0).
       (e) tags: ffprobe on the MP4 and on the MKV made with the tray's remux command: spherical (tiled) equirectangular
           + stereo 3D side by side (vr180) / top and bottom (vr360); the exact ffprobe lines are printed. Plus the
           <name>.json sidecar and the _VR180 / _VR360 file name.
@@ -73,8 +76,9 @@ public static class DomeAnalysis {
     // Per frame: left-eye marker centroid (x, y in eye pixels; NaN if none), right-eye centroid, max Y in the probe
     // region of the left eye. tb = top-bottom layout (vr360). The marker search window is [sx0, sx1) x [sy0, sy1) in eye
     // pixels; the probe region [px0, px1) x [py0, py1).
+    // A second probe [qx0, qx1) x [py0, py1) of the left eye (the dome_shared_view side probe) goes into r[5].
     public static double[][] Scan(string ffmpeg, string file, int W, int H, bool tb, int sx0, int sx1, int sy0, int sy1,
-                                  int px0, int px1, int py0, int py1) {
+                                  int px0, int px1, int py0, int py1, int qx0, int qx1) {
         ProcessStartInfo psi = new ProcessStartInfo(ffmpeg,
             "-v error -i \"" + file + "\" -map 0:v:0 -fps_mode passthrough -vf extractplanes=y -f rawvideo -pix_fmt gray -");
         psi.UseShellExecute = false; psi.RedirectStandardOutput = true; psi.CreateNoWindow = true;
@@ -87,7 +91,7 @@ public static class DomeAnalysis {
             int got = 0;
             while (got < f.Length) { int n = s.Read(f, got, f.Length - got); if (n <= 0) break; got += n; }
             if (got < f.Length) break;
-            double[] r = new double[5];
+            double[] r = new double[6];
             for (int e = 0; e < 2; e++) {
                 int ox = tb ? 0 : e * eyeW, oy = tb ? e * eyeH : 0;
                 double sw = 0, sx = 0, sy = 0;
@@ -104,6 +108,9 @@ public static class DomeAnalysis {
             int mx = 0;
             for (int y = py0; y < py1; y++) for (int x = px0; x < px1; x++) { int v = f[y * W + x]; if (v > mx) mx = v; }
             r[4] = mx;
+            int mq = 0;
+            for (int y = py0; y < py1; y++) for (int x = qx0; x < qx1; x++) { int v = f[y * W + x]; if (v > mq) mq = v; }
+            r[5] = mq;
             res.Add(r);
         }
         p.WaitForExit();
@@ -116,7 +123,8 @@ $cases = @(
     @{ name = 'vr180';       cfg = 'projection=vr180';                  proj = 'vr180' },
     @{ name = 'vr180_black'; cfg = 'projection=vr180;fill=black';       proj = 'vr180' },
     @{ name = 'vr180_fade1'; cfg = 'projection=vr180;fill_fade_s=1';    proj = 'vr180' },
-    @{ name = 'vr360';       cfg = 'projection=vr360';                  proj = 'vr360' }
+    @{ name = 'vr360';       cfg = 'projection=vr360';                  proj = 'vr360' },
+    @{ name = 'vr180_full';  cfg = 'projection=vr180;dome_shared_view=0'; proj = 'vr180' }
 )
 $prevTray = $env:XR_EYE_CAPTURE_REQUIRE_TRAY; $prevCfg = $env:XR_EYE_CAPTURE_CONFIG; $prevIpc = $env:XR_EYE_CAPTURE_TRAY_IPC
 $env:XR_EYE_CAPTURE_REQUIRE_TRAY = '0'
@@ -128,6 +136,7 @@ function Check($ok, $what) {
     if ($ok) { Write-Host "  ok   $what" -ForegroundColor Green } else { Write-Host "  FAIL $what" -ForegroundColor Red; $fails.Add($what) }
 }
 $probeLon = 33.0; $probeLat = 0.0
+$sideLon = -45.0   # dome_shared_view side probe: inside the left eye's fov (-50), outside the right eye's (-40)
 foreach ($c in $cases) {
     $out = Join-Path $root "build\e2e_out\dome_$($c.name)"
     if (Test-Path $out) { Remove-Item -Recurse -Force $out }
@@ -139,7 +148,7 @@ foreach ($c in $cases) {
     $file = $mOut.Groups[1].Value.Trim()
     $files[$c.name] = $file
     $log = Get-Content (Join-Path $out 'eye_capture.log') -Raw -Encoding UTF8
-    foreach ($pat in @('recorder: dome vr\d+: [^\r\n]+', 'recorder: dome pass[^\r\n]+', 'dome frame D fixed[^\r\n]+', 're-projection summary[^\r\n]+', 'st3d\+sv3d: [^|\r\n]+')) {
+    foreach ($pat in @('recorder: dome vr\d+: [^\r\n]+', 'recorder: dome_shared_view[^\r\n]+','recorder: dome pass[^\r\n]+', 'dome frame D fixed[^\r\n]+', 're-projection summary[^\r\n]+', 'st3d\+sv3d: [^|\r\n]+')) {
         foreach ($mm in [regex]::Matches($log, $pat)) { Write-Host "  [$($c.name)] $($mm.Value)" }
     }
     $mFirst = [regex]::Match($log, 'first video frame \(t = 0 in the file\): displayTime (\d+) ns')
@@ -159,16 +168,18 @@ foreach ($c in $cases) {
     $pcx = ($probeLon / $span + 0.5) * $eyeW - 0.5; $pcy = (0.5 - $probeLat / 180.0) * $eyeH - 0.5
     $px0 = [int][math]::Floor($pcx - 0.5 * $pxPerDeg); $px1 = [int][math]::Ceiling($pcx + 0.5 * $pxPerDeg) + 1
     $py0 = [int][math]::Floor($pcy - 0.8 * $pxPerDeg); $py1 = [int][math]::Ceiling($pcy + 0.8 * $pxPerDeg) + 1
+    $qcx = ($sideLon / $span + 0.5) * $eyeW - 0.5
+    $qx0 = [int][math]::Floor($qcx - 0.5 * $pxPerDeg); $qx1 = [int][math]::Ceiling($qcx + 0.5 * $pxPerDeg) + 1
     $pts = & $ffprobe -v error -select_streams v:0 -show_entries packet=pts_time -of csv=p=0 $file | Where-Object { $_ -match '\d' } |
         ForEach-Object { [double]($_.Trim().TrimEnd(',')) } | Sort-Object
-    $scan = [DomeAnalysis]::Scan($ffmpeg, $file, $W, $H, $tb, $sx0, $sx1, $sy0, $sy1, $px0, $px1, $py0, $py1)
-    $n = [math]::Min($scan.Length, $pts.Count)
+    $scan = [DomeAnalysis]::Scan($ffmpeg, $file, $W, $H, $tb, $sx0, $sx1, $sy0, $sy1, $px0, $px1, $py0, $py1, $qx0, $qx1)
+    $n =[math]::Min($scan.Length, $pts.Count)
     Write-Host ("  {0} frames {1}x{2} ({3}x{4} per eye, {5:N2} px/deg), motion t of frame 0 = {6:N3} s, D yaw {7} deg; probe region (lon {8}, lat {9}) = x [{10},{11}) y [{12},{13}) of the left eye" -f
         $n, $W, $H, $eyeW, $eyeH, $pxPerDeg, $offset, $mYaw.Groups[1].Value, $probeLon, $probeLat, $px0, $px1, $py0, $py1)
     $rows = New-Object System.Collections.Generic.List[object]
     for ($i = 0; $i -lt $n; $i++) {
         $r = $scan[$i]
-        $rows.Add([pscustomobject]@{ t = $pts[$i] + $offset; xl = $r[0]; yl = $r[1]; xr = $r[2]; yr = $r[3]; probe = $r[4] })
+        $rows.Add([pscustomobject]@{ t = $pts[$i] + $offset; xl = $r[0]; yl = $r[1]; xr = $r[2]; yr = $r[3]; probe = $r[4]; side = $r[5] })
     }
     $data[$c.name] = @{ rows = $rows; eyeW = $eyeW; eyeH = $eyeH; span = $span; yaw = [double]$mYaw.Groups[1].Value; file = $file; tb = $tb }
 }
@@ -241,6 +252,17 @@ foreach ($name in @('vr180', 'vr180_black', 'vr180_fade1', 'vr360')) {
     # The per-frame difference carries each eye's own raster noise (the mock draws an aliased disk at a different
     # sub-pixel phase per eye, ~0.05 px std per eye): the alignment is the mean, the spread must stay at noise level.
     Check ($both.Count -eq $total -and [math]::Abs($avx) -le 0.3 -and [math]::Abs($avy) -le 0.3 -and $sdx -le 0.15 -and $sdy -le 0.15) ("(d) {0}: right-eye marker - left-eye marker ({1}): mean dx {2:N3} / dy {3:N3} px (<= 0.3), per-frame std-dev {4:N3} / {5:N3} px (<= 0.15), per-frame max |dx| {6:N3}, max |dy| {7:N3} px, over {8} of {9} frames" -f $name, $(if ($data[$name].tb) { 'bottom - top' } else { 'right half - left half' }), $avx, $avy, $sdx, $sdy, $mdx, $mdy, $both.Count, $total)
+}
+# (f) dome_shared_view: lon -45 / lat 0 of the left eye is seen by the left eye only (before the turn)
+foreach ($name in @('vr180', 'vr180_full')) {
+    if (-not $data.ContainsKey($name)) { continue }
+    $sv = @($data[$name].rows | Where-Object { $_.t -ge 1.0 -and $_.t -le 3.9 } | ForEach-Object { $_.side })
+    $smn = ($sv | Measure-Object -Minimum).Minimum; $smx = ($sv | Measure-Object -Maximum).Maximum
+    if ($name -eq 'vr180') {
+        Check ($sv.Count -gt 200 -and $smx -lt 30) ("(f) {0}: dome_shared_view = 1: lon -45 (left eye only) is BLACK over t 1.0..3.9 s: max-Y {1}..{2} over {3} frames (< 30)" -f $name, $smn, $smx, $sv.Count)
+    } else {
+        Check ($sv.Count -gt 200 -and $smn -gt 60) ("(f) {0}: dome_shared_view = 0: lon -45 is PAINTED by the left eye over t 1.0..3.9 s: max-Y {1}..{2} over {3} frames (> 60)" -f $name, $smn, $smx, $sv.Count)
+    }
 }
 # (e) tags: MP4 boxes, the tray's MKV remux, sidecar, file name
 foreach ($name in @('vr180', 'vr360')) {

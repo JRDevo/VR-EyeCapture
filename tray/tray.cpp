@@ -83,23 +83,30 @@ const UINT WM_UNREGISTER = WM_APP + 11;     // "Unregister from VR games..." (th
 const UINT WM_REGISTER = WM_APP + 12;       // "Register for VR games..." (the app window's Tools button)
 const UINT WM_UPDATE_RESULT = WM_APP + 13;  // a background update check finished (lParam = heap UpdCheck*; wParam = manual?1:0)
 const UINT WM_UPDATE_DOWNLOADED = WM_APP + 14;  // an update download finished (lParam = heap UpdDownload*)
-const UINT kTimer = 1;
+// The watcher thread (WatchProc) posts these. Nothing in the tray runs on a timer while no game is live: it sleeps until
+// one of them (or the user) wakes it.
+const UINT WM_STATUS_CHANGED = WM_APP + 15;     // a game / helper changed the status block (<block>-Changed event)
+const UINT WM_CONFIG_CHANGED = WM_APP + 16;     // something changed in the folder of config.ini
+const UINT WM_REG_CHANGED = WM_APP + 17;        // the layer's registry keys changed
+const UINT kTimer = 1;        // 0.5 s, ONLY while a game is live or a helper / scan needs it (UpdateTimer)
 const UINT kTipTimer = 2;     // one-shot: end of the "settings saved" tooltip
+const UINT kUpdTimer = 3;     // one-shot: the next automatic update check (ArmUpdateTimer)
+const UINT kCfgTimer = 4;     // one-shot: re-read config.ini 300 ms after its folder changed (WM_CONFIG_CHANGED)
 enum : UINT { ID_TOGGLE = 100, ID_FOLDER, ID_CONVERT, ID_LOG, ID_SETTINGS, ID_CONFIG, ID_EXIT, ID_REGISTER, ID_UNREGISTER,
                ID_CONVERT_PICK, ID_JOB_INFO, ID_JOB_PAUSE, ID_JOB_CANCEL, ID_TAG3D_SBS, ID_TAG3D_TB, ID_STEAMVR, ID_REMOVE,
                ID_UPDATE_GET, ID_UPDATE_CHECK };
 const wchar_t kAppTitle[] = L"VR EyeCapture";
-// tray icon frames (resource 101 + value); recording and converting alternate A / B (lens colours swapped) every 0.5 s
-enum : int { kIcoNoGame, kIcoReady, kIcoRecA, kIcoRecB, kIcoBusy, kIcoConvA, kIcoConvB, kIcoCount };
 
 HINSTANCE      g_inst;
 HWND           g_wnd;
 NOTIFYICONDATAW g_nid{};
 EyeCapShared*  g_shm = nullptr;
 HANDLE         g_map = nullptr;
-HICON          g_icons[kIcoCount] = {};   // LoadTrayIcon: no game, ready, recording A / B, busy (amber), converting A / B
-int            g_iconIdx = -1;
-bool           g_blinkOdd = false;             // the tray icon's A / B frame (flipped by the 0.5 s timer)
+// ONE tray icon (the app logo), set once at NIM_ADD and never changed: no state colours, no blinking -- every icon / tooltip
+// update makes Explorer redraw the taskbar, and the user looks at the dot in the headset, not at the tray. The tooltip text is
+// only sent to Explorer when the mouse is on the icon (WM_TRAY + WM_MOUSEMOVE); balloons are sent when they happen.
+HICON          g_trayIcon = nullptr;
+std::wstring   g_tipText;                      // the tooltip Refresh computed last (sent on hover)
 EyeCapShared   g_st{};
 bool           g_live = false;    // a live owner exists
 uint32_t       g_prevState = ECS_NONE;
@@ -150,6 +157,17 @@ bool           g_x86Blocked = false;
 DWORD          g_x86BlockedGame = 0;
 DWORD          g_x86LastGame = 0;                      // logged once per game process
 const DWORD    kX86ExitBusy = 3;                       // another EyeCaptureRecorder holds <block>-Recorder: not a failure
+// The VR controller hotkey for SteamVR games (src/openvr/vrinput_main.cpp): EyeCaptureVrInput.exe runs while a SteamVR game
+// recorded by VR EyeCapture (status api "SteamVR ...") is live and vr_hotkey is not off (VrInputTick, every 2 s). It exits
+// with its game; Local\OpenXR-EyeCapture-VrInputQuit is set when it outlives the game by 10 s. A test-mode tray starts it
+// only with EYECAP_TRAY_TEST_VRINPUT=1.
+HANDLE         g_vrInProc = nullptr;
+DWORD          g_vrInPid = 0, g_vrInGame = 0;
+HANDLE         g_vrInQuit = nullptr;
+ULONGLONG      g_vrInCheck = 0, g_vrInRetryAt = 0, g_vrInIdleSince = 0;
+std::deque<ULONGLONG> g_vrInFails;                     // failed exits within a minute: 3 = no relaunch for that game
+DWORD          g_vrInBlockedGame = 0;
+bool           g_vrHotkeyOn = true;                    // vr_hotkey is not off (config.ini, reloaded with the bindings)
 // A balloon that does something when clicked (NIN_BALLOONUSERCLICK). Any later balloon replaces it (SetBalloon).
 enum class BalloonAction { None, OpenSteamVr };
 BalloonAction  g_balloonAction = BalloonAction::None;
@@ -199,12 +217,20 @@ void StartUpdateCheck(bool manual);    // begins a background check (defined bel
 void StartUpdateDownload();            // confirm + download + verify + run the installer (user click only)
 std::wstring UpdateVersionText();      // "vX.Y.Z" of the known newer release ("" when none)
 
-// The tray-area icons: the logo mark with a status dot, one .ico per state (tray/icons, resources 101.. in tray/tray.rc,
-// made by scripts/make_logo.py), loaded at the small-icon size of the current DPI.
-HICON LoadTrayIcon(int i) {
+// The tray-area icon: the app logo (resource 1, tray/app.ico) at the small-icon size of the current DPI.
+HICON LoadTrayIcon() {
     HICON h = nullptr;
-    if (FAILED(LoadIconMetric(g_inst, MAKEINTRESOURCEW(101 + i), LIM_SMALL, &h))) h = LoadIconW(nullptr, IDI_APPLICATION);
+    if (FAILED(LoadIconMetric(g_inst, MAKEINTRESOURCEW(1), LIM_SMALL, &h))) h = LoadIconW(nullptr, IDI_APPLICATION);
     return h;
+}
+
+// One-shot timer for the next automatic update check (g_updNextCheck); none when checking is off / in test mode.
+void ArmUpdateTimer() {
+    if (!g_wnd) return;
+    if (!g_updEnabled || g_testMode || !g_updNextCheck) { KillTimer(g_wnd, kUpdTimer); return; }
+    const ULONGLONG now = GetTickCount64();
+    const ULONGLONG ms = g_updNextCheck > now ? g_updNextCheck - now : 0;
+    SetTimer(g_wnd, kUpdTimer, (UINT)(ms < 0x7FFFFFF0ull ? ms : 0x7FFFFFF0ull), nullptr);
 }
 
 std::wstring ExeDir() {
@@ -500,7 +526,25 @@ void ApplyTestRunKey(bool testMode) {
     if (testMode) install::SetAutostartTestKey(L"Software\\OpenXR-EyeCapture-Test\\Run");
 }
 
-void Refresh() {
+// The 0.5 s timer runs only while something needs it: a live game (its status, a 32-bit game's helper, controller hotkeys),
+// a helper process to reap, a fallback-scan file to settle, a game that made a queued recording (post_when = game_exit),
+// or SteamVR quick mode (it must see SteamVR start). With none of these the tray does nothing until an event wakes it.
+void UpdateTimer() {
+    const bool want = g_live || g_mirrorProc || g_x86Proc || g_vrInProc || !g_pending.empty() || !g_producers.empty() ||
+                      g_steamvrMode == SteamVrMode::Quick;
+    static bool s_on = false;
+    if (want != s_on) {
+        s_on = want;
+        if (want) SetTimer(g_wnd, kTimer, 500, nullptr);
+        else KillTimer(g_wnd, kTimer);
+        LOGD("tray: status timer %s", want ? "on" : "off (idle: no timer)");
+    }
+    input::SetGameLive(g_live);
+}
+
+// Reads the status block and acts on it (queue a saved recording, balloons, post_when hold). showTip = the mouse is on the
+// icon: the tooltip is sent to Explorer (only when it changed); otherwise Explorer is not touched unless there is a balloon.
+void Refresh(bool showTip = false) {
     g_live = false;
     const bool read = g_shm && EyeCapReadStatus(g_shm, g_st);
     if (read && g_st.ownerPid && EyeCapProcessAlive(g_st.ownerPid) && GetTickCount64() - g_st.heartbeatTick < 3000)
@@ -549,15 +593,9 @@ void Refresh() {
         }
     }
     const pp::State job = g_pp.GetState();
-    int idx = 0;
-    if (state == ECS_READY) idx = 1;
-    else if (state == ECS_RECORDING) idx = 2;
-    else if (state == ECS_STARTING || state == ECS_STOPPING || state == ECS_FAILED) idx = 3;
     const bool waiting = job.queued > 0 && (job.held || job.userHeld > 0);   // queued, held by post_when or by the user
-    if (job.busy && !job.paused && idx != 2 && idx != 3) idx = 4;   // converting (red recording / amber transitions keep priority)
-    else if (idx == 0 && (job.busy || waiting)) idx = 4;            // paused / waiting while no game is live: still blue
 
-    // not registered: the first tooltip line says so (the icon is grey anyway: no game can load the layer from here)
+    // not registered: the first tooltip line says so
     const bool notReg = g_regEnabled && !RegOk();
     wchar_t tip[256];
     if (!g_live && notReg) {
@@ -608,8 +646,6 @@ void Refresh() {
     if (jobKey.empty()) jobKey = jobLine;
     static std::wstring s_prevJobKey;
     if (jobKey != s_prevJobKey) { s_prevJobKey = jobKey; LOGI("tray: tooltip job line: %s", elog::Narrow(jobLine).c_str()); }
-    if (idx != g_iconIdx && (idx == 4 || g_iconIdx == 4))
-        LOGI("tray: icon %s", idx == 4 ? (job.busy && !job.paused ? "blue (converting)" : "blue (waiting to convert)") : "no longer blue");
     wchar_t full[256];
     if (jobLine.empty()) wcsncpy_s(full, tip, _TRUNCATE);
     else if (state == ECS_RECORDING) swprintf_s(full, L"%s\n%s", tip, jobLine.c_str());   // recording info first
@@ -630,15 +666,14 @@ void Refresh() {
     const bool logRegTip = s_prevNotReg != (int)notReg && g_regEnabled;
     s_prevNotReg = (int)notReg;
     if (!g_savedTip.empty() && GetTickCount64() < g_savedTipUntil) wcsncpy_s(full, g_savedTip.c_str(), _TRUNCATE);
-    g_nid.uFlags = NIF_TIP | NIF_ICON;
-    wcsncpy_s(g_nid.szTip, full, _TRUNCATE);     // szTip holds 127 characters
-    if (logRegTip) LOGI("tray: tooltip now: %s", elog::Narrow(g_nid.szTip).c_str());
-    // idx is the state; the icon frame alternates while recording / converting (the timer refreshes every 0.5 s)
-    const bool odd = g_blinkOdd;
-    const bool converting = job.busy && !job.paused && !job.userPaused;
-    const int frame = idx == 0 ? kIcoNoGame : idx == 1 ? kIcoReady : idx == 2 ? (odd ? kIcoRecB : kIcoRecA)
-                    : idx == 3 ? kIcoBusy : (converting && odd ? kIcoConvB : kIcoConvA);
-    g_nid.hIcon = g_icons[frame];
+    full[127] = 0;                               // szTip holds 127 characters
+    g_tipText = full;
+    g_nid.uFlags = 0;
+    if (showTip && wcscmp(g_nid.szTip, full) != 0) {
+        g_nid.uFlags |= NIF_TIP;
+        wcsncpy_s(g_nid.szTip, full, _TRUNCATE);
+    }
+    if (logRegTip) LOGI("tray: tooltip now: %s", elog::Narrow(g_tipText).c_str());
     // balloon: a conversion result wins over "Recording saved"
     pp::Notice notice;
     if (g_pp.PopNotice(notice)) {
@@ -662,8 +697,8 @@ void Refresh() {
                    L"Desktop) to 120 Hz, or 60 Hz, for smooth video.", false);
     }
     g_prevState = state;
-    Shell_NotifyIconW(NIM_MODIFY, &g_nid);
-    g_iconIdx = idx;
+    if (g_nid.uFlags) Shell_NotifyIconW(NIM_MODIFY, &g_nid);   // only a hover tooltip change or a balloon
+    UpdateTimer();
 }
 
 void OpenPath(const std::wstring& p, const wchar_t* verb = L"open") {
@@ -701,6 +736,7 @@ void ApplyInputBindings(const char* why) {
     Config cfg;
     LoadConfig(g_exeDir, cfg);
     input::SetBindings(cfg.hotkey.bindings);
+    g_vrHotkeyOn = cfg.vrHotkey.enabled && !cfg.vrHotkey.buttons.empty();
     g_savedFmt = pp::FormatFromConfig(cfg);
     if (cfg.steamvr.mode != g_steamvrMode) LOGI("tray: steamvr_mode = %s", SteamVrModeKey(cfg.steamvr.mode));
     g_steamvrMode = cfg.steamvr.enabled ? cfg.steamvr.mode : SteamVrMode::Off;
@@ -723,9 +759,11 @@ void ApplyInputBindings(const char* why) {
         if (b.kind != HotkeyBinding::Kind::Key) list += (list.empty() ? L"" : L", ") + b.text;
     LOGI("tray: hotkey %s (%s); controller / wheel bindings: %s", elog::Narrow(cfg.hotkey.text).c_str(), why,
          list.empty() ? "none" : elog::Narrow(list).c_str());
+    ArmUpdateTimer();
+    UpdateTimer();   // steamvr_mode may have changed (quick mode needs the timer)
 }
 
-// Cheap check in the 500 ms timer: config.ini edited by hand (or the %APPDATA% copy appeared / went away).
+// config.ini edited by hand (or the %APPDATA% copy appeared / went away): WM_CONFIG_CHANGED and the status timer.
 void CheckConfigChanged() {
     const std::wstring p = ConfigPath(g_exeDir);
     const FILETIME t = ConfigWriteTime(p);
@@ -751,7 +789,7 @@ void OnSettingsSaved(const std::vector<std::wstring>& changed) {
     g_savedTipUntil = GetTickCount64() + 5000;
     SetTimer(g_wnd, kTipTimer, 5100, nullptr);
     Refresh();
-    LOGI("tray: tooltip now: %s", elog::Narrow(g_nid.szTip).c_str());
+    LOGI("tray: tooltip now: %s", elog::Narrow(g_tipText).c_str());
 }
 
 void SettingsReporter(const std::wstring& title, const std::wstring& text) {
@@ -978,6 +1016,76 @@ void X86Tick() {
     g_x86Game = game;
     LOGI("tray: 32-bit games: started %s (pid %lu) for %s (pid %lu)", elog::Narrow(exe).c_str(), pi.dwProcessId,
          elog::Narrow(gameName).c_str(), (unsigned long)game);
+}
+
+std::wstring VrInputExe() {
+    for (const wchar_t* rel : {L"\\EyeCaptureVrInput.exe", L"\\build\\Release\\EyeCaptureVrInput.exe"}) {
+        const std::wstring p = g_exeDir + rel;
+        if (GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES) return p;
+    }
+    return std::wstring();
+}
+
+void VrInputTick() {
+    if (g_testMode && GetEnvironmentVariableW(L"EYECAP_TRAY_TEST_VRINPUT", nullptr, 0) == 0) return;
+    const ULONGLONG now = GetTickCount64();
+    if (g_vrInProc && WaitForSingleObject(g_vrInProc, 0) == WAIT_OBJECT_0) {
+        DWORD code = 0;
+        GetExitCodeProcess(g_vrInProc, &code);
+        CloseHandle(g_vrInProc);
+        g_vrInProc = nullptr;
+        LOGI("tray: SteamVR controller hotkey: EyeCaptureVrInput (pid %lu) exited (code %lu)", (unsigned long)g_vrInPid, code);
+        if (code == 3) g_vrInRetryAt = now + 10000;   // another one runs
+        else if (code != 0) {
+            g_vrInFails.push_back(now);
+            while (!g_vrInFails.empty() && now - g_vrInFails.front() > 60000) g_vrInFails.pop_front();
+            if (g_vrInFails.size() >= 3) {
+                g_vrInBlockedGame = g_vrInGame;
+                LOGW("tray: SteamVR controller hotkey: EyeCaptureVrInput failed 3 times within a minute -- not started again for "
+                     "this game (pid %lu; see logs\\eye_capture.log)", (unsigned long)g_vrInGame);
+            } else {
+                g_vrInRetryAt = now + 5000;
+            }
+        }
+        g_vrInPid = 0;
+    }
+    const DWORD game = g_live ? g_st.ownerPid : 0;
+    const bool steamvr = game && wcsncmp(g_st.api, L"SteamVR", 7) == 0;
+    if (!steamvr || !g_vrHotkeyOn || game != g_vrInGame) {
+        if (g_vrInProc) {   // it exits with its game on its own; asked after 10 s (or at once when vr_hotkey went off)
+            if (!g_vrInIdleSince) g_vrInIdleSince = now;
+            if ((now > g_vrInIdleSince + 10000 || !g_vrHotkeyOn) && g_vrInQuit) {
+                LOGI("tray: SteamVR controller hotkey: asking EyeCaptureVrInput (pid %lu) to quit", (unsigned long)g_vrInPid);
+                SetEvent(g_vrInQuit);
+                g_vrInIdleSince = now + 50000;
+            }
+        }
+        if (!steamvr || !g_vrHotkeyOn || g_vrInProc) return;
+    }
+    g_vrInIdleSince = 0;
+    if (g_vrInProc || game == g_vrInBlockedGame || now < g_vrInRetryAt) return;
+    const std::wstring exe = VrInputExe();
+    if (exe.empty()) {
+        static bool logged = false;
+        if (!logged) { logged = true; LOGW("tray: SteamVR controller hotkey: EyeCaptureVrInput.exe not found next to the tray app"); }
+        return;
+    }
+    if (!g_vrInQuit) g_vrInQuit = CreateEventW(nullptr, TRUE, FALSE, L"Local\\OpenXR-EyeCapture-VrInputQuit");
+    if (g_vrInQuit) ResetEvent(g_vrInQuit);
+    std::wstring cmd = L"\"" + exe + L"\" --home \"" + g_exeDir + L"\" --game-pid " + std::to_wstring(game);
+    STARTUPINFOW si{sizeof(si)};
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessW(exe.c_str(), &cmd[0], nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, g_exeDir.c_str(), &si, &pi)) {
+        LOGE("tray: SteamVR controller hotkey: cannot start %s (error %lu)", elog::Narrow(exe).c_str(), GetLastError());
+        g_vrInRetryAt = now + 10000;
+        return;
+    }
+    CloseHandle(pi.hThread);
+    g_vrInProc = pi.hProcess;
+    g_vrInPid = pi.dwProcessId;
+    g_vrInGame = game;
+    LOGI("tray: SteamVR controller hotkey: started %s (pid %lu) for %s (pid %lu)", elog::Narrow(exe).c_str(), pi.dwProcessId,
+         elog::Narrow(g_st.game).c_str(), (unsigned long)game);
 }
 
 void OpenSettings() {
@@ -1471,7 +1579,7 @@ void StartUpdateCheck(bool manual) {
         g_updApiUrl = (n > 0 && n < 1024) ? ov : upd::kDefaultApiUrl;
     }
     if (g_updChecking.exchange(true)) { LOGI("tray: update check (%s): one is already running", manual ? "manual" : "auto"); return; }
-    if (!manual) g_updNextCheck = GetTickCount64() + kUpdateIntervalMs;
+    if (!manual) { g_updNextCheck = GetTickCount64() + kUpdateIntervalMs; ArmUpdateTimer(); }
     const std::wstring url = g_updApiUrl;
     LOGI("tray: checking for updates (%s) at %s", manual ? "manual" : "auto", elog::Narrow(url).c_str());
     std::thread([url, manual] {
@@ -1750,20 +1858,115 @@ void ShowMenu() {
     }
 }
 
+// ---- the watcher thread: sleeps in ONE WaitForMultipleObjects(INFINITE) and posts a message to the window when
+//   - a game / helper changed the status block (<block>-Changed, set by EyeCapEndWrite in src/shared_status.h),
+//   - something changed in a folder that holds config.ini (FindFirstChangeNotification, not recursive),
+//   - the layer's registration keys changed (RegNotifyChangeKeyValue; re-armed after every change).
+// No polling: an idle tray (no game) wakes only for these and for the user.
+HANDLE g_watchStop = nullptr;
+HANDLE g_watchThread = nullptr;
+std::vector<std::wstring> g_watchDirs;   // set before the thread starts, read-only after
+
+DWORD WINAPI WatchProc(LPVOID) {
+    std::vector<HANDLE> waits{g_watchStop};
+    const size_t statusAt = waits.size();
+    if (g_eyeCapChanged) waits.push_back(g_eyeCapChanged);
+    HANDLE regEvt = g_regEnabled ? CreateEventW(nullptr, FALSE, FALSE, nullptr) : nullptr;
+    std::vector<install::WatchKey> keys;
+    auto armReg = [&] {
+        for (const auto& k : keys) RegCloseKey(k.key);
+        keys = install::OpenWatchKeys();
+        for (const auto& k : keys)
+            RegNotifyChangeKeyValue(k.key, k.subtree, REG_NOTIFY_CHANGE_NAME | REG_NOTIFY_CHANGE_LAST_SET, regEvt, TRUE);
+    };
+    const size_t regAt = waits.size();
+    if (regEvt) { armReg(); waits.push_back(regEvt); }
+    const size_t dirsAt = waits.size();
+    for (const std::wstring& d : g_watchDirs) {
+        const HANDLE h = FindFirstChangeNotificationW(d.c_str(), FALSE, FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_FILE_NAME);
+        if (h != INVALID_HANDLE_VALUE) waits.push_back(h);
+    }
+    LOGI("tray: watching %s, %zu registry key(s), %zu config folder(s) -- no timer while no game runs",
+         g_eyeCapChanged ? "the status block" : "nothing for the status block (no event)", keys.size(), waits.size() - dirsAt);
+    for (;;) {
+        const DWORD r = WaitForMultipleObjects((DWORD)waits.size(), waits.data(), FALSE, INFINITE);
+        if (r < WAIT_OBJECT_0 || r >= WAIT_OBJECT_0 + waits.size()) break;
+        const size_t i = r - WAIT_OBJECT_0;
+        if (i == 0) break;
+        if (g_eyeCapChanged && i == statusAt) {
+            PostMessageW(g_wnd, WM_STATUS_CHANGED, 0, 0);
+        } else if (regEvt && i == regAt) {
+            armReg();
+            PostMessageW(g_wnd, WM_REG_CHANGED, 0, 0);
+        } else {
+            FindNextChangeNotification(waits[i]);
+            PostMessageW(g_wnd, WM_CONFIG_CHANGED, 0, 0);
+        }
+    }
+    for (const auto& k : keys) RegCloseKey(k.key);
+    if (regEvt) CloseHandle(regEvt);
+    for (size_t i = dirsAt; i < waits.size(); ++i) FindCloseChangeNotification(waits[i]);
+    return 0;
+}
+
+void StartWatcher() {
+    auto addDir = [](const std::wstring& file) {
+        const size_t k = file.find_last_of(L"\\/");
+        if (k == std::wstring::npos) return;
+        const std::wstring d = file.substr(0, k);
+        for (const std::wstring& x : g_watchDirs) if (_wcsicmp(x.c_str(), d.c_str()) == 0) return;
+        if (GetFileAttributesW(d.c_str()) != INVALID_FILE_ATTRIBUTES) g_watchDirs.push_back(d);
+    };
+    addDir(ConfigPath(g_exeDir));
+    addDir(g_exeDir + L"\\config.ini");
+    g_watchStop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    g_watchThread = g_watchStop ? CreateThread(nullptr, 0, WatchProc, nullptr, 0, nullptr) : nullptr;
+    if (!g_watchThread) LOGE("tray: watcher thread not started (error %lu) -- game status only on hover / menu", GetLastError());
+}
+
+void StopWatcher() {
+    if (g_watchThread) {
+        SetEvent(g_watchStop);
+        WaitForSingleObject(g_watchThread, 3000);
+        CloseHandle(g_watchThread);
+        g_watchThread = nullptr;
+    }
+    if (g_watchStop) { CloseHandle(g_watchStop); g_watchStop = nullptr; }
+}
+
 LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     static UINT s_taskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
-    if (msg == s_taskbarCreated) { Shell_NotifyIconW(NIM_ADD, &g_nid); return 0; }
+    if (msg == s_taskbarCreated) {   // Explorer restarted: add the icon again
+        g_nid.uFlags = NIF_ICON | NIF_TIP | NIF_MESSAGE;
+        Shell_NotifyIconW(NIM_ADD, &g_nid);
+        return 0;
+    }
     switch (msg) {
     case WM_TIMER:
-        if (wp == kTipTimer) { KillTimer(h, kTipTimer); g_savedTip.clear(); Refresh(); LOGI("tray: tooltip restored: %s", elog::Narrow(g_nid.szTip).c_str()); return 0; }
-        if (g_regEnabled && !g_regBusy && GetTickCount64() - g_regQueried >= 10000) QueryReg(false);   // cheap registry read
+        if (wp == kTipTimer) { KillTimer(h, kTipTimer); g_savedTip.clear(); Refresh(); LOGI("tray: tooltip restored: %s", elog::Narrow(g_tipText).c_str()); return 0; }
+        if (wp == kCfgTimer) { KillTimer(h, kCfgTimer); CheckConfigChanged(); return 0; }
+        if (wp == kUpdTimer) {   // first run ~8 s after start, then once every 24 h (StartUpdateCheck re-arms it)
+            KillTimer(h, kUpdTimer);
+            if (!g_updChecking) StartUpdateCheck(false);
+            else { g_updNextCheck = GetTickCount64() + 60000; ArmUpdateTimer(); }
+            return 0;
+        }
+        // kTimer: runs only while UpdateTimer wants it (a live game, a helper, ...)
         CheckConfigChanged();   // one GetFileAttributesEx: controller / wheel hotkeys follow config.ini edits
         if (GetTickCount64() - g_mirrorCheck >= 2000) { g_mirrorCheck = GetTickCount64(); MirrorTick(); }   // SteamVR quick mode
         if (GetTickCount64() - g_x86Check >= 2000) { g_x86Check = GetTickCount64(); X86Tick(); }   // 32-bit OpenXR games
-        if (g_updEnabled && !g_testMode && !g_updChecking && g_updNextCheck && GetTickCount64() >= g_updNextCheck)
-            StartUpdateCheck(false);   // first run ~8 s after start, then once every 24 h (StartUpdateCheck reschedules)
-        g_blinkOdd = !g_blinkOdd;
+        if (GetTickCount64() - g_vrInCheck >= 2000) { g_vrInCheck = GetTickCount64(); VrInputTick(); }   // SteamVR controller hotkey
         Refresh();
+        return 0;
+    case WM_STATUS_CHANGED:   // a game started / stopped / changed state: read it now (the timer takes over while it is live)
+        if (GetTickCount64() - g_x86Check >= 2000 || !g_live) { g_x86Check = GetTickCount64(); X86Tick(); }
+        Refresh();
+        return 0;
+    case WM_CONFIG_CHANGED:   // read it once the writer is done (an editor may write it in steps): 300 ms after the last change
+        SetTimer(h, kCfgTimer, 300, nullptr);
+        return 0;
+    case WM_REG_CHANGED:
+        if (g_regEnabled && !g_regBusy) { QueryReg(false); Refresh(); }
         return 0;
     case WM_CHECK_REG:
         StartupRegCheck();
@@ -1828,7 +2031,11 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         // left click: the app window (conversion queue / progress, all settings); right click: the menu
         if (LOWORD(lp) == WM_LBUTTONUP) { if (!g_regBusy) OpenSettings(); }
         else if (LOWORD(lp) == WM_RBUTTONUP || LOWORD(lp) == WM_CONTEXTMENU) ShowMenu();
-        else if (LOWORD(lp) == NIN_BALLOONUSERCLICK) {   // the user clicked the balloon (Windows 10 / 11: the notification)
+        else if (LOWORD(lp) == WM_MOUSEMOVE) {   // the mouse is on the icon: bring the tooltip up to date (at most 3x a second)
+            static ULONGLONG s_lastHover = 0;
+            const ULONGLONG now = GetTickCount64();
+            if (now - s_lastHover >= 300) { s_lastHover = now; Refresh(true); }
+        } else if (LOWORD(lp) == NIN_BALLOONUSERCLICK) {   // the user clicked the balloon (Windows 10 / 11: the notification)
             const BalloonAction a = g_balloonAction;
             g_balloonAction = BalloonAction::None;
             LOGI("tray: balloon clicked%s", a == BalloonAction::OpenSteamVr ? " -- opening the SteamVR games window" : "");
@@ -1845,6 +2052,8 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         g_tagQuit = true;
         g_updQuit = true;   // a detached update check / download thread must not post to the destroyed window
         KillTimer(h, kTimer);
+        KillTimer(h, kUpdTimer);
+        KillTimer(h, kCfgTimer);
         g_pp.Stop();   // cancels a running ffmpeg (resumed first if held) and deletes its partial output
         ClearProducers();
         if (g_lastOwner.h) { CloseHandle(g_lastOwner.h); g_lastOwner = Proc(); }
@@ -2203,7 +2412,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
                  elog::Narrow(DefaultCapturesDir(g_exeDir)).c_str());
     }
     g_shm = testMode ? EyeCapOpenShared(&g_map, testShm) : EyeCapOpenShared(&g_map);
-    for (int i = 0; i < kIcoCount; ++i) g_icons[i] = LoadTrayIcon(i);
+    g_trayIcon = LoadTrayIcon();
 
     WNDCLASSW wc{};
     wc.lpfnWndProc = WndProc;
@@ -2217,10 +2426,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     g_nid.uID = 1;
     g_nid.uFlags = NIF_ICON | NIF_TIP | NIF_MESSAGE;
     g_nid.uCallbackMessage = WM_TRAY;
-    g_nid.hIcon = g_icons[0];
+    g_nid.hIcon = g_trayIcon;   // the only icon the tray ever shows
     wcsncpy_s(g_nid.szTip, kAppTitle, _TRUNCATE);
     Shell_NotifyIconW(NIM_ADD, &g_nid);
-    SetTimer(g_wnd, kTimer, 500, nullptr);
     g_pp.Start(g_exeDir, g_wnd, WM_PP);
     PostMessageW(g_wnd, WM_STEAMVR_REPAIR, 0, 0);   // SteamVR games the user enabled: CHECKED (read-only); a balloon offers the repair
     {
@@ -2285,15 +2493,17 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     ApplyInputBindings("start");
     InstallQueueHooks();   // before the window can open
     input::Start(OnInputFire);
-    Refresh();
+    Refresh(true);   // the first tooltip; later ones only on hover
+    StartWatcher();
 
     MSG m;
     while (GetMessageW(&m, nullptr, 0, 0) > 0) {
         TranslateMessage(&m);
         DispatchMessageW(&m);
     }
+    StopWatcher();
     input::Stop();   // before the status block is unmapped (the poll thread sends commands through it)
-    for (HICON i : g_icons) if (i) DestroyIcon(i);
+    if (g_trayIcon) DestroyIcon(g_trayIcon);
     if (g_shm) UnmapViewOfFile(g_shm);
     if (g_map) CloseHandle(g_map);
     if (alive) CloseHandle(alive);

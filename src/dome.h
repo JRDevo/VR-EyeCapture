@@ -18,6 +18,10 @@
 // Per eye e (actual orientation q_e): a = M_e r with M_e = q_e^-1 * D maps a dome ray into the eye camera. a.z >= 0 or
 // t = a.xy / -a.z outside the eye's fov tans = not covered; else the eye image is sampled at t. Eye positions are not
 // touched: each eye's dome is centred on that eye (the stereo baseline, like a VR180 camera).
+// Shared view (dome_shared_view = 1, default): each eye paints only the part of its fov the OTHER eye also sees (the
+// binocular overlap). A headset eye sees more on its outer side; painted alone, that strip has live video for one eye
+// and black / old video for the other -- the eyes cannot fuse it (eye strain, "crossed eyes"; GitHub issue #2).
+// The coverage test and the feather use these clip tans; the image is still sampled with the eye's own fov.
 // Layout: vr180 = per-eye square (lon +-90, lat +-90), left | right (SBS). vr360 = per-eye 2:1 (lon +-180, lat +-90),
 // left eye on top, right eye below (top-bottom, what YouTube 360 3D expects).
 #pragma once
@@ -33,6 +37,7 @@ struct DomeSettings {
     DomeFill       fill = DomeFill::LastSeen;            // fill = black | last_seen
     float          fadeS = 8.0f;                         // fill_fade_s: 0 = never fade
     float          featherDeg = 1.0f;                    // window_feather_deg: 0 = hard edge
+    bool           sharedView = true;                    // dome_shared_view: paint only where both eyes see
     bool Enabled() const { return projection != DomeProjection::Flat; }
 };
 
@@ -71,6 +76,13 @@ DomeFrame ComputeDomeFrame(const SmoothQuat& qL, const SmoothQuat& qR);
 
 // Row-major M = q_e^-1 * D: eye-camera ray = M * dome ray.
 void DomeEyeMatrix(const SmoothQuat& D, const SmoothQuat& qEye, double m[9]);
+
+// Shared view: the clip window of eye "self" = its own fov intersected with the other eye's fov, as tans in self's
+// camera {tanL, tanR, tanU, tanD}. The other eye's edge rays (its centre row / centre column) are rotated into self's
+// camera (q_self^-1 * q_other, so canted displays work); positions are ignored (overlap at infinity). Returns false and
+// out = self's own tans when the overlap is empty or a ray points backwards.
+bool DomeSharedTans(const SmoothQuat& qSelf, const float fovSelf[4], const SmoothQuat& qOther, const float fovOther[4],
+                    float out[4]);
 
 // Equirect (u, v) in [0,1] of a direction given in the projection layer's space; false = outside the dome (vr180:
 // behind). Used by the tests.

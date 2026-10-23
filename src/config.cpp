@@ -395,6 +395,8 @@ KeyResult ApplyKey(Config& c, const std::wstring& key, std::wstring val) {
         if (ParseFloat(val, fl) && fl >= 0.0f && fl <= 3600.0f) c.dome.fadeS = fl; else ok = false;
     } else if (key == L"window_feather_deg") {
         if (ParseFloat(val, fl) && fl >= 0.0f && fl <= 20.0f) c.dome.featherDeg = fl; else ok = false;
+    } else if (key == L"dome_shared_view") {
+        if (ParseBool(val, b)) c.dome.sharedView = b; else ok = false;
     } else if (key == L"steamvr_enabled") {
         if (ParseBool(val, b)) c.steamvr.enabled = b; else ok = false;
     } else if (key == L"steamvr_mode") {

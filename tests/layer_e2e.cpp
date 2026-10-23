@@ -5,13 +5,15 @@
 //
 //   layer_e2e [--api d3d11|d3d12] [--layout two|array|wide|msaa] [--eye 1920x1080] [--seconds 6] [--record 4]
 //             [--out-dir dir] [--expect-dormant] [--jitter] [--hud] [--overlays] [--stale-pose] [--opaque-projection]
-//             [--no-output] [--input app|none]
+//             [--no-output] [--input app|simple|none]
 // --input app (the VR controller hotkey test, tests/run_e2e.ps1): the app has its OWN controller input like a game: action
 // set "app" (priority 1) with "app_select" (right trigger on touch_controller, select on simple_controller) and
 // "app_stick" (left stick click, touch_controller only), suggested for both profiles, attached ONCE before the frame loop,
 // synced every frame (xrSyncActions with only its own set); every input call must succeed. Prints
 // "E2E_INPUT app_select presses <n> (true on <k> syncs), app_stick presses <m>" (rising edges the app saw). --input none:
 // no input calls at all (the layer attaches its own action set). The mock's pressed inputs come from EYECAP_MOCK_INPUT.
+// --input simple: like ATS / ETS2 -- the same action set, suggested ONLY for khr/simple_controller (app_select = right
+// select, app_stick = left menu): the layer must translate them onto the real profiles (the mock then picks touch).
 // --no-output (with --record 0): no MP4 is expected; exit 0 = the frame loop completed (tests/run_live.ps1: the live
 // share consumer reads the frames meanwhile).
 // --overlays (record_overlays test; tests/run_e2e.ps1 has the expected pixel positions): every frame also submits, AFTER
@@ -243,7 +245,7 @@ int main(int argc, char** argv) {
     // ---- --input app: the app's own controller input (one action set, attached once) ----
     XrActionSet appSet = XR_NULL_HANDLE;
     XrAction appSelect = XR_NULL_HANDLE, appStick = XR_NULL_HANDLE;
-    if (input == "app") {
+    if (input == "app" || input == "simple") {   // simple: like ATS / ETS2, only khr/simple_controller (select, left menu)
         XrActionSetCreateInfo asi{XR_TYPE_ACTION_SET_CREATE_INFO};
         strcpy_s(asi.actionSetName, "app");
         strcpy_s(asi.localizedActionSetName, "App controls");
@@ -261,13 +263,16 @@ int main(int argc, char** argv) {
         XrActionSuggestedBinding touch[] = {{appSelect, path("/user/hand/right/input/trigger/value")},
                                             {appStick, path("/user/hand/left/input/thumbstick/click")}};
         XrInteractionProfileSuggestedBinding sb{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
-        sb.interactionProfile = path("/interaction_profiles/oculus/touch_controller");
-        sb.countSuggestedBindings = 2;
-        sb.suggestedBindings = touch;
-        CHECK(xrSuggestInteractionProfileBindings(inst, &sb));
-        XrActionSuggestedBinding simple[] = {{appSelect, path("/user/hand/right/input/select/click")}};
+        if (input == "app") {
+            sb.interactionProfile = path("/interaction_profiles/oculus/touch_controller");
+            sb.countSuggestedBindings = 2;
+            sb.suggestedBindings = touch;
+            CHECK(xrSuggestInteractionProfileBindings(inst, &sb));
+        }
+        XrActionSuggestedBinding simple[] = {{appSelect, path("/user/hand/right/input/select/click")},
+                                             {appStick, path("/user/hand/left/input/menu/click")}};
         sb.interactionProfile = path("/interaction_profiles/khr/simple_controller");
-        sb.countSuggestedBindings = 1;
+        sb.countSuggestedBindings = input == "app" ? 1 : 2;
         sb.suggestedBindings = simple;
         CHECK(xrSuggestInteractionProfileBindings(inst, &sb));
         XrSessionActionSetsAttachInfo at{XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};

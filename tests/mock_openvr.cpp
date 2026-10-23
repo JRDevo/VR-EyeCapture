@@ -381,6 +381,9 @@ public:
         }
         return false;
     }
+    bool PollNextEventWithPose(vr::ETrackingUniverseOrigin, vr::VREvent_t*, uint32_t, vr::TrackedDevicePose_t*) override { return false; }
+    const char* GetEventTypeNameFromEnum(uint32_t) override { return "VREvent_Mock"; }
+    vr::HiddenAreaMesh_t GetHiddenAreaMesh(vr::EVREye, vr::EHiddenAreaMeshType) override { return vr::HiddenAreaMesh_t{nullptr, 0}; }
 };
 MockSystem022 g_sys022;
 
@@ -505,6 +508,83 @@ void* OverlayTable(const std::string& version) {
     return g_ovTable;
 }
 
+// ---- IVRInput_010 (EyeCaptureVrInput.exe, the SteamVR controller hotkey): a raw vtable, slots as in Valve's openvr.h 1.16
+// (0 SetActionManifestPath, 1 GetActionSetHandle, 2 GetActionHandle, 4 UpdateActionState, 5 GetDigitalActionData,
+// 21 TriggerHapticVibrationAction); every other slot a counting stub. MOCK_OPENVR_INPUT_MS=<from>-<to>[,<from>-<to>...]:
+// every boolean action is pressed (active, state true) during those ms since VR_InitInternal2; MOCK_OPENVR_INPUT_INACTIVE=1:
+// no action is ever active (SteamVR gives the app no input). Printed at shutdown ("mock input: ...").
+struct MockInput {
+    std::string manifest;
+    int64_t sets = 0, actions = 0, updates = 0, digitals = 0, haptics = 0, badSizes = 0, stubs = 0;
+} g_in;
+int InSetManifest(void*, const char* path) {
+    std::lock_guard<std::mutex> lk(g_m);
+    g_in.manifest = path ? path : "";
+    const DWORD a = path ? GetFileAttributesA(path) : INVALID_FILE_ATTRIBUTES;
+    return a == INVALID_FILE_ATTRIBUTES ? 2 /* VRInputError_InvalidParam-ish */ : 0;
+}
+int InGetSet(void*, const char* name, uint64_t* h) {
+    ++g_in.sets;
+    if (!name || !h || strcmp(name, "/actions/eyecapture") != 0) return 3;
+    *h = 0x5e7;
+    return 0;
+}
+int InGetAction(void*, const char* name, uint64_t* h) {
+    ++g_in.actions;
+    if (!name || !h || strncmp(name, "/actions/eyecapture/", 20) != 0) return 3;
+    *h = 0xac70 + strlen(name) + (unsigned char)name[strlen(name) - 1];
+    return 0;
+}
+int InUpdate(void*, void* sets, uint32_t size, uint32_t n) {
+    ++g_in.updates;
+    if (!sets || size != 32 || n != 1) { ++g_in.badSizes; return 3; }
+    return 0;
+}
+bool InPressed() {
+    const std::string spec = Env("MOCK_OPENVR_INPUT_MS");
+    if (spec.empty() || !g_initTick) return false;
+    LARGE_INTEGER f, c;
+    QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&c);
+    const long long ms = (c.QuadPart - g_initTick) * 1000 / f.QuadPart;
+    size_t p = 0;
+    while (p < spec.size()) {
+        long long a = 0, b = 0;
+        if (sscanf_s(spec.c_str() + p, "%lld-%lld", &a, &b) == 2 && ms >= a && ms < b) return true;
+        const size_t k = spec.find(',', p);
+        if (k == std::string::npos) break;
+        p = k + 1;
+    }
+    return false;
+}
+int InDigital(void*, uint64_t action, uint8_t* data, uint32_t size, uint64_t) {
+    ++g_in.digitals;
+    if (!data || size != 24) { ++g_in.badSizes; return 3; }
+    memset(data, 0, size);
+    const bool active = Env("MOCK_OPENVR_INPUT_INACTIVE") != "1" && action != 0;
+    data[0] = active ? 1 : 0;                       // bActive
+    data[16] = active && InPressed() ? 1 : 0;       // bState (after the 8-byte origin handle)
+    return 0;
+}
+int InHaptic(void*, uint64_t action, float, float dur, float, float, uint64_t) {
+    if (action && dur > 0) ++g_in.haptics;
+    return 0;
+}
+template <int N> intptr_t InStub(void*) { ++g_in.stubs; return 0; }
+void* g_inTable[40];
+template <int... I> void FillInStubs(std::integer_sequence<int, I...>) { ((g_inTable[I] = (void*)&InStub<I>), ...); }
+RawObj* InputObject() {
+    static RawObj obj{g_inTable};
+    FillInStubs(std::make_integer_sequence<int, 40>{});
+    g_inTable[0] = (void*)&InSetManifest;
+    g_inTable[1] = (void*)&InGetSet;
+    g_inTable[2] = (void*)&InGetAction;
+    g_inTable[4] = (void*)&InUpdate;
+    g_inTable[5] = (void*)&InDigital;
+    g_inTable[21] = (void*)&InHaptic;
+    return &obj;
+}
+
 } // namespace
 
 // ---------------------------------------------------------------- exports (Valve's names)
@@ -546,6 +626,10 @@ MOCK_EXPORT void VR_ShutdownInternal() {
            g_ov.width, g_ov.device, g_ov.x, g_ov.y, g_ov.z, (long long)g_ov.textures, g_ov.texW, g_ov.texH, g_ov.r, g_ov.g, g_ov.b,
            g_ov.a, (long long)g_ov.shows, (long long)g_ov.hides, (long long)g_ov.alphas, g_ov.alphaMin, g_ov.alphaMax,
            (long long)g_ov.sorts, (long long)g_ov.destroys, (long long)g_ov.badHandle, (long long)g_ov.other);
+    printf("mock input: manifest %s, set handles %lld, action handles %lld, updates %lld, digital reads %lld, haptics %lld, "
+           "bad sizes %lld, other slots %lld\n", g_in.manifest.empty() ? "-" : g_in.manifest.c_str(), (long long)g_in.sets,
+           (long long)g_in.actions, (long long)g_in.updates, (long long)g_in.digitals, (long long)g_in.haptics,
+           (long long)g_in.badSizes, (long long)g_in.stubs);
     fflush(stdout);
 }
 
@@ -567,6 +651,7 @@ MOCK_EXPORT void* VR_GetGenericInterface(const char* name, vr::EVRInitError* e) 
     if (n == "FnTable:IVRCompositor_022") return g_fn022;
     if (n == "IVRSystem_022" && !only019) return static_cast<vr::IVRSystem*>(&g_sys022);
     if (n == "IVRSystem_019") return &g_sys019;
+    if (n == "IVRInput_010") return InputObject();
     {
         const std::string ov = Env("MOCK_OPENVR_OVERLAY");   // "" = _027, "026" = only _026, "none" = no IVROverlay
         if (n == "FnTable:IVROverlay_027" && ov.empty()) return OverlayTable("IVROverlay_027");

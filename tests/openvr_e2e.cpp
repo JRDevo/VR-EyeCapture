@@ -53,6 +53,8 @@ struct Args {
     double seconds = 5;
     int submitError = 0;
     bool rightFirst = false, threads = false;
+    std::string dynres;   // --dynres grow | shrink: wide layout, each eye's bounds scale 0.8 <-> 1.0 (Half-Life: Alyx)
+    bool mask = false;    // --mask: the inner bottom corner of each eye (0.2 x 0.2) is always black, like a game's lens mask
     int cycles = 1;
     UINT eyeW = 1920, eyeH = 1080;
 };
@@ -271,6 +273,8 @@ int wmain(int argc, wchar_t** argv) {
         else if (k == L"--submit-error") a.submitError = _wtoi(next().c_str());
         else if (k == L"--right-first") a.rightFirst = true;
         else if (k == L"--threads") a.threads = true;
+        else if (k == L"--dynres") a.dynres = nextA();
+        else if (k == L"--mask") a.mask = true;
         else if (k == L"--cycles") a.cycles = _wtoi(next().c_str());
         else if (k == L"--eye") { const std::string v = nextA(); sscanf_s(v.c_str(), "%ux%u", &a.eyeW, &a.eyeH); }
         else if (k == L"--api") a.api = nextA();
@@ -278,6 +282,10 @@ int wmain(int argc, wchar_t** argv) {
     }
     if (a.gameDir.empty()) { printf("--game-dir is required\n"); return 2; }
     const bool wide = a.layout == "wide", arr = a.layout == "array", msaa = a.layout == "msaa";
+    if (!a.dynres.empty() && (!wide || a.api != "d3d11" || (a.dynres != "grow" && a.dynres != "shrink"))) {
+        printf("bad --dynres (grow | shrink, with --layout wide, D3D11)\n");
+        return 2;
+    }
     const bool typeless = a.layout == "typeless", fp16 = a.layout == "fp16", r10 = a.layout == "r10", bgrx = a.layout == "bgrx";
     if (!(a.layout == "two" || wide || arr || msaa || typeless || fp16 || r10 || bgrx)) { printf("bad --layout\n"); return 2; }
     const bool d3d12 = a.api == "d3d12";
@@ -450,13 +458,25 @@ int wmain(int argc, wchar_t** argv) {
             ++waitCalls;
             if (we != vr::VRCompositorError_None) Fail("WaitGetPoses error " + std::to_string((int)we));
         }
-        // draw
+        // draw (--dynres: this frame's eye size; grow = small first, shrink = full first, then 10 frames each)
+        float scale = 1.0f;
+        if (!a.dynres.empty()) {
+            const bool full = f < 45 ? a.dynres == "shrink" : ((f - 45) / 10) % 2 == (a.dynres == "grow" ? 0 : 1);
+            scale = full ? 1.0f : 0.8f;
+        }
+        const UINT drawW = (UINT)(a.eyeW * scale) & ~1u, drawH = (UINT)(a.eyeH * scale) & ~1u;
         if (d3d12) g12.Draw((uint32_t)f, wide, arr, a.eyeW, a.eyeH, pat);
         for (int e = 0; !d3d12 && e < 2; ++e) {
             EyeTex& et = eyes[(wide || arr) ? 0 : (size_t)e];
             ID3D11RenderTargetView* rtv = et.rtv[arr ? (size_t)e : 0].Get();
-            BuildPattern(pat, e, (uint32_t)f, wide ? e * (int)a.eyeW : 0, 0, (int)a.eyeW, (int)a.eyeH);
+            BuildPattern(pat, e, (uint32_t)f, wide ? e * (int)a.eyeW : 0, 0, (int)drawW, (int)drawH);
             for (auto& p : pat) ctx1->ClearView(rtv, p.c, &p.r, 1);
+            if (a.mask) {   // the game's stencil: the hidden area (inner bottom corner, 0.2 x 0.2 of the eye) stays black
+                const float black[4] = {0, 0, 0, 1};
+                const int ox = wide ? e * (int)a.eyeW : 0, w = (int)drawW, h = (int)drawH;
+                const D3D11_RECT r{e == 0 ? ox + w * 8 / 10 : ox, h * 8 / 10, e == 0 ? ox + w : ox + w * 2 / 10, h};
+                ctx1->ClearView(rtv, black, &r, 1);
+            }
         }
         for (EyeTex& et : eyes) if (et.scratch) ctx->CopyResource(et.tex.Get(), et.scratch.Get());
         // submit (the pose the frame was "rendered" with: the game's own motion clock for --pose submit)
@@ -479,7 +499,7 @@ int wmain(int argc, wchar_t** argv) {
             t.eColorSpace = cs;
             t.mDeviceToAbsoluteTracking = pose;
             vr::VRTextureBounds_t b{0, 0, 1, 1};
-            if (wide) { b.uMin = e ? 0.5f : 0.0f; b.uMax = e ? 1.0f : 0.5f; }
+            if (wide) { b.uMin = e ? 0.5f : 0.0f; b.uMax = b.uMin + 0.5f * (float)drawW / (float)a.eyeW; b.vMax = (float)drawH / (float)a.eyeH; }
             const vr::EVRSubmitFlags flags = a.pose == "submit" ? vr::Submit_TextureWithPose : vr::Submit_Default;
             const vr::EVRCompositorError r = cppSubmit029 ? cppSubmit029(cpp, (vr::EVREye)e, &t, (wide || f % 2) ? &b : nullptr, flags)
                                              : cpp ? cpp->Submit((vr::EVREye)e, &t, (wide || f % 2) ? &b : nullptr, flags)
@@ -524,8 +544,8 @@ int wmain(int argc, wchar_t** argv) {
 
     // the symmetric_fov frame the proxy should record (the mock's GetProjectionRaw)
     float fovL[4], fovR[4];
-    fovL[0] = std::atan(-1.1f); fovL[1] = std::atan(0.9f); fovL[2] = std::atan(1.0f); fovL[3] = std::atan(-0.9f);
-    fovR[0] = std::atan(-0.9f); fovR[1] = std::atan(1.1f); fovR[2] = std::atan(1.0f); fovR[3] = std::atan(-0.9f);
+    fovL[0] = std::atan(-1.1f); fovL[1] = std::atan(0.9f); fovL[2] = std::atan(0.9f); fovL[3] = std::atan(-1.0f);
+    fovR[0] = std::atan(-0.9f); fovR[1] = std::atan(1.1f); fovR[2] = std::atan(0.9f); fovR[3] = std::atan(-1.0f);
     const SymmetricFov sym = ComputeSymmetricFov(fovL, fovR, a.eyeW, a.eyeH, a.eyeW, a.eyeH);
     printf("E2E_SYM=%ux%u\n", 2 * sym.eyeW, sym.eyeH);
     if (!a.outDir.empty()) {

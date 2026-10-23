@@ -45,14 +45,17 @@ const char kLinearToSrgbCs[] =
 
 // VR180 / VR360 dome (see dome.h). Same full-screen triangle; the eye is picked by its destination rectangle (SBS for
 // vr180, top-bottom for vr360). Per output pixel: equirect (lon, lat) -> dome ray -> M_e (= q_e^-1 * D) -> the eye
-// camera -> coverage weight w (0 outside the eye's fov, 1 inside, ramping over window_feather_deg at the window edge,
-// from the angular distance to the nearest fov edge plane) and a bilinear sample of that eye's half of the source.
+// camera -> coverage weight w (0 outside the eye's clip window, 1 inside, ramping over window_feather_deg at the window
+// edge, from the angular distance to the nearest window edge plane) and a bilinear sample of that eye's half of the
+// source (mapped with the eye's own fov, srcTan). The clip window is the eye's fov, or with dome_shared_view = 1 the
+// part of it the other eye also sees (DomeSharedTans).
 // DOME_LAST_SEEN (fill = last_seen): MRT. RT0 = the output the video processor reads, RT1 / RT2 = the new dome colour /
 // last-write time (ping-pong with t1 / t2 = the previous ones): dome' = lerp(dome, sample, w), time' = w >= 0.5 ? now :
 // time, output = dome' * fade(now - time'). Without it (fill = black): output = sample * w.
 const char kDomePs[] =
-    "struct Eye { float4 r0, r1, r2, srcTan, src, dst; };\n"   // r0.w = 1: paint this eye this frame (usable pose)
-    "cbuffer P : register(b0) { Eye eye[2]; float4 misc; float4 dome; };\n"   // misc: 1/srcW, 1/srcH; dome: lonSpan, now (s), fill_fade_s, feather (rad)
+    "struct Eye { float4 r0, r1, r2, srcTan, clip, src, dst; };\n"   // r0.w = 1: paint this eye this frame (usable pose)
+    "cbuffer P : register(b0) { Eye eye[2]; float4 misc; float4 dome; float4 mask; };\n"   // misc: 1/srcW, 1/srcH; dome: lonSpan, now (s), fill_fade_s, feather (rad); mask.x = 1: hidden area mask on
+    "Texture2D<float> seen : register(t3);\n"   // eye pixels that ever showed picture, left eye | right eye (kSeenPs)
     "Texture2D<float4> src : register(t0);\n"
     "SamplerState smp : register(s0);\n"
     "#ifdef DOME_LAST_SEEN\n"
@@ -76,14 +79,15 @@ const char kDomePs[] =
     "    if (E.r0.w > 0.5 && a.z < -1e-6) {\n"
     "        float2 t = a.xy / -a.z;\n"
     "        float2 s = float2((t.x - E.srcTan.x) / (E.srcTan.y - E.srcTan.x), (E.srcTan.z - t.y) / (E.srcTan.z - E.srcTan.w));\n"
-    "        if (all(s >= 0.0) && all(s <= 1.0)) {\n"
+    "        if (all(s >= 0.0) && all(s <= 1.0) && t.x >= E.clip.x && t.x <= E.clip.y && t.y <= E.clip.z && t.y >= E.clip.w) {\n"
     "            w = 1.0;\n"
     "            if (dome.w > 0.0) {\n"
     "                float3 n = normalize(a);\n"
-    "                float m = min(min(EdgeDist(n, float3(1.0, 0.0, E.srcTan.x)), EdgeDist(n, float3(-1.0, 0.0, -E.srcTan.y))),\n"
-    "                              min(EdgeDist(n, float3(0.0, -1.0, -E.srcTan.z)), EdgeDist(n, float3(0.0, 1.0, E.srcTan.w))));\n"
+    "                float m = min(min(EdgeDist(n, float3(1.0, 0.0, E.clip.x)), EdgeDist(n, float3(-1.0, 0.0, -E.clip.y))),\n"
+    "                              min(EdgeDist(n, float3(0.0, -1.0, -E.clip.z)), EdgeDist(n, float3(0.0, 1.0, E.clip.w))));\n"
     "                w = saturate(asin(saturate(m)) / dome.w);\n"
     "            }\n"
+    "            if (mask.x > 0.5 && seen.SampleLevel(smp, float2((s.x + (float)e) * 0.5, s.y), 0) < 0.999) w = 0.0;\n"
     "            float2 p = clamp(E.src.xy + s * E.src.zw, E.src.xy + 0.5, E.src.xy + E.src.zw - 0.5);\n"
     "            c = src.SampleLevel(smp, p * misc.xy, 0).rgb;\n"
     "        }\n"
@@ -103,10 +107,39 @@ const char kDomePs[] =
     "    return o;\n"
     "}\n";
 
-struct DomeEyeCb { float r0[4], r1[4], r2[4], srcTan[4], src[4], dst[4]; };
-struct DomeConstants { DomeEyeCb eye[2]; float misc[4]; float dome[4]; };
+struct DomeEyeCb { float r0[4], r1[4], r2[4], srcTan[4], clip[4], src[4], dst[4]; };
+struct DomeConstants { DomeEyeCb eye[2]; float misc[4]; float dome[4]; float mask[4]; };
 static_assert(sizeof(DomeConstants) % 16 == 0, "constant buffer size");
 const float kDomeTimeReset = -1e9f;   // last-write time of never-painted dome pixels (always fully faded)
+
+// The lens mask of VR180 / VR360 (every game): a game paints the eye pixels its lenses never show black (SteamVR's hidden
+// area mesh, OpenXR's visibility mask -- each game its own way, so the shape is taken from the pictures, not from an API).
+// kSeenRes x kSeenRes texels per eye (left | right, R8): a texel becomes 1 once all 4 of its sample points showed picture
+// (any channel > 0.002) in one frame; it never goes back to 0. World-locked dark content moves across the eye as the
+// head turns and is soon seen; the eye-locked lens mask never is. The dome never paints a texel that is not fully seen
+// (filtered value < 0.999), so the black mask cannot overwrite the last-seen picture. Reset at every recording start.
+const UINT kSeenRes = 256;
+const char kSeenPs[] =
+    "struct Eye { float4 r0, r1, r2, srcTan, clip, src, dst; };\n"
+    "cbuffer P : register(b0) { Eye eye[2]; float4 misc; float4 dome; float4 mask; };\n"
+    "Texture2D<float4> src : register(t0);\n"
+    "Texture2D<float> old : register(t1);\n"
+    "SamplerState smp : register(s0);\n"
+    "float Lit(Eye E, float2 s) {\n"
+    "    float2 p = clamp(E.src.xy + s * E.src.zw, E.src.xy + 0.5, E.src.xy + E.src.zw - 0.5);\n"
+    "    float3 c = src.SampleLevel(smp, p * misc.xy, 0).rgb;\n"
+    "    return max(max(c.r, c.g), c.b) > 0.002 ? 1.0 : 0.0;\n"
+    "}\n"
+    "float main(float4 pos : SV_Position) : SV_Target {\n"
+    "    const int e = pos.x >= (float)SEEN_RES ? 1 : 0;\n"
+    "    const float prev = old.Load(int3(int2(pos.xy), 0));\n"
+    "    const Eye E = eye[e];\n"
+    "    if (E.r0.w < 0.5 || prev > 0.5) return prev;\n"
+    "    const float2 t = float2(pos.x - (float)(SEEN_RES * e), pos.y);\n"   // texel centre in this eye's half
+    "    const float q = 0.25 / (float)SEEN_RES;\n"
+    "    const float2 s = t / (float)SEEN_RES;\n"
+    "    return Lit(E, s + float2(-q, -q)) * Lit(E, s + float2(q, -q)) * Lit(E, s + float2(-q, q)) * Lit(E, s + float2(q, q));\n"
+    "}\n";
 
 const UINT kTimingQueries = 6;
 
@@ -359,6 +392,18 @@ struct Recorder::Impl {
     ComPtr<ID3D11RenderTargetView> domeRtv[2], domeTimeRtv[2];
     ComPtr<ID3D11ShaderResourceView> domeSrv[2], domeTimeSrv[2];
     uint64_t domePainted = 0, domeNoPose = 0;
+    bool domeSharedLogged[2] = {false, false};   // the dome_shared_view clip window logged once per eye per recording
+    // The lens mask (kSeenPs): eye texels that ever showed picture, ping-pong; seenMasked = share of never-seen texels per eye
+    // (measured after 150 frames and every 3600th, logged in the summary).
+    ComPtr<ID3D11PixelShader> seenPs;
+    ComPtr<ID3D11Texture2D> seenTex[2], seenStage;
+    ComPtr<ID3D11RenderTargetView> seenRtv[2];
+    ComPtr<ID3D11ShaderResourceView> seenSrv[2];
+    int seenCur = 0;
+    bool seenClear = false;
+    uint64_t seenFrames = 0;
+    double seenMasked[2] = {0, 0};
+    bool seenMeasured = false;
     // record_overlays (overlay.h): one atlas per format family, created by the worker at the first frame that has a
     // layer of that family (bit f = OverlayFamily f)
     OverlayAtlasSet ov;
@@ -394,6 +439,7 @@ struct Recorder::Impl {
 
     // stats
     std::atomic<uint64_t> written{0}, dropRing{0}, dropGpu{0}, dropPool{0}, dropDup{0}, decimated{0}, audioFrames{0};
+    std::atomic<uint64_t> eyeCut{0};   // eyes larger than the recording, cut (with their fov) to fit (SubmitFrame)
     std::atomic<uint64_t> writeErrors{0};
     std::mutex statusLock;
     std::string message;
@@ -409,6 +455,8 @@ struct Recorder::Impl {
     void Reproject(ID3D11ShaderResourceView* const* srvs, UINT nSrv, ID3D11RenderTargetView* const* rtvs, UINT nRtv,
                    const void* cb, size_t cbSize);
     void DomeConstantsFor(const Item& it, DomeConstants& dc);
+    bool InitSeen();
+    void SeenMeasure();
     std::wstring SidecarPath() const;
     void WriteSidecar(const std::string& file);
     void ReadTimings();
@@ -448,6 +496,7 @@ bool Recorder::Start(IFrameSource* src, const RecorderSettings& s, UINT w, UINT 
     m.lastTs = INT64_MIN;
     m.nextDue = INT64_MIN;
     m.lastWrittenTs = 0;
+    m.eyeCut = 0;
     m.written = 0; m.dropRing = 0; m.dropGpu = 0; m.dropPool = 0; m.dropDup = 0; m.decimated = 0; m.audioFrames = 0; m.writeErrors = 0;
     m.cfr = s.constantFrameRate;
     m.cfrLastSlot = -1; m.cfrPrevIdx = -1; m.cfrRepeated = 0; m.cfrDropped = 0; m.cfrCapped = 0;
@@ -464,6 +513,9 @@ bool Recorder::Start(IFrameSource* src, const RecorderSettings& s, UINT w, UINT 
     m.domeClear = false;
     m.domeCur = 0;
     m.domePainted = m.domeNoPose = 0;
+    m.domeSharedLogged[0] = m.domeSharedLogged[1] = false;
+    m.seenCur = 0; m.seenClear = true; m.seenFrames = 0; m.seenMeasured = false;
+    m.seenMasked[0] = m.seenMasked[1] = 0;
     m.ov.ResetMasks();
     m.ovLayersIn = 0; m.ovNotReady = 0; m.ovFull = 0; m.ovSetupFailed = 0; m.ovBehind = 0; m.ovFrames = 0; m.ovDraws = 0;
     m.ovLoggedFull = m.ovLoggedFirst = false;
@@ -475,7 +527,7 @@ bool Recorder::Start(IFrameSource* src, const RecorderSettings& s, UINT w, UINT 
     m.yt = ytWanted && m.sym.valid;
     m.ytWarn = (s.youtube && m.dome.valid) ? 1 : (ytWanted && !m.sym.valid) ? 2 : 0;
     m.ytForcedSym = m.yt && !s.head.symmetricFov;
-    m.stage = m.dome.valid || s.head.Enabled() || m.sym.valid;
+    m.stage = m.dome.valid || s.head.Enabled() || m.sym.valid || s.eyeSizeVaries;
     m.smoother.Configure(s.head);   // also resets the filter: every recording starts at the actual head pose
     m.smoother.SetSymmetricOutput(m.sym.valid ? m.sym.tanH : 0.0, m.sym.valid ? m.sym.tanV : 0.0);
     m.vpW = m.dome.valid ? m.dome.frameW : m.sym.valid ? 2 * m.sym.eyeW : w;
@@ -557,10 +609,24 @@ bool Recorder::SubmitFrame(int64_t ts, const EyeView& L, const EyeView& R, int64
         waitFree = m.slotFreeValue[i];
     }
     EyeView l = L, r = R;
-    l.w = std::min<uint32_t>(l.w, m.leftW);
-    l.h = std::min<uint32_t>(l.h, m.H);
-    r.w = std::min<uint32_t>(r.w, m.W - m.leftW);
-    r.h = std::min<uint32_t>(r.h, m.H);
+    // An eye larger than the recording's (dynamic resolution: Half-Life: Alyx changes its eye rects every few frames; GitHub
+    // issue #2) is cut at its right / bottom edge. Its fov is cut with it, so the re-projection / dome maps the part that is
+    // copied to the angles it really shows -- without this the cut part was stretched over the full fov (a picture that
+    // wobbles and skews with the game's resolution).
+    auto clampEye = [&m](EyeView& v, uint32_t maxW, uint32_t maxH) {
+        const uint32_t w = std::min<uint32_t>(v.w, maxW), h = std::min<uint32_t>(v.h, maxH);
+        if (v.hasPose && (w < v.w || h < v.h)) {
+            const double tl = std::tan((double)v.fov[0]), tr = std::tan((double)v.fov[1]);
+            const double tu = std::tan((double)v.fov[2]), td = std::tan((double)v.fov[3]);
+            v.fov[1] = (float)std::atan(tl + (tr - tl) * (double)w / (double)v.w);
+            v.fov[3] = (float)std::atan(tu - (tu - td) * (double)h / (double)v.h);
+            ++m.eyeCut;
+        }
+        v.w = w;
+        v.h = h;
+    };
+    clampEye(l, m.leftW, m.H);
+    clampEye(r, m.W - m.leftW, m.H);
     // record_overlays: pack this frame's overlay sub-images into the slot's atlases (overlay.h OverlayPack). Nothing at all
     // happens without overlays. Layers of a family whose atlas the worker has not made yet are only counted (and requested).
     OverlayPacked pk;
@@ -746,6 +812,12 @@ void Recorder::Impl::Run() {
         }
         Process(it);
     }
+    if (seenPs && seenFrames) {   // the lens mask's final share for the summary (the last measurement may be up to 3600 frames old)
+        ComPtr<ID3D11Device> locked;
+        const bool haveLock = devHandle && SUCCEEDED(devMgr->LockDevice(devHandle, IID_PPV_ARGS(&locked), TRUE));
+        SeenMeasure();
+        if (haveLock) devMgr->UnlockDevice(devHandle, FALSE);
+    }
     if (hasAudio) audio.Stop();
 
     HRESULT fhr = S_OK;
@@ -802,6 +874,9 @@ void Recorder::Impl::Run() {
              hasAudio ? "AAC" : "none", (unsigned long long)audioFrames.load(), audioFrames.load() / 48000.0,
              HrText(fhr).c_str(), st3dReport.c_str());
     if (fileOk) LOGI("%s", sum); else LOGE("%s", sum);
+    if (eyeCut.load())
+        LOGI("recording: %llu eye images were larger than at the recording's start (dynamic resolution) -- cut to fit, with "
+             "their fov (no stretch; the cut edge is missing in those frames)", (unsigned long long)eyeCut.load());
     if (ovLayersIn.load())
         LOGI("overlay summary: %llu frames with overlays composited (%llu layer x eye draws) | layers handed over %llu "
              "(%llu behind the projection layer): before their atlas existed %llu, atlas full %llu, atlas setup failed %llu "
@@ -818,6 +893,9 @@ void Recorder::Impl::Run() {
              (unsigned long long)domePainted, (unsigned long long)domeNoPose, domeFrame.yawDeg,
              domeHaveFrame ? "" : " (never set: no usable pose)", vpW, vpH, gpuN ? gpuSum / gpuN : 0.0, gpuMax,
              (unsigned long long)gpuN, smFrames ? cpuSum / smFrames : 0.0, cpuMax);
+        if (seenMeasured)
+            LOGI("dome: lens mask = eye pixels that never showed picture (never painted): left %.1f%%, right %.1f%% of the eye",
+                 seenMasked[0], seenMasked[1]);
     } else if (stage) {
         const double n = smFrames ? (double)smFrames : 1.0;
         LOGI("re-projection summary (head smoothing %s, symmetric fov %s): %llu frames | correction mean %.2f deg, max %.2f deg | edge guard limited the "
@@ -874,11 +952,12 @@ bool Recorder::Impl::Init() {
              dome.eyeW, dome.eyeH, dome.frameW, dome.frameH,
              s.dome.projection == DomeProjection::Vr180 ? "left | right, lon +-90 x lat +-90 each"
                                                         : "left on top / right below, lon +-180 x lat +-90 each");
-        LOGI("recorder: dome %s: fill %s, fill_fade_s %.1f%s, window_feather_deg %.1f, dome_forward start (world-locked to the "
-             "projection space, yaw of the first frame with a pose) -- symmetric_fov, head_smoothing, head_follow_deg, roll_lock, "
-             "output_fov_scale and edge_guard are ignored in dome mode",
+        LOGI("recorder: dome %s: fill %s, fill_fade_s %.1f%s, window_feather_deg %.1f, dome_shared_view %d%s, dome_forward start "
+             "(world-locked to the projection space, yaw of the first frame with a pose) -- symmetric_fov, head_smoothing, "
+             "head_follow_deg, roll_lock, output_fov_scale and edge_guard are ignored in dome mode",
              pn, s.dome.fill == DomeFill::LastSeen ? "last_seen" : "black", s.dome.fadeS, s.dome.fadeS > 0 ? "" : " (never fade)",
-             s.dome.featherDeg);
+             s.dome.featherDeg, s.dome.sharedView ? 1 : 0,
+             s.dome.sharedView ? " (each eye paints only where the other eye also sees)" : " (each eye paints its full fov)");
     } else if (sym.valid) {
         const double D = 180.0 / 3.14159265358979323846;
         const float* fl = s.startFov[0];
@@ -1059,6 +1138,12 @@ bool Recorder::Impl::FitOutputSize() {
         scaleTo(codecMax, codecMax);
     }
     outW &= ~1u; outH &= ~1u;
+    {
+        const UINT w0 = outW, h0 = outH;
+        if (VideoCodecFitArea(outW, outH))
+            LOGI("recorder: %ux%u is larger than the %s standard allows (8192 x 4352 pixels, level 6.2) -- scaled to %ux%u so "
+                 "every player and decoder accepts the file", w0, h0, VideoCodecName(codec), outW, outH);
+    }
     if (outW < 64 || outH < 64) { SetMessage("frame too small"); return false; }
     return true;
 }
@@ -1322,6 +1407,7 @@ bool Recorder::Impl::InitReprojection(DXGI_FORMAT vpFmt) {
     if (dome.valid) {
         double domeMb = 0;
         if (domeLastSeen && !InitDomeTextures(vpFmt, domeMb)) return false;
+        InitSeen();   // failure is logged; the dome works without the mask
         LOGI("recorder: dome pass on the encoder device: %ux%u -> %ux%u, %s -> %s, +%.0f MB VRAM (output %.0f MB%s)", W, H,
              vpW, vpH, srgb ? "ring" : "linear pre-pass output", DxgiFormatName(vpFmt), outMb + domeMb, outMb,
              domeLastSeen ? (std::string(" + last_seen dome colour x2 / time x2 ") + std::to_string((int)std::lround(domeMb)) + " MB").c_str()
@@ -1355,6 +1441,51 @@ bool Recorder::Impl::InitDomeTextures(DXGI_FORMAT vpFmt, double& mb) {
     return true;
 }
 
+// The lens mask textures + pass (kSeenPs), created with the dome pass.
+bool Recorder::Impl::InitSeen() {
+    ComPtr<ID3DBlob> code, errs;
+    const std::string res = std::to_string(kSeenRes);
+    const D3D_SHADER_MACRO defs[] = {{"SEEN_RES", res.c_str()}, {nullptr, nullptr}};
+    HRESULT hr = D3DCompile(kSeenPs, sizeof(kSeenPs) - 1, "seen_ps", defs, nullptr, "main", "ps_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0,
+                            &code, &errs);
+    if (SUCCEEDED(hr)) hr = enc->CreatePixelShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, &seenPs);
+    D3D11_TEXTURE2D_DESC d{};
+    d.Width = 2 * kSeenRes; d.Height = kSeenRes; d.MipLevels = 1; d.ArraySize = 1; d.Format = DXGI_FORMAT_R8_UNORM;
+    d.SampleDesc.Count = 1; d.Usage = D3D11_USAGE_DEFAULT; d.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    for (int i = 0; SUCCEEDED(hr) && i < 2; ++i) {
+        hr = enc->CreateTexture2D(&d, nullptr, &seenTex[i]);
+        if (SUCCEEDED(hr)) hr = enc->CreateRenderTargetView(seenTex[i].Get(), nullptr, &seenRtv[i]);
+        if (SUCCEEDED(hr)) hr = enc->CreateShaderResourceView(seenTex[i].Get(), nullptr, &seenSrv[i]);
+    }
+    d.Usage = D3D11_USAGE_STAGING; d.BindFlags = 0; d.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    if (SUCCEEDED(hr)) hr = enc->CreateTexture2D(&d, nullptr, &seenStage);
+    if (FAILED(hr)) {
+        LOGW("recorder: lens mask pass setup failed hr=0x%08lx %s -- the game's black lens corners are painted into the dome",
+             (unsigned long)hr, errs ? (const char*)errs->GetBufferPointer() : "");
+        seenPs.Reset();
+        return false;
+    }
+    return true;
+}
+
+// Share of never-seen texels per eye (worker thread, device lock held; one small read-back).
+void Recorder::Impl::SeenMeasure() {
+    encCtx->CopyResource(seenStage.Get(), seenTex[seenCur].Get());
+    D3D11_MAPPED_SUBRESOURCE ms{};
+    if (FAILED(encCtx->Map(seenStage.Get(), 0, D3D11_MAP_READ, 0, &ms))) return;
+    uint64_t masked[2] = {0, 0};
+    for (UINT y = 0; y < kSeenRes; ++y) {
+        const uint8_t* row = (const uint8_t*)ms.pData + (size_t)y * ms.RowPitch;
+        for (UINT x = 0; x < 2 * kSeenRes; ++x) if (row[x] < 128) ++masked[x >= kSeenRes ? 1 : 0];
+    }
+    encCtx->Unmap(seenStage.Get(), 0);
+    for (int e = 0; e < 2; ++e) seenMasked[e] = 100.0 * (double)masked[e] / ((double)kSeenRes * kSeenRes);
+    if (!seenMeasured)
+        LOGI("recorder: lens mask after %llu frames: left %.1f%%, right %.1f%% of the eye never showed picture (not painted into "
+             "the dome)", (unsigned long long)seenFrames, seenMasked[0], seenMasked[1]);
+    seenMeasured = true;
+}
+
 // Dome constants for one frame (worker thread). D is fixed at the first frame with a usable pose; frames without one
 // paint nothing (the dome is shown as it is, fading).
 void Recorder::Impl::DomeConstantsFor(const Item& it, DomeConstants& dc) {
@@ -1385,10 +1516,23 @@ void Recorder::Impl::DomeConstantsFor(const Item& it, DomeConstants& dc) {
             DomeEyeMatrix(domeFrame.D, q[e], m);
             for (int c = 0; c < 3; ++c) { de.r0[c] = (float)m[c]; de.r1[c] = (float)m[3 + c]; de.r2[c] = (float)m[6 + c]; }
             de.r0[3] = 1.0f;   // paint
-            for (int i = 0; i < 4; ++i) de.srcTan[i] = (float)std::tan((double)ie.fov[i]);
+            for (int i = 0; i < 4; ++i) de.srcTan[i] = de.clip[i] = (float)std::tan((double)ie.fov[i]);
+            const ItemEye& io = it.eye[1 - e];
+            if (s.dome.sharedView && io.valid) {
+                const bool shared = DomeSharedTans(q[e], ie.fov, q[1 - e], io.fov, de.clip);
+                if (!domeSharedLogged[e]) {
+                    domeSharedLogged[e] = true;
+                    const double D = 180.0 / 3.14159265358979323846;
+                    LOGI("recorder: dome_shared_view, %s eye: fov L %.1f R %.1f U %.1f D %.1f deg -> painted L %.1f R %.1f U %.1f "
+                         "D %.1f deg%s", e ? "right" : "left", ie.fov[0] * D, ie.fov[1] * D, ie.fov[2] * D, ie.fov[3] * D,
+                         std::atan(de.clip[0]) * D, std::atan(de.clip[1]) * D, std::atan(de.clip[2]) * D, std::atan(de.clip[3]) * D,
+                         shared ? "" : " (no overlap with the other eye: full fov)");
+                }
+            }
         } else {
             de.r0[0] = de.r1[1] = de.r2[2] = 1.0f;   // not painted (r0.w = 0)
-            de.srcTan[0] = -1.0f; de.srcTan[1] = 1.0f; de.srcTan[2] = 1.0f; de.srcTan[3] = -1.0f;
+            de.srcTan[0] = de.clip[0] = -1.0f; de.srcTan[1] = de.clip[1] = 1.0f;
+            de.srcTan[2] = de.clip[2] = 1.0f; de.srcTan[3] = de.clip[3] = -1.0f;
         }
         de.src[0] = (float)ie.x0; de.src[1] = 0.0f;
         de.src[2] = (float)std::max<UINT>(1, ie.w); de.src[3] = (float)std::max<UINT>(1, ie.h);
@@ -1742,11 +1886,16 @@ void Recorder::Impl::Process(const Item& it) {
             const ItemEye& ie = it.eye[e];
             re.src[0] = (float)ie.x0; re.src[1] = 0.0f;
             re.src[2] = (float)std::max<UINT>(1, ie.w); re.src[3] = (float)std::max<UINT>(1, ie.h);
+            const bool fill = s.eyeSizeVaries && !sym.valid && !yt;   // raw layout: the eye's rect -> its whole area
+            if (fill && !s.head.Enabled()) ReprojIdentityMapping(re);
             if (yt) {   // YouTube layout: eye 0 left / top, eye 1 right / below (swap_eyes swapped the views before SubmitFrame);
                         // dst = the picture (4:3pad: vw wide at +vx, the bars around it black; else the eye's whole area)
                 re.dst[0] = (float)((ytTb ? 0 : e * ytFit.sw) + ytFit.vx); re.dst[1] = (float)(ytTb ? e * ytFit.sh : 0);
                 re.dst[2] = (float)ytFit.vw; re.dst[3] = (float)ytFit.sh;
             } else if (sym.valid) {
+                re.dst[0] = (float)(e == 0 ? 0 : rpEyeW[0]); re.dst[1] = 0.0f;
+                re.dst[2] = (float)rpEyeW[e]; re.dst[3] = (float)vpH;
+            } else if (fill) {
                 re.dst[0] = (float)(e == 0 ? 0 : rpEyeW[0]); re.dst[1] = 0.0f;
                 re.dst[2] = (float)rpEyeW[e]; re.dst[3] = (float)vpH;
             } else if (rpScaled) {   // raw layout, scaled: the source rectangle mapped into this eye's output rectangle
@@ -1835,6 +1984,26 @@ void Recorder::Impl::Process(const Item& it) {
     }
     if (stage && dome.valid) {
         const int64_t c0 = QpcNow100ns();
+        if (seenPs) {   // the lens mask: this frame's lit eye texels join the ever-seen ones (before the dome reads them)
+            if (seenClear) {
+                const float zero[4] = {0, 0, 0, 0};
+                encCtx->ClearRenderTargetView(seenRtv[0].Get(), zero);
+                encCtx->ClearRenderTargetView(seenRtv[1].Get(), zero);
+                seenClear = false;
+            }
+            D3D11_MAPPED_SUBRESOURCE ms{};
+            if (SUCCEEDED(encCtx->Map(rpCb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &ms))) {
+                memcpy(ms.pData, &dc, sizeof(dc));
+                encCtx->Unmap(rpCb.Get(), 0);
+            }
+            const int sn = seenCur ^ 1;
+            ID3D11ShaderResourceView* ss[2] = {rpSrc, seenSrv[seenCur].Get()};
+            ID3D11RenderTargetView* sr = seenRtv[sn].Get();
+            ReprojDraw(encCtx.Get(), rpVs.Get(), seenPs.Get(), rpCb.Get(), rpSmp.Get(), ss, 2, &sr, 1, 2 * kSeenRes, kSeenRes);
+            seenCur = sn;
+            if (++seenFrames == 150 || seenFrames % 3600 == 0) SeenMeasure();
+        }
+        dc.mask[0] = seenPs ? 1.0f : 0.0f;
         if (domeLastSeen) {
             if (domeClear) {   // record start: black dome, never painted
                 const float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
@@ -1844,13 +2013,14 @@ void Recorder::Impl::Process(const Item& it) {
                 domeClear = false;
             }
             const int nx = domeCur ^ 1;
-            ID3D11ShaderResourceView* srvs[3] = {rpSrc, domeSrv[domeCur].Get(), domeTimeSrv[domeCur].Get()};
+            ID3D11ShaderResourceView* srvs[4] = {rpSrc, domeSrv[domeCur].Get(), domeTimeSrv[domeCur].Get(), seenSrv[seenCur].Get()};
             ID3D11RenderTargetView* rtvs[3] = {rpRtv.Get(), domeRtv[nx].Get(), domeTimeRtv[nx].Get()};
-            Reproject(srvs, 3, rtvs, 3, &dc, sizeof(dc));
+            Reproject(srvs, 4, rtvs, 3, &dc, sizeof(dc));
             domeCur = nx;
         } else {
+            ID3D11ShaderResourceView* srvs[4] = {rpSrc, nullptr, nullptr, seenSrv[seenCur].Get()};
             ID3D11RenderTargetView* rtv = rpRtv.Get();
-            Reproject(&rpSrc, 1, &rtv, 1, &dc, sizeof(dc));
+            Reproject(srvs, 4, &rtv, 1, &dc, sizeof(dc));
         }
         view = rpView.Get();
         cpuTicks += QpcNow100ns() - c0;
@@ -2025,7 +2195,9 @@ void Recorder::Impl::Cleanup() {
     rpCb.Reset(); rpSmp.Reset(); rpVs.Reset(); rpPs.Reset();
     for (int i = 0; i < 2; ++i) {
         domeTex[i].Reset(); domeTimeTex[i].Reset(); domeRtv[i].Reset(); domeTimeRtv[i].Reset(); domeSrv[i].Reset(); domeTimeSrv[i].Reset();
+        seenTex[i].Reset(); seenRtv[i].Reset(); seenSrv[i].Reset();
     }
+    seenStage.Reset(); seenPs.Reset();
     outViews.clear();
     nv12.clear();
     poolCb.clear();

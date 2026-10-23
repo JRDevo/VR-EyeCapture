@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(openxr_eye_capture VERSION 0.5.0 LANGUAGES C CXX)
+project(openxr_eye_capture VERSION 0.5.1 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -206,6 +206,14 @@ target_link_libraries(EyeCaptureMirror PRIVATE eye_capture_core advapi32)
 eye_add_version_info(EyeCaptureMirror APP "VR EyeCapture SteamVR mirror recorder" "EyeCaptureMirror.exe")
 target_link_options(EyeCaptureMirror PRIVATE "/MANIFESTUAC:level='asInvoker' uiAccess='false'")
 
+# --- SteamVR controller hotkey: EyeCaptureVrInput.exe (src/openvr/vrinput_main.cpp), a SteamVR overlay application with its
+# own action manifest (src/openvr/vrinput.cpp). The tray starts it while a SteamVR game recorded by VR EyeCapture runs.
+add_executable(EyeCaptureVrInput WIN32 src/openvr/vrinput_main.cpp src/openvr/vrinput.cpp src/openvr/openvr_hooks.cpp)
+target_compile_options(EyeCaptureVrInput PRIVATE ${EYE_WARN_FLAGS})
+target_link_libraries(EyeCaptureVrInput PRIVATE eye_capture_core advapi32)
+eye_add_version_info(EyeCaptureVrInput APP "VR EyeCapture SteamVR controller hotkey" "EyeCaptureVrInput.exe")
+target_link_options(EyeCaptureVrInput PRIVATE "/MANIFESTUAC:level='asInvoker' uiAccess='false'")
+
 # --- tray control app (required: the layer is dormant without it; it also registers the layer, tray/install.cpp) ---
 # tray/steamvr_ui.cpp + tray/steamvr_games.cpp: the "SteamVR games" window (enable / disable the per-game proxy);
 # src/openvr/openvr_hooks.cpp for the sidecar text and the home-key names.
@@ -325,7 +333,7 @@ if (EYE_BUILD_TESTS)
 
     # SteamVR proxy helpers (src/openvr/openvr_hooks.cpp): versions, slot table, vtable patch, FnTable copy, matrices,
     # fov, bounds, colour space, home discovery (CPU only).
-    add_executable(openvr_hook_test tests/openvr_hook_test.cpp src/openvr/openvr_hooks.cpp)
+    add_executable(openvr_hook_test tests/openvr_hook_test.cpp src/openvr/openvr_hooks.cpp src/openvr/vrinput.cpp src/vr_hotkey.cpp)
     target_compile_options(openvr_hook_test PRIVATE ${EYE_WARN_FLAGS})
     target_compile_definitions(openvr_hook_test PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
         EYE_TEST_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures")   # tests/fixtures/openvr/openvrpaths*.vrpath

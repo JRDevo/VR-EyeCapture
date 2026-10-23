@@ -151,6 +151,33 @@ int main() {
         }
         RemoveDirectoryW(dir.c_str());
     }
+    {   // ATS / ETS2 suggest only khr/simple_controller: its bindings translated onto the real profiles
+        const std::string touch = "/interaction_profiles/oculus/touch_controller", index = "/interaction_profiles/valve/index_controller";
+        const std::string vive = "/interaction_profiles/htc/vive_controller";
+        std::string o;
+        Check(VrTranslateSimpleBinding(touch, "/user/hand/right/input/select/click", o) && o == "/user/hand/right/input/trigger/value",
+              "simple select -> touch trigger/value");
+        Check(VrTranslateSimpleBinding(index, "/user/hand/left/input/select/click", o) && o == "/user/hand/left/input/trigger/click",
+              "simple select -> index trigger/click");
+        Check(VrTranslateSimpleBinding(touch, "/user/hand/left/input/menu/click", o) && o == "/user/hand/left/input/menu/click",
+              "simple left menu -> touch left menu");
+        Check(!VrTranslateSimpleBinding(touch, "/user/hand/right/input/menu/click", o), "simple right menu: none on touch (system button)");
+        Check(VrTranslateSimpleBinding(index, "/user/hand/right/input/menu/click", o) && o == "/user/hand/right/input/b/click",
+              "simple menu -> index b");
+        Check(VrTranslateSimpleBinding(vive, "/user/hand/right/input/menu/click", o) && o == "/user/hand/right/input/menu/click",
+              "simple right menu -> vive menu");
+        Check(VrTranslateSimpleBinding(touch, "/user/hand/left/input/aim/pose", o) && o == "/user/hand/left/input/aim/pose" &&
+              VrTranslateSimpleBinding(touch, "/user/hand/right/output/haptic", o) && o == "/user/hand/right/output/haptic",
+              "aim pose / haptic unchanged");
+        Check(!VrTranslateSimpleBinding(touch, "/user/head/input/system/click", o), "a non-hand path is left out");
+        bool all = true;   // every target is a known profile with thumbsticks (so the default combination works there)
+        for (const char* t : VrSimpleTranslationTargets()) {
+            std::string p;
+            all = all && VrButtonPath(t, {VrHand::Left, VrButton::Thumbstick}, p) && VrButtonPath(t, {VrHand::Right, VrButton::Thumbstick}, p);
+        }
+        Check(all, "every translation target has both thumbsticks");
+    }
+
     printf("=== vr_hotkey_test %s\n", g_fail ? "FAIL" : "PASS");
     return g_fail ? 1 : 0;
 }

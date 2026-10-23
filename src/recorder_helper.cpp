@@ -268,6 +268,7 @@ void TakeStart(LONG startSeq) {
     rs.dome.fill = (DomeFill)q.domeFill;
     rs.dome.fadeS = q.domeFadeS;
     rs.dome.featherDeg = q.domeFeatherDeg;
+    rs.dome.sharedView = q.domeSharedView != 0;
     rs.youtube = q.youtube != 0;
     rs.tag3d = q.tag3d != 0;
     rs.layout3d = (Layout3d)q.layout3d;

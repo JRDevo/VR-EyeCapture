@@ -2,11 +2,4 @@
 // scripts/make_logo.py (app_icon, tray_icons).
 1 ICON "app.ico"
 
-// Tray-area icons, one per state (tray.cpp kIco*: resource 101 + value); recording / converting alternate A and B.
-101 ICON "icons/tray_nogame.ico"
-102 ICON "icons/tray_ready.ico"
-103 ICON "icons/tray_rec_a.ico"
-104 ICON "icons/tray_rec_b.ico"
-105 ICON "icons/tray_busy.ico"
-106 ICON "icons/tray_conv_a.ico"
-107 ICON "icons/tray_conv_b.ico"
+// The tray area shows icon 1 too (one fixed icon, no state icons: tray.cpp g_trayIcon).

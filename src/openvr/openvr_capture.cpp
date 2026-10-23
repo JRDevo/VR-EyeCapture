@@ -5,6 +5,7 @@
 #include <d3d12.h>
 #include <dxgi1_4.h>
 #include <shlobj.h>
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstdio>
@@ -95,7 +96,20 @@ struct OvrState {
     PendingEye pend[2];
     // the pose of the pair being assembled: snapshot of the newest WaitGetPoses pose when its FIRST eye arrived
     WaitPose  pairPose;
-    bool      loggedPoseRace = false;
+    // the largest eye rect of this VR session per output side (after swap_eyes): a recording starts at this size, so a
+    // dynamic-resolution game (Half-Life: Alyx) is not cut when its eyes grow again (Recorder::SubmitFrame cuts larger eyes)
+    uint32_t  maxEyeW[2] = {0, 0}, maxEyeH[2] = {0, 0};
+    bool      dynRes = false;   // the eye size changed at least once in this VR session
+    bool      loggedPoseRace = false, loggedBadSubmitPose = false;
+    // pose check of the running recording (GitHub issue #2: picture skewed on head movement), logged at its start and end:
+    // one debug log of a game tells which head pose it renders with
+    struct PoseCheck {
+        bool     recording = false, haveLast = false;
+        uint64_t pairs = 0, submitPose = 0, waitPose = 0, noPose = 0, badSubmit = 0, otherThread = 0, waitsMulti = 0,
+                 waitsNone = 0, both = 0, lastWaitSeq = 0;
+        double   diffSum = 0, diffMax = 0, stepSum = 0, stepMax = 0, badErrMax = 0;
+        vr::HmdMatrix34_t lastHead{};
+    } pc;
     // counters / log-once flags
     uint64_t submits[2] = {0, 0}, pairs = 0, replaced = 0, submitErrors = 0;
     PeriodEstimator period;
@@ -128,6 +142,7 @@ VtablePatchTable& g_patches = *new VtablePatchTable;
 std::mutex& g_poseLock = *new std::mutex;   // guards g_wait (never taken together with g_lock held by WaitGetPoses)
 WaitPose g_wait[2];
 std::atomic<uint64_t> g_waitCalls{0};
+std::atomic<DWORD>    g_waitThread{0};   // the thread of the newest WaitGetPoses (pose check)
 
 // The newest WaitGetPoses pose (any thread).
 WaitPose LatestWaitPose() {
@@ -233,14 +248,24 @@ void LogLayout(const EyeView& L, const EyeView& R, bool srgb, const char* poseFr
 }
 
 // Under g_lock: the eye's head pose (per steamvr_pose_source) + eye-to-head + projection -> EyeView pose / fov.
+// auto: the game's own Submit pose (Submit_TextureWithPose) when it is a rotation, else the WaitGetPoses render pose.
 void FillPose(EyeView& e, int eye, const PendingEye& p, const char** from) {
     e.hasPose = false;
     const vr::HmdMatrix34_t* head = nullptr;
     const SteamVrPoseSource ps = g.cfg.steamvr.poseSource;
-    if (p.hasSubmitPose && ps != SteamVrPoseSource::WaitGetPoses) { head = &p.submitPose; *from = "Submit (TextureWithPose)"; }
-    else if (g.pairPose.valid && ps != SteamVrPoseSource::Submit) { head = &g.pairPose.m; *from = "WaitGetPoses render pose"; }
-    else *from = "none (raw eyes)";
-    if (!head) return;
+    if (p.hasSubmitPose && ps != SteamVrPoseSource::WaitGetPoses) {
+        const double err = MatrixRotationError(p.submitPose);
+        if (err <= kMaxRotationError || ps == SteamVrPoseSource::Submit) {
+            head = &p.submitPose;
+            *from = "Submit (TextureWithPose)";
+        } else if (!g.loggedBadSubmitPose) {
+            g.loggedBadSubmitPose = true;
+            LOGW("steamvr: the game's Submit pose is not a rotation (error %.3f: scaled, sheared or mirrored) -- %s (logged once)",
+                 err, g.pairPose.valid ? "the WaitGetPoses render pose is used" : "no pose");
+        }
+    }
+    if (!head && g.pairPose.valid && ps != SteamVrPoseSource::Submit) { head = &g.pairPose.m; *from = "WaitGetPoses render pose"; }
+    if (!head) { *from = "none (raw eyes)"; return; }
     EnsureSystem();
     if (!g.sys) { *from = "none (no IVRSystem)"; return; }
     const vr::HmdMatrix34_t e2h = SysGetEyeToHead(g.sys, *g.sysVer, (vr::EVREye)eye);
@@ -252,7 +277,104 @@ void FillPose(EyeView& e, int eye, const PendingEye& p, const char** from) {
     e.hasPose = true;
 }
 
-void StartRecording(const EyeView& L, const EyeView& R, bool srgb) {
+// Under g_lock: the end line of the pose check (the recording stopped, or VR shuts down while recording).
+void PoseCheckEnd() {
+    auto& c = g.pc;
+    if (c.recording && c.pairs) {
+        LOGI("steamvr: pose check end (%llu pairs): pose from Submit %llu, WaitGetPoses %llu, none %llu, bad Submit pose %llu "
+             "(max rot err %.3f) | Submit vs WaitGetPoses pose: %llu pairs, mean %.2f max %.2f deg | head turn per pair mean "
+             "%.2f max %.2f deg | WaitGetPoses on another thread than Submit %llu, 0 calls since the last pair %llu, 2+ calls %llu",
+             (unsigned long long)c.pairs, (unsigned long long)c.submitPose, (unsigned long long)c.waitPose,
+             (unsigned long long)c.noPose, (unsigned long long)c.badSubmit, c.badErrMax, (unsigned long long)c.both,
+             c.both ? c.diffSum / (double)c.both : 0.0, c.diffMax, c.pairs > 1 ? c.stepSum / (double)(c.pairs - 1) : 0.0,
+             c.stepMax, (unsigned long long)c.otherThread, (unsigned long long)c.waitsNone, (unsigned long long)c.waitsMulti);
+    }
+    c.recording = false;
+}
+
+// Under g_lock, once per pair: the pose check of the running recording (OvrState::PoseCheck). Start: what the game sends
+// (Submit pose, eye-to-head, projection, eye rects); end: Submit vs WaitGetPoses pose, head turn per pair, threads and
+// WaitGetPoses calls per pair (a game that renders one frame ahead of its WaitGetPoses shows 0 / 2+ calls or another thread).
+void PoseCheckPair(const char* poseFrom, const EyeView eyes[2]) {
+    auto& c = g.pc;
+    const bool rec = g.rec && g.rec->State() == RecState::Recording;
+    if (rec && !c.recording) {
+        c = OvrState::PoseCheck();
+        c.recording = true;
+        c.lastWaitSeq = g.pend[0].waitSeq;
+        float pl[4] = {}, pr[4] = {};
+        vr::HmdMatrix34_t el{}, er{};
+        if (g.sys) {
+            SysGetProjectionRaw(g.sys, *g.sysVer, vr::Eye_Left, &pl[0], &pl[1], &pl[2], &pl[3]);
+            SysGetProjectionRaw(g.sys, *g.sysVer, vr::Eye_Right, &pr[0], &pr[1], &pr[2], &pr[3]);
+            el = SysGetEyeToHead(g.sys, *g.sysVer, vr::Eye_Left);
+            er = SysGetEyeToHead(g.sys, *g.sysVer, vr::Eye_Right);
+        }
+        LOGI("steamvr: pose check start: pose %s (steamvr_pose_source = %s) | Submit pose %s | eye-to-head L (%.4f %.4f %.4f) "
+             "rot err %.4f, R (%.4f %.4f %.4f) rot err %.4f, angle L-R %.2f deg | projection raw L (%.3f %.3f %.3f %.3f) "
+             "R (%.3f %.3f %.3f %.3f) | eye rects L %ux%u+%d+%d R %ux%u+%d+%d",
+             poseFrom, SteamVrPoseSourceKey(g.cfg.steamvr.poseSource), g.pend[0].hasSubmitPose ? "sent" : "not sent",
+             el.m[0][3], el.m[1][3], el.m[2][3], MatrixRotationError(el), er.m[0][3], er.m[1][3], er.m[2][3],
+             MatrixRotationError(er), MatrixAngleDeg(el, er), pl[0], pl[1], pl[2], pl[3], pr[0], pr[1], pr[2], pr[3],
+             eyes[0].w, eyes[0].h, eyes[0].x, eyes[0].y, eyes[1].w, eyes[1].h, eyes[1].x, eyes[1].y);
+    }
+    if (!rec) {
+        PoseCheckEnd();
+        return;
+    }
+    ++c.pairs;
+    if (!eyes[0].hasPose) ++c.noPose;
+    else if (strncmp(poseFrom, "Submit", 6) == 0) ++c.submitPose;
+    else ++c.waitPose;
+    const PendingEye& p = g.pend[0];
+    if (p.hasSubmitPose) {
+        const double err = MatrixRotationError(p.submitPose);
+        if (err > kMaxRotationError) {
+            ++c.badSubmit;
+            c.badErrMax = (std::max)(c.badErrMax, std::isfinite(err) ? err : 99.0);
+        } else if (g.pairPose.valid) {
+            const double d = MatrixAngleDeg(p.submitPose, g.pairPose.m);
+            ++c.both;
+            c.diffSum += d;
+            c.diffMax = (std::max)(c.diffMax, d);
+        }
+    }
+    const vr::HmdMatrix34_t* head = p.hasSubmitPose ? &p.submitPose : g.pairPose.valid ? &g.pairPose.m : nullptr;
+    if (head) {
+        if (c.haveLast) {
+            const double d = MatrixAngleDeg(c.lastHead, *head);
+            c.stepSum += d;
+            c.stepMax = (std::max)(c.stepMax, d);
+        }
+        c.lastHead = *head;
+        c.haveLast = true;
+    }
+    const DWORD wt = g_waitThread.load();
+    if (wt && wt != GetCurrentThreadId()) ++c.otherThread;
+    const uint64_t calls = p.waitSeq - c.lastWaitSeq;
+    if (c.pairs > 1) {
+        if (calls == 0) ++c.waitsNone;
+        else if (calls >= 2) ++c.waitsMulti;
+    }
+    c.lastWaitSeq = p.waitSeq;
+}
+
+void StartRecording(const EyeView& L0, const EyeView& R0, bool srgb) {
+    // The recording's eye size: the largest eyes seen so far (same fov: the rect scales, the view does not); for a game
+    // whose eye size changes, the largest its texture allows (one wide texture: half of it; a texture per eye: all of it),
+    // so a later, larger eye is never cut.
+    EyeView L = L0, R = R0;
+    L.w = (std::max)(L.w, g.maxEyeW[0]); L.h = (std::max)(L.h, g.maxEyeH[0]);
+    R.w = (std::max)(R.w, g.maxEyeW[1]); R.h = (std::max)(R.h, g.maxEyeH[1]);
+    if (g.dynRes) {
+        const bool oneTex = L.swapchainKey == R.swapchainKey && L.arrayIndex == R.arrayIndex;
+        for (EyeView* v : {&L, &R}) {
+            const uint32_t capW = oneTex ? v->sc->width / 2 : v->sc->width, capH = v->sc->height;
+            if (capW >= v->w && capH >= v->h) { v->w = capW; v->h = capH; }   // Alyx: both eyes packed from the left
+        }
+        LOGI("record: the game changes its eye size -- recording at %ux%u + %ux%u (the largest its texture allows); the "
+             "re-projection scales every eye to that size", L.w, L.h, R.w, R.h);
+    }
     const DXGI_FORMAT stage = StageFormatForDxgi((DXGI_FORMAT)L.sc->format);
     const DXGI_FORMAT stageR = StageFormatForDxgi((DXGI_FORMAT)R.sc->format);
     if (stage == DXGI_FORMAT_UNKNOWN || stageR == DXGI_FORMAT_UNKNOWN) {
@@ -274,6 +396,7 @@ void StartRecording(const EyeView& L, const EyeView& R, bool srgb) {
     RecorderSettings rs;
     rs.path = g.cfg.outputDir + L"\\" + name;
     FillRecorderSettings(g.cfg, L, R, fps, rs);
+    rs.eyeSizeVaries = g.dynRes;
     const UINT W = L.w + R.w, H = L.h > R.h ? L.h : R.h;
     LOGI("record: start %s | %s | %ux%u SBS (eyes %ux%u + %ux%u) | %u fps from %s (display %.1f Hz, measured %.2f) | %s",
          Narrow(rs.path).c_str(), ApiLabel(), W, H, L.w, L.h, R.w, R.h, fps, fpsFrom, g.displayHz,
@@ -318,8 +441,18 @@ void CapturePair() {
     }
     if (g.cfg.swapEyes) std::swap(eyes[0], eyes[1]);   // swap_eyes = 1: right eye goes into the left half
     LogLayout(eyes[0], eyes[1], srgb, poseFrom);
+    for (int e = 0; e < 2; ++e) {
+        if ((g.maxEyeW[e] && (eyes[e].w != g.maxEyeW[e] || eyes[e].h != g.maxEyeH[e])) && !g.dynRes) {
+            g.dynRes = true;
+            LOGI("steamvr: the eye size changes (%ux%u -> %ux%u: dynamic resolution) -- recordings are made at the largest size "
+                 "its texture allows; the re-projection scales every eye to it (logged once)", g.maxEyeW[e], g.maxEyeH[e], eyes[e].w, eyes[e].h);
+        }
+        g.maxEyeW[e] = (std::max)(g.maxEyeW[e], eyes[e].w);
+        g.maxEyeH[e] = (std::max)(g.maxEyeH[e], eyes[e].h);
+    }
     const RecState rs = g.rec->State();
     if (wantStart && rs != RecState::Starting && rs != RecState::Recording) StartRecording(eyes[0], eyes[1], srgb);
+    PoseCheckPair(poseFrom, eyes);
     const int64_t ts = QpcNow100ns();
     if (g.rec->State() == RecState::Recording) g.rec->SubmitFrame(ts, eyes[0], eyes[1], 0, nullptr);
     if (g.live) {
@@ -728,6 +861,7 @@ void OnWaitGetPoses(const vr::TrackedDevicePose_t* render, uint32_t n, vr::EVRCo
     }
     g_wait[w.seq % 2] = w;
     g_waitCalls.store(w.seq);
+    g_waitThread.store(GetCurrentThreadId());
 }
 
 // ------------------------------------------------------------------------------------------------ hooks (C++ vtables)
@@ -1064,6 +1198,7 @@ void OvrOnShutdown() {
         g.armed = false;
         g.srcFailed = false;
         g_startRequested = false;
+        PoseCheckEnd();
         LOGI("steamvr: VR_ShutdownInternal after %llu frame pairs (Submits L %llu R %llu, replaced %llu, runtime errors %llu, "
              "WaitGetPoses %llu)", (unsigned long long)g.pairs, (unsigned long long)g.submits[0], (unsigned long long)g.submits[1],
              (unsigned long long)g.replaced, (unsigned long long)g.submitErrors, (unsigned long long)g_waitCalls.load());

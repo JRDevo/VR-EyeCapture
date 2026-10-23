@@ -47,6 +47,15 @@ bool VrButtonPath(const std::string& profile, const VrButtonRef& b, std::string&
 // ("/user/hand/left/input/thumbstick" with or without "/click", "/value", ...). Used for the action set priority.
 bool VrSameInput(const std::string& appPath, const std::string& ourPath);
 
+// A game that suggests ONLY khr/simple_controller (American Truck Simulator / Euro Truck Simulator 2) gives the runtime no
+// profile with thumbsticks. The layer then also suggests these real controller profiles with the game's own bindings
+// translated (the runtime picks the real one, the game keeps its buttons) plus the hotkey's buttons.
+const std::vector<const char*>& VrSimpleTranslationTargets();
+// The game's khr/simple_controller binding `simplePath` on `targetProfile`: select -> the trigger, menu -> the menu
+// button (b on Index; left hand only where the right "menu" is the system button), grip / aim pose and haptic unchanged.
+// false = no equivalent (the binding is left out on that profile).
+bool VrTranslateSimpleBinding(const std::string& targetProfile, const std::string& simplePath, std::string& out);
+
 // Hold detector: Update() once per evaluated input frame; returns true once when every button has been held
 // together for holdS seconds; it re-arms only after a button was released.
 class VrHoldTracker {

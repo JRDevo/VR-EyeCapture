@@ -165,15 +165,42 @@ bool VrInput::PrepareLocked(const std::vector<XrActionSet>& appSets) {
     }
     // ---- suggestions: every profile the game suggested (merged), or all of ours when it suggested none
     std::vector<std::string> profiles;
+    std::map<std::string, std::vector<XrActionSuggestedBinding>> base;   // the game's bindings per profile: its own or translated
+    std::map<std::string, bool> translated;
     const bool appHas = !appSuggest_.empty();
     if (appHas) {
+        const char* const kSimple = "/interaction_profiles/khr/simple_controller";
+        const std::vector<XrActionSuggestedBinding>* simple = nullptr;
+        bool onlySimple = true;
         for (const auto& kv : appSuggest_) {
             const std::string p = PathString(kv.first);
+            if (p == kSimple) simple = &kv.second; else onlySimple = false;
             bool known = false;
             for (const char* k : VrKnownProfiles()) known = known || p == k;
-            if (known) profiles.push_back(p);
+            if (known) { profiles.push_back(p); base[p] = kv.second; }
             else LOGI("vr hotkey: profile %s (suggested by the game) is not one the layer knows -- no controller hotkey on it",
                       p.c_str());
+        }
+        if (onlySimple && simple) {
+            // ATS / ETS2: only the simple controller (no thumbsticks). The real profiles get the game's bindings translated, so
+            // the runtime picks the real controller and the game keeps its buttons (select = trigger, menu = menu).
+            std::string names;
+            size_t dropped = 0;
+            for (const char* t : VrSimpleTranslationTargets()) {
+                std::vector<XrActionSuggestedBinding> tr;
+                for (const XrActionSuggestedBinding& sb : *simple) {
+                    std::string op;
+                    if (VrTranslateSimpleBinding(t, PathString(sb.binding), op)) tr.push_back({sb.action, Path(op)});
+                    else ++dropped;
+                }
+                profiles.push_back(t);
+                base[t] = tr;
+                translated[t] = true;
+                names += (names.empty() ? "" : ", ") + ShortProfile(t);
+            }
+            LOGI("vr hotkey: the game suggests only khr/simple_controller (%zu bindings, no thumbsticks) -- also suggesting %s "
+                 "with the game's bindings translated (select -> trigger, menu -> menu; %zu without an equivalent left out), so "
+                 "the runtime can use the real controller and the game keeps its buttons", simple->size(), names.c_str(), dropped);
         }
     } else {
         for (const char* k : VrKnownProfiles()) profiles.push_back(k);
@@ -200,8 +227,10 @@ bool VrInput::PrepareLocked(const std::vector<XrActionSet>& appSets) {
         const XrPath pp = Path(prof);
         auto it = appSuggest_.find(pp);
         std::vector<XrActionSuggestedBinding> all;
-        if (it != appSuggest_.end()) all = it->second;
+        auto bit = base.find(prof);
+        if (bit != base.end()) all = bit->second;
         const size_t nApp = all.size();
+        const bool isTr = translated.count(prof) != 0;
         all.insert(all.end(), ours.begin(), ours.end());
         XrInteractionProfileSuggestedBinding sb{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
         sb.interactionProfile = pp;
@@ -212,7 +241,8 @@ bool VrInput::PrepareLocked(const std::vector<XrActionSet>& appSets) {
             ++ok;
             LOGI("vr hotkey: binding %s on %s (%s)", paths.c_str(), ShortProfile(prof).c_str(),
                  it != appSuggest_.end() ? ("merged into the game's " + std::to_string(nApp) + " bindings of this profile").c_str()
-                                         : "the game suggests no profile: ours only");
+                 : isTr ? ("with the game's " + std::to_string(nApp) + " simple_controller bindings translated").c_str()
+                        : "the game suggests no profile: ours only");
             summary += (summary.empty() ? "" : ", ") + ShortProfile(prof);
             continue;
         }
@@ -226,7 +256,8 @@ bool VrInput::PrepareLocked(const std::vector<XrActionSet>& appSets) {
             LOGW("vr hotkey: the runtime refused our bindings on %s (%d) -- the game's own %zu bindings re-suggested (%d)",
                  ShortProfile(prof).c_str(), (int)r, it->second.size(), (int)rb);
         } else {
-            LOGD("vr hotkey: profile %s not accepted by the runtime (%d) -- skipped", ShortProfile(prof).c_str(), (int)r);
+            if (isTr) LOGI("vr hotkey: profile %s not accepted by the runtime (%d) -- skipped", ShortProfile(prof).c_str(), (int)r);
+            else LOGD("vr hotkey: profile %s not accepted by the runtime (%d) -- skipped", ShortProfile(prof).c_str(), (int)r);
         }
     }
     if (!ok) {

@@ -29,6 +29,8 @@
                         cues play ("cue start played" / "cue stop played"; audible)
       vr_app_d3d12      the same on D3D12 without a control thread (applied by the layer)
       vr_none_d3d11     an app without any input: the layer attaches + syncs its own set (XR_EYE_CAPTURE_TEST_VR_SELF_ATTACH_S)
+      vr_simple_d3d11   an app that suggests ONLY khr/simple_controller (ATS / ETS2): the layer adds the real profiles with the
+                        app's bindings translated; the runtime picks touch, the app's select (right trigger) and our sticks work
       vr_custom_d3d11   vr_hotkey = left_menu+right_a (pressed at the same times)
       vr_off_d3d11      vr_hotkey = off: no action set of ours, no recording
     Checks: one MP4 of ~2.7 s (start at ~2.0 s, stop at ~5.0 s), "-> start recording" / "-> stop recording" log lines,
@@ -482,6 +484,7 @@ $vrCases = @(
     @{ name = 'vr_app_d3d11_ipc'; api = 'd3d11'; input = 'app'; cfg = ''; ipc = $true; keys = $sticks; rec = $true },
     @{ name = 'vr_app_d3d12'; api = 'd3d12'; input = 'app'; cfg = ''; ipc = $false; keys = $sticks; rec = $true },
     @{ name = 'vr_none_d3d11'; api = 'd3d11'; input = 'none'; cfg = ''; ipc = $false; keys = $sticks; rec = $true },
+    @{ name = 'vr_simple_d3d11'; api = 'd3d11'; input = 'simple'; cfg = ''; ipc = $false; keys = $sticks; rec = $true },
     @{ name = 'vr_custom_d3d11'; api = 'd3d11'; input = 'app'; cfg = ';vr_hotkey=left_menu+right_a'; ipc = $false; keys = $menuA; rec = $true },
     @{ name = 'vr_off_d3d11'; api = 'd3d11'; input = 'app'; cfg = ';vr_hotkey=off'; ipc = $false; keys = $sticks; rec = $false })
 foreach ($vc in $(if ($OnlyOverlays) { @() } else { $vrCases })) {
@@ -505,6 +508,15 @@ foreach ($vc in $(if ($OnlyOverlays) { @() } else { $vrCases })) {
     $mm = [regex]::Match($o, 'E2E_OUTPUT=(.+)')
     $mp4s = @(Get-ChildItem $out -Filter *.mp4 -ErrorAction SilentlyContinue)
     if ($code -ne 0) { $f += "layer_e2e exit $code (an input call of the app failed?)" }
+    if ($vc.input -eq 'simple') {
+        # ATS / ETS2: only simple_controller suggested -> translated onto the real profiles (mock picks touch); the app's select
+        # (now the right trigger) still works, and the sticks start / stop
+        $ai = [regex]::Match($o, 'E2E_INPUT app_select presses (\d+) \(true on (\d+) syncs\), app_stick presses (\d+)')
+        if (-not ($ai.Success -and [int]$ai.Groups[1].Value -eq 1)) { $f += "app's select through the translated trigger: '$($ai.Value)' (want 1 press)" }
+        if ($logTxt -notmatch 'the game suggests only khr/simple_controller \(2 bindings, no thumbsticks\) -- also suggesting oculus/touch_controller') { $f += 'log: simple_controller translation' }
+        if ($logTxt -notmatch 'binding \S+ \+ \S+ on oculus/touch_controller \(with the game''s 2 simple_controller bindings translated\)') { $f += 'log: touch_controller binding with the translated game bindings' }
+        if ($o -notmatch 'input: profile /interaction_profiles/oculus/touch_controller') { $f += 'mock: the runtime picked touch_controller' }
+    }
     if ($vc.input -eq 'app') {
         $ai = [regex]::Match($o, 'E2E_INPUT app_select presses (\d+) \(true on (\d+) syncs\), app_stick presses (\d+)')
         $wantStick = if ($vc.keys -eq $sticks) { 2 } else { 0 }
@@ -519,8 +531,10 @@ foreach ($vc in $(if ($OnlyOverlays) { @() } else { $vrCases })) {
         }
         if ($logTxt -notmatch 'vr hotkey: \S+ held 1\.0 s -> start recording' -or $logTxt -notmatch 'vr hotkey: \S+ held 1\.0 s -> stop recording') { $f += 'log: -> start / -> stop recording' }
         if (-not ($hap.Success -and [int]$hap.Groups[4].Value -eq 2 -and $hap.Groups[1].Value -eq '/interaction_profiles/oculus/touch_controller')) { $f += "mock: 2 haptic pulses on touch_controller ('$($hap.Value)')" }
-        if ($vc.input -eq 'app' -and $o -notmatch "action set 'eyecapture_vr_hotkey' priority 1") { $f += 'our action set priority = the app set''s (1)' }
-        if ($vc.input -eq 'app' -and $o -notmatch "attach: app \(1\), eyecapture_vr_hotkey \(1\)") { $f += 'attach: the app set + ours in the app''s one call' }
+        # our priority = the app set's (1) only when the app binds one of our inputs (its left stick click); menu + a: 0
+        $wantPrio = if ($vc.keys -eq $sticks) { 1 } else { 0 }
+        if ($vc.input -eq 'app' -and $o -notmatch "action set 'eyecapture_vr_hotkey' priority $wantPrio") { $f += "our action set priority $wantPrio (1 = the app set's, when it binds one of our inputs)" }
+        if ($vc.input -eq 'app' -and $o -notmatch "attach: app \(1\), eyecapture_vr_hotkey \($wantPrio\)") { $f += 'attach: the app set + ours in the app''s one call' }
         if ($vc.input -eq 'none' -and $logTxt -notmatch 'the game has no controller input of its own') { $f += 'log: self-attach line' }
         if ($vc.ipc -and ($logTxt -notmatch 'control: VR controller hotkey: start' -or $logTxt -notmatch 'control: cue start played' -or $logTxt -notmatch 'control: cue stop played')) { $f += 'control thread: request + start / stop cues played' }
         if ($vc.api -eq 'd3d12' -and -not (ReadbackOk $o)) { $f += 'D3D12 indicator read back' }

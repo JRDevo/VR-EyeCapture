@@ -9,6 +9,7 @@
 #include "dome.h"
 #include "head_smoothing.h"
 #include "test_motion.h"
+#include "video_codec.h"
 #include "yt_layout.h"
 #include "../tray/postprocess.h"   // pp::PredictLayout (header-only arithmetic): the YouTube layout must match it exactly
 
@@ -305,6 +306,37 @@ int main() {
         Check(in && std::fabs((u0 - 0.5) * 180 - 7) < 1e-9 && std::fabs(v0 - 0.5) < 1e-12 && worst < 1e-12,
               "world lock: marker pixel independent of the head pose (lon = +start yaw, lat 0)", worst);
     }
+    {   // dome_shared_view (GitHub issue #2): each eye paints only where the other eye also sees
+        const double D = test_motion::kDeg;
+        auto deg = [](float t) { return std::atan((double)t) / test_motion::kDeg; };
+        // Quest-like asymmetric eyes, parallel: left sees 50 left / 40 right, right eye mirrored -> both clip to +-40
+        const float fl[4] = {(float)(-50 * D), (float)(40 * D), (float)(45 * D), (float)(-45 * D)};
+        const float fr[4] = {(float)(-40 * D), (float)(50 * D), (float)(45 * D), (float)(-48 * D)};
+        const SmoothQuat head = YawPitchRoll(30, 10, 5);
+        float cl[4], cr[4];
+        const bool okL = DomeSharedTans(head, fl, head, fr, cl), okR = DomeSharedTans(head, fr, head, fl, cr);
+        printf("    shared view, parallel eyes: left %.2f..%.2f / %.2f..%.2f, right %.2f..%.2f / %.2f..%.2f deg\n", deg(cl[0]),
+               deg(cl[1]), deg(cl[3]), deg(cl[2]), deg(cr[0]), deg(cr[1]), deg(cr[3]), deg(cr[2]));
+        Check(okL && okR && std::fabs(deg(cl[0]) + 40) < 1e-4 && std::fabs(deg(cl[1]) - 40) < 1e-4 &&
+              std::fabs(deg(cr[0]) + 40) < 1e-4 && std::fabs(deg(cr[1]) - 40) < 1e-4 && std::fabs(deg(cl[2]) - 45) < 1e-4 &&
+              std::fabs(deg(cl[3]) + 45) < 1e-4 && std::fabs(deg(cr[3]) + 45) < 1e-4,
+              "shared view, parallel asymmetric eyes: both clip to the common +-40 / +-45", deg(cl[0]));
+        // canted displays: left eye turned 10 deg left, right eye 10 deg right, each +-45 -> the overlap is 25 deg on
+        // each eye's outer side and its full 45 on the inner side
+        const float fs[4] = {(float)(-45 * D), (float)(45 * D), (float)(45 * D), (float)(-45 * D)};
+        const SmoothQuat qL = YawPitchRoll(10, 0, 0), qR = YawPitchRoll(-10, 0, 0);
+        const bool cOkL = DomeSharedTans(qL, fs, qR, fs, cl), cOkR = DomeSharedTans(qR, fs, qL, fs, cr);
+        printf("    shared view, canted +-10: left %.2f..%.2f, right %.2f..%.2f deg\n", deg(cl[0]), deg(cl[1]), deg(cr[0]), deg(cr[1]));
+        Check(cOkL && cOkR && std::fabs(deg(cl[0]) + 25) < 1e-4 && std::fabs(deg(cl[1]) - 45) < 1e-4 &&
+              std::fabs(deg(cr[0]) + 45) < 1e-4 && std::fabs(deg(cr[1]) - 25) < 1e-4 && std::fabs(deg(cl[2]) - 45) < 1e-4,
+              "shared view, canted eyes: other eye's edges rotated into this eye (outer side 25, inner 45)", deg(cl[0]));
+        // no overlap: false, own fov kept
+        const float fa[4] = {(float)(-50 * D), (float)(-10 * D), (float)(45 * D), (float)(-45 * D)};
+        const float fb[4] = {(float)(10 * D), (float)(50 * D), (float)(45 * D), (float)(-45 * D)};
+        const bool none = DomeSharedTans(head, fa, head, fb, cl);
+        Check(!none && std::fabs(deg(cl[0]) + 50) < 1e-4 && std::fabs(deg(cl[1]) + 10) < 1e-4,
+              "shared view, no overlap: false, the eye's own fov is kept", deg(cl[1]));
+    }
 
     {   // re-projection output at the recorded size (max_width / codec limit)
         const StageFit n0 = FitStageOutput(3384, 3384, 4630, 0, 8192);
@@ -436,6 +468,20 @@ int main() {
         Check(std::string(YtPackingKey(Layout3d::SbsFull)) == "sbs_full" && std::string(YtCropKey(EyeCrop::Std43)) == "4:3" &&
               std::string(YtCropKey(EyeCrop::Pad43)) == "4:3pad" && std::string(YtCropKey(EyeCrop::None)) == "none" &&
               YtTopBottom(Layout3d::TbFull) && !YtTopBottom(Layout3d::SbsHalf), "keys / top-bottom flag", 0);
+    }
+
+    {   // the encoded frame never exceeds the codec standards' largest area (8192 x 4352): else players refuse / crop it
+        unsigned w = 8064, h = 4564;   // Half-Life: Alyx SBS (symmetric fov at the source density)
+        Check(!VideoCodecAreaOk(w, h) && VideoCodecFitArea(w, h) && VideoCodecAreaOk(w, h) && w % 2 == 0 && h % 2 == 0 &&
+              std::fabs((double)w / h - 8064.0 / 4564.0) < 0.005, "8064x4564 -> fits the area, aspect kept", w * 1.0);
+        w = 8192; h = 4632;            // ETS2 / ATS SBS at the 8192 width limit
+        Check(VideoCodecFitArea(w, h) && VideoCodecAreaOk(w, h) && w < 8192, "8192x4632 -> fits", w * 1.0);
+        w = 8192; h = 4352;
+        Check(!VideoCodecFitArea(w, h) && w == 8192 && h == 4352, "8192x4352 (exactly the limit) unchanged", 0);
+        w = 7680; h = 4320;
+        Check(!VideoCodecFitArea(w, h), "YouTube 8K 7680x4320 unchanged", 0);
+        w = 8192; h = 8192;            // VR360 at dome_width 8192 (top-bottom square)
+        Check(VideoCodecFitArea(w, h) && VideoCodecAreaOk(w, h) && w == h, "VR360 8192x8192 -> square that fits", w * 1.0);
     }
 
     printf("=== head_smoothing_test %s\n", g_fail ? "FAIL" : "PASS");

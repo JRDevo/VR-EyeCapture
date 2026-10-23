@@ -34,7 +34,9 @@
 //   - tests redirect the Run key to a subkey of HKCU with SetAutostartTestKey (the approval key becomes <subkey>"Approved"),
 //     so a real Run / StartupApproved key is never touched.
 #pragma once
+#include <windows.h>
 #include <string>
+#include <vector>
 
 namespace install {
 
@@ -74,6 +76,11 @@ bool Register(const std::wstring& exeDir, std::wstring& err, long* winErr = null
 bool Unregister(const std::wstring& exeDir, std::wstring& err, long* winErr = nullptr);
 // No admin: removes same-name values (both json names) from the CURRENT user's HKCU. Returns how many were removed.
 int RemoveHkcuDuplicates();
+
+// Read-only registry keys to watch (KEY_NOTIFY) for a change of the registration: the HKLM 64-bit / 32-bit view roots and the
+// HKCU root -- or, for a root that does not exist yet, its nearest existing parent (subtree = true). The caller closes them.
+struct WatchKey { HKEY key; bool subtree; };
+std::vector<WatchKey> OpenWatchKeys();
 
 // Tests: replace the two roots (default HKLM / HKCU \SOFTWARE\Khronos\OpenXR\1\ApiLayers\Implicit) with keys given as
 // "HKCU\\Software\\OpenXR-EyeCapture-Test\\LM" (prefix HKCU\ or HKLM\). Empty strings restore the defaults. The 32-bit

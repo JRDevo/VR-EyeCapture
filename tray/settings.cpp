@@ -589,10 +589,10 @@ const Help kHelp[] = {
                 HELP_LI L"Wheel or joystick: Joy:*:Button3 (any device), Joy:T300RS:Button5+Button6 (a device whose name contains T300RS); POVUp / POVDown / POVLeft / POVRight for the hat switch."
                 HELP_LI L"Controller and wheel buttons work at once, without a game restart." HELP_BR
                 L"To see the button names of a wheel, run EyeCaptureTray.exe --inputs in a command prompt."},
-    {ID_VRHOTKEY, L"Start and stop with the VR controllers: hold these buttons together for 1 second (OpenXR games)." HELP_BR
+    {ID_VRHOTKEY, L"Start and stop with the VR controllers: hold these buttons together for 1 second (OpenXR and SteamVR games)." HELP_BR
                   L"• Both stick clicks (default): press both thumbsticks down and hold them. Games rarely use that."
                   HELP_LI L"The controllers vibrate briefly when a recording starts and longer when it stops; the dot in the headset shows the state."
-                  HELP_LI L"Works in any OpenXR game, also when the game has no keyboard support. The game still sees the buttons too."
+                  HELP_LI L"Works in any OpenXR or SteamVR game, also when the game has no keyboard support. The game still sees the buttons too."
                   HELP_LI L"Custom combinations in config.ini: vr_hotkey = left_menu+right_a (buttons a, b, x, y, menu, thumbstick, trigger, grip; "
                   L"left_ / right_; up to 4). The hold time is vr_hotkey_hold_s (default 1.0 s)."
                   HELP_LI L"Off: the layer does not touch the game's controller input at all." HELP_BR

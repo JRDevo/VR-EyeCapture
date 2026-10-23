@@ -1,6 +1,7 @@
 // openvr_hooks -- see openvr_hooks.h. No logging here (the tray and the unit test link this file too).
 #include "openvr_hooks.h"
 #include <windows.h>
+#include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <cstring>
@@ -265,10 +266,47 @@ bool SysGetDisplayHz(void* sys, const SystemVersion& v, float* hz, int* error) {
 
 // ------------------------------------------------------------------------------------------------ conversions
 
+double MatrixRotationError(const vr::HmdMatrix34_t& M) {
+    double err = 0;
+    for (int i = 0; i < 3; ++i) {
+        for (int j = i; j < 3; ++j) {
+            const double d = M.m[0][i] * M.m[0][j] + M.m[1][i] * M.m[1][j] + M.m[2][i] * M.m[2][j];
+            err = std::max(err, std::fabs(d - (i == j ? 1.0 : 0.0)));
+        }
+    }
+    const double det = M.m[0][0] * (M.m[1][1] * M.m[2][2] - M.m[1][2] * M.m[2][1]) -
+                       M.m[0][1] * (M.m[1][0] * M.m[2][2] - M.m[1][2] * M.m[2][0]) +
+                       M.m[0][2] * (M.m[1][0] * M.m[2][1] - M.m[1][1] * M.m[2][0]);
+    if (!(det > 0)) return std::isfinite(det) ? std::max(err, 1.0) : INFINITY;   // a mirror or a flat matrix: never a rotation
+    return std::isfinite(err) ? err : INFINITY;
+}
+
+double MatrixAngleDeg(const vr::HmdMatrix34_t& a, const vr::HmdMatrix34_t& b) {
+    double tr = 0;   // trace(Ra^T Rb) = 1 + 2 cos(angle)
+    for (int i = 0; i < 3; ++i)
+        for (int k = 0; k < 3; ++k) tr += a.m[k][i] * b.m[k][i];
+    const double c = std::min(1.0, std::max(-1.0, (tr - 1.0) * 0.5));
+    return std::acos(c) * 180.0 / 3.14159265358979323846;
+}
+
 bool MatrixToPose(const vr::HmdMatrix34_t& M, float q[4], float p[3]) {
-    const double m00 = M.m[0][0], m01 = M.m[0][1], m02 = M.m[0][2];
-    const double m10 = M.m[1][0], m11 = M.m[1][1], m12 = M.m[1][2];
-    const double m20 = M.m[2][0], m21 = M.m[2][1], m22 = M.m[2][2];
+    // A head pose a game hands to Submit (Submit_TextureWithPose) is its own matrix: one with a scale, a shear or a mirror
+    // would give a wrong (not just noisy) quaternion below, so it is rejected; small float drift is removed by
+    // re-orthonormalizing the columns (Gram-Schmidt: x, then y against x, z = x cross y).
+    if (MatrixRotationError(M) > kMaxRotationError) return false;
+    double c0[3] = {M.m[0][0], M.m[1][0], M.m[2][0]}, c1[3] = {M.m[0][1], M.m[1][1], M.m[2][1]};
+    auto norm = [](double v[3]) {
+        const double n = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+        v[0] /= n; v[1] /= n; v[2] /= n;
+    };
+    norm(c0);
+    const double d = c0[0] * c1[0] + c0[1] * c1[1] + c0[2] * c1[2];
+    for (int i = 0; i < 3; ++i) c1[i] -= d * c0[i];
+    norm(c1);
+    const double c2[3] = {c0[1] * c1[2] - c0[2] * c1[1], c0[2] * c1[0] - c0[0] * c1[2], c0[0] * c1[1] - c0[1] * c1[0]};
+    const double m00 = c0[0], m01 = c1[0], m02 = c2[0];
+    const double m10 = c0[1], m11 = c1[1], m12 = c2[1];
+    const double m20 = c0[2], m21 = c1[2], m22 = c2[2];
     double x, y, z, w;
     const double tr = m00 + m11 + m22;
     if (tr > 0) {
@@ -304,8 +342,8 @@ vr::HmdMatrix34_t ComposeMatrix(const vr::HmdMatrix34_t& a, const vr::HmdMatrix3
 void FovFromProjectionRaw(float l, float r, float t, float b, float fov[4]) {
     fov[0] = std::atan(l);
     fov[1] = std::atan(r);
-    fov[2] = std::atan(-t);
-    fov[3] = std::atan(-b);
+    fov[2] = std::atan(b);   // the y-up top edge: OpenVR's "bottom" (see the header)
+    fov[3] = std::atan(t);
 }
 
 bool BoundsToRect(const vr::VRTextureBounds_t* b, uint32_t texW, uint32_t texH, int32_t* x, int32_t* y, uint32_t* w,

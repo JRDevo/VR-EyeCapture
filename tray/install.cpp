@@ -272,6 +272,27 @@ const char* StateText(State s) {
     return "?";
 }
 
+std::vector<WatchKey> OpenWatchKeys() {
+    std::vector<WatchKey> out;
+    const struct { const Root* r; REGSAM view; } roots[] = {{&g_lm, kView}, {&g_lm32, kView32}, {&g_cu, kView}};
+    for (const auto& x : roots) {
+        std::wstring sub = x.r->sub;
+        bool subtree = false;
+        for (;;) {
+            HKEY k = nullptr;
+            if (RegOpenKeyExW(x.r->hive, sub.c_str(), 0, KEY_NOTIFY | x.view, &k) == ERROR_SUCCESS) {
+                out.push_back({k, subtree});
+                break;
+            }
+            const size_t cut = sub.find_last_of(L'\\');
+            if (cut == std::wstring::npos) break;
+            sub.resize(cut);
+            subtree = true;
+        }
+    }
+    return out;
+}
+
 void SetTestRoots(const std::wstring& lmPath, const std::wstring& cuPath) {
     Root lm{HKEY_LOCAL_MACHINE, kImplicitKey}, lm32{HKEY_LOCAL_MACHINE, kImplicitKey}, cu{HKEY_CURRENT_USER, kImplicitKey};
     if (!lmPath.empty()) { ParseRoot(lmPath, lm); ParseRoot(lmPath + L"32", lm32); }

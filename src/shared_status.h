@@ -67,9 +67,19 @@ struct EyeCapShared {
 static_assert(offsetof(EyeCapShared, framesWritten) == 32 && offsetof(EyeCapShared, game) == 64, "EyeCapShared layout");
 static_assert(offsetof(EyeCapShared, cmdSeq) == 2816 && sizeof(EyeCapShared) == 2832, "EyeCapShared layout");
 
+// "<block name>-Changed": an auto-reset event every writer sets when the owner, the state, the file or the message changed
+// (EyeCapEndWrite; not on a heartbeat-only publish). The tray sleeps on it instead of reading the block on a timer.
+// One per process (the last block EyeCapOpenShared opened); never closed (lives as long as the process).
+inline HANDLE   g_eyeCapChanged = nullptr;
+inline uint64_t g_eyeCapChangedKey = 0;   // what the last signal was for (EyeCapEndWrite)
+
 // Opens (or creates) the block. Returns nullptr on failure. Close with UnmapViewOfFile + CloseHandle(*mapping).
 // `name` is only changed by tests (a private block so a test tray / status simulator never touch a real game's status).
 inline EyeCapShared* EyeCapOpenShared(HANDLE* mapping, const wchar_t* name = EYECAP_SHM_NAME) {
+    if (!g_eyeCapChanged) {
+        wchar_t ev[160];
+        if (swprintf_s(ev, L"%s-Changed", name) > 0) g_eyeCapChanged = CreateEventW(nullptr, FALSE, FALSE, ev);
+    }
     *mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, (DWORD)sizeof(EyeCapShared), name);
     if (!*mapping) return nullptr;
     const bool created = GetLastError() != ERROR_ALREADY_EXISTS;
@@ -97,7 +107,20 @@ inline bool EyeCapReadStatus(const EyeCapShared* p, EyeCapShared& out) {
 }
 
 inline void EyeCapBeginWrite(EyeCapShared* p) { InterlockedIncrement(&p->seq); MemoryBarrier(); }
-inline void EyeCapEndWrite(EyeCapShared* p) { MemoryBarrier(); InterlockedIncrement(&p->seq); }
+inline void EyeCapEndWrite(EyeCapShared* p) {
+    MemoryBarrier();
+    InterlockedIncrement(&p->seq);
+    if (!g_eyeCapChanged) return;
+    uint64_t key = 1469598103934665603ull;   // FNV-1a over owner, state, file, message
+    auto mix = [&key](const void* d, size_t n) {
+        for (size_t i = 0; i < n; ++i) { key ^= ((const uint8_t*)d)[i]; key *= 1099511628211ull; }
+    };
+    mix(&p->ownerPid, sizeof(p->ownerPid));
+    mix(&p->state, sizeof(p->state));
+    mix((const void*)p->file, sizeof(p->file));
+    mix((const void*)p->message, sizeof(p->message));
+    if (key != g_eyeCapChangedKey) { g_eyeCapChangedKey = key; SetEvent(g_eyeCapChanged); }
+}
 
 inline void EyeCapCopy(wchar_t* dst, size_t cap, const wchar_t* src) {
     size_t i = 0;

@@ -24,7 +24,8 @@ bool                                         g_hasCaptured = false;
 std::function<void(const HotkeyBinding&)>    g_onFire;
 
 std::atomic<bool>     g_capture{false};
-std::atomic<bool>     g_haveBindings{false};   // any Pad / Joy binding: poll every 20 ms (else once a second, for the device log)
+std::atomic<bool>     g_haveBindings{false};   // any Pad / Joy binding
+std::atomic<bool>     g_gameLive{false};       // a VR game is live (SetGameLive): bindings are only read then
 std::atomic<unsigned> g_captureGen{0};    // bumped by SetCapture(true): the poll thread takes a new baseline
 HANDLE                g_thread = nullptr;
 HANDLE                g_stop = nullptr;
@@ -73,6 +74,9 @@ unsigned          s_chord[5] = {};
 // A device had its first good read in this cycle: its held buttons are its starting state, not a press (no binding fires
 // in that cycle, and capture ignores them until released) -- e.g. an H-shifter that is in gear when it is plugged in.
 bool              s_fresh = false;
+// Reading now (see ThreadProc). A device is only ACQUIRED while reading: an acquired DirectInput device makes Windows hand
+// every report it sends (a joystick sends them all the time) to this process, even when nobody reads them.
+bool              s_polling = false;
 
 // First good read of a source: what it holds now is not a press.
 void FirstRead(Source& s) {
@@ -210,7 +214,7 @@ void Enumerate() {
             dev->Release();
             continue;
         }
-        dev->Acquire();   // may fail now; retried on every read
+        if (s_polling) dev->Acquire();   // may fail now; retried on every read (PollJoys)
         j->dev = dev;
         next.push_back(std::move(j));
     }
@@ -413,24 +417,44 @@ DWORD WINAPI ThreadProc(LPVOID) {
     Enumerate();
     SetEvent(g_ready);
 
-    ULONGLONG nextPoll = GetTickCount64();
+    // Reads the devices only while it is needed: a Pad / Joy binding AND a live VR game, or the window's "Press a key".
+    // Otherwise it sleeps until a device change (re-enumerated once, for the device list) or SetBindings / SetGameLive /
+    // SetCapture -- no reads at all, so the tray costs nothing on the desktop.
+    ULONGLONG nextPoll = 0;
+    bool polling = false;
     const HANDLE waits[2] = {g_stop, g_wake};
     for (;;) {
         ULONGLONG now = GetTickCount64();
-        const DWORD wait = nextPoll > now ? (DWORD)(nextPoll - now) : 0;
+        const bool want = (g_haveBindings.load() && g_gameLive.load()) || g_capture.load();
+        if (want && !polling) {   // (re)start: what is held now is a starting state, not a press (FirstRead)
+            for (Pad& p : s_pads) { p.seen = false; p.nextProbe = 0; }
+            for (auto& j : s_joys) if (j) j->seen = false;
+            nextPoll = now;
+        }
+        if (!want && polling) {
+            for (Pad& p : s_pads) p.nextProbe = 0;   // the next device change probes every slot again
+            for (auto& j : s_joys) if (j && j->dev) j->dev->Unacquire();   // no reports to this process while idle
+        }
+        polling = want;
+        s_polling = want;
+        ULONGLONG due = polling ? nextPoll : 0;
+        if (s_enumAt && (!due || s_enumAt < due)) due = s_enumAt;
+        const DWORD wait = !due ? INFINITE : due > now ? (DWORD)(due - now) : 0;
         const DWORD r = MsgWaitForMultipleObjects(2, waits, FALSE, wait, QS_ALLINPUT);
         if (r == WAIT_OBJECT_0) break;
-        if (r == WAIT_OBJECT_0 + 1) nextPoll = 0;   // bindings / capture changed: poll now
         MSG m;
         while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE)) {
             TranslateMessage(&m);
             DispatchMessageW(&m);
         }
+        if (r == WAIT_OBJECT_0 + 1) continue;   // bindings / game / capture changed: re-evaluate at the top
         now = GetTickCount64();
-        if (now < nextPoll) continue;
-        // nothing to watch: once a second keeps the device list (and the log) current
-        nextPoll = now + (g_haveBindings.load() || g_capture.load() ? 20 : 1000);
-        if (s_enumAt && now >= s_enumAt) Enumerate();
+        if (s_enumAt && now >= s_enumAt) {
+            Enumerate();
+            if (!polling) PollPads(now);   // keeps the pad part of the device list current too
+        }
+        if (!polling || now < nextPoll) continue;
+        nextPoll = now + 20;
         PollPads(now);
         PollJoys();
         Evaluate(now);
@@ -503,6 +527,10 @@ void SetBindings(const std::vector<HotkeyBinding>& all) {
     g_bindings = std::move(next);
     g_haveBindings = !g_bindings.empty();
     if (g_wake) SetEvent(g_wake);
+}
+
+void SetGameLive(bool live) {
+    if (g_gameLive.exchange(live) != live && g_wake) SetEvent(g_wake);
 }
 
 void SetCapture(bool on) {

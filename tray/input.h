@@ -1,7 +1,8 @@
 // input -- the tray's game-controller hotkeys: XInput pads (Pad: bindings) and DirectInput 8 game controllers such as
 // wheels, pedals, shifters, button boxes and HOTAS (Joy: bindings). See src/hotkey.h for the binding syntax.
 //
-// One poll thread (20 ms) owns everything: XInput is loaded at run time (xinput1_4 -> xinput1_3 -> xinput9_1_0, Guide via
+// One poll thread owns everything; it reads the devices every 20 ms only while a Pad / Joy binding exists AND a VR game is
+// live (SetGameLive), or while the window captures a press -- otherwise it sleeps (no device reads): XInput is loaded at run time (xinput1_4 -> xinput1_3 -> xinput9_1_0, Guide via
 // the hidden XInputGetStateEx = ordinal 100 when present); DirectInput enumerates attached DI8DEVCLASS_GAMECTRL devices,
 // skips XInput devices (DIPROP_GUIDANDPATH contains "IG_": they are read as pads) and reads c_dfDIJoystick2 in
 // background / non-exclusive mode through a hidden top-level window that also receives WM_DEVICECHANGE (re-enumerated
@@ -32,6 +33,8 @@ void Stop();
 bool WaitReady(unsigned timeoutMs);
 // Replaces the bindings; keeps only the Pad / Joy kinds. Thread-safe; may be called before Start.
 void SetBindings(const std::vector<HotkeyBinding>& all);
+// The tray's status: a VR game is live. Bindings are only read (and fire) while one is.
+void SetGameLive(bool live);
 // Settings "Press a key...": while on, no binding fires and pad / joystick presses are captured instead. Buttons already
 // held when capture starts are ignored until released.
 void SetCapture(bool on);

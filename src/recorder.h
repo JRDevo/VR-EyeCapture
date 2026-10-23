@@ -21,6 +21,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 #include "dome.h"
 #include "frame_source.h"
 #include "head_smoothing.h"
@@ -55,6 +56,9 @@ struct RecorderSettings {
     EyeCrop      eyeCrop = EyeCrop::Wide169;
     // The two views' fov (angleLeft, angleRight, angleUp, angleDown) and image sizes at record start: symmetric_fov
     // fixes the output frustum and size of the whole recording from these.
+    // The eye rects change size during the recording (dynamic resolution, e.g. Half-Life: Alyx): the re-projection stage
+    // always runs and scales each eye's rect to its whole output area (raw layout), so a smaller eye leaves no old pixels.
+    bool         eyeSizeVaries = false;
     bool         startFovValid = false;
     float        startFov[2][4] = {};
     uint32_t     startEyeW[2] = {}, startEyeH[2] = {};

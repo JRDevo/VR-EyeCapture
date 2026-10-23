@@ -79,11 +79,11 @@ void LogCaptureConfig(const char* folderWhat, const std::wstring& folder, const 
                              : "raw eye images (asymmetric per-eye fov)");
     if (c.dome.Enabled())
         LOGI("dome: projection %s (%s, files *_%s.mp4) | dome_width %u%s | fill %s | fill_fade_s %.1f | window_feather_deg %.1f | "
-             "dome_forward start -- symmetric_fov / head smoothing are ignored",
+             "dome_shared_view %d | dome_forward start -- symmetric_fov / head smoothing are ignored",
              DomeProjectionName(c.dome.projection),
              c.dome.projection == DomeProjection::Vr180 ? "VR180, left | right" : "VR360, left on top / right below",
              DomeFileTag(c.dome.projection), c.dome.width, c.dome.width ? "" : " (from the source density)",
-             c.dome.fill == DomeFill::LastSeen ? "last_seen" : "black", c.dome.fadeS, c.dome.featherDeg);
+             c.dome.fill == DomeFill::LastSeen ? "last_seen" : "black", c.dome.fadeS, c.dome.featherDeg, c.dome.sharedView ? 1 : 0);
     else
         LOGI("dome: projection flat (standard SBS; [dome] projection = vr180 | vr360 for a world-locked dome)");
 }
@@ -237,6 +237,7 @@ std::string ApplyReloadedConfig(Config& c, const Config& n, bool* outputChanged)
     note("fill", c.dome.fill == DomeFill::LastSeen ? "last_seen" : "black", n.dome.fill == DomeFill::LastSeen ? "last_seen" : "black");
     note("fill_fade_s", F(c.dome.fadeS), F(n.dome.fadeS));
     note("window_feather_deg", F(c.dome.featherDeg), F(n.dome.featherDeg));
+    note("dome_shared_view", B(c.dome.sharedView), B(n.dome.sharedView));
     static const char* kLevel[] = {"none", "error", "warn", "info", "debug"};   // index = (int)LogLevel + 1
     auto lv = [&](LogLevel l) { return std::string(kLevel[(int)l >= -1 && (int)l < 4 ? (int)l + 1 : 3]); };
     note("log_level", lv(c.logLevel), lv(n.logLevel));

@@ -53,7 +53,7 @@ if (-not $cmake) { Fail 'cmake not found on PATH or under Visual Studio 2022' }
 
 & $cmake -B $buildDir -S $root -G 'Visual Studio 17 2022' -A x64 -DEYE_BUILD_OBS_PLUGIN=ON
 if ($LASTEXITCODE -ne 0) { Fail "cmake configure failed ($LASTEXITCODE)" }
-& $cmake --build $buildDir --config Release --target eye_capture EyeCaptureTray openvr_proxy EyeCaptureMirror EyeCaptureRecorder obs-eyecapture
+& $cmake --build $buildDir --config Release --target eye_capture EyeCaptureTray openvr_proxy EyeCaptureMirror EyeCaptureVrInput EyeCaptureRecorder obs-eyecapture
 if ($LASTEXITCODE -ne 0) { Fail "cmake build failed ($LASTEXITCODE)" }
 # the 32-bit layer for 32-bit OpenXR games: a second configure for Win32 (it builds nothing else)
 $buildDir32 = Join-Path $root 'build32'
@@ -77,6 +77,7 @@ $files = @(
     @{ src = (Join-Path $rel 'EyeCaptureTray.exe'); name = 'EyeCaptureTray.exe' },
     @{ src = (Join-Path $rel 'openvr_api.dll'); name = 'steamvr\openvr_api.dll' },
     @{ src = (Join-Path $rel 'EyeCaptureMirror.exe'); name = 'EyeCaptureMirror.exe' },
+    @{ src = (Join-Path $rel 'EyeCaptureVrInput.exe'); name = 'EyeCaptureVrInput.exe' },
     @{ src = (Join-Path $rel 'EyeCaptureRecorder.exe'); name = 'EyeCaptureRecorder.exe' },
     @{ src = (Join-Path $rel32 'eye_capture32.dll'); name = 'eye_capture32.dll' },
     @{ src = (Join-Path $rel32 'XR_APILAYER_JRDEVO_eye_capture32.json'); name = 'XR_APILAYER_JRDEVO_eye_capture32.json' },

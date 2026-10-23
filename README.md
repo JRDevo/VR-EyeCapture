@@ -51,15 +51,16 @@ games with Direct3D 11 or Direct3D 12.
 - **One hotkey** — default `ScrollLock`, or the tray icon, starts and stops a recording; beeps in the headset confirm
   (`beeps = 0` turns them off, e.g. when they end up in the recorded audio).
   It can be any key, a mouse side button, an Xbox controller button or a wheel / joystick button (or several of them).
-- **VR controller hotkey** — in OpenXR games, hold **both thumbstick clicks for 1 s** to start / stop (the controllers
-  vibrate); works in games without keyboard support, the game keeps its own buttons (`vr_hotkey`).
+- **VR controller hotkey** — in OpenXR and SteamVR games, hold **both thumbstick clicks for 1 s** to start / stop (the
+  controllers vibrate); works in games without keyboard support, the game keeps its own buttons (`vr_hotkey`).
 - **Tray app with a main window** — every option has a help text, no `config.ini` editing needed.
 - **One-click registration** — the tray registers the layer for you (one UAC prompt); **Register** / **Unregister** are in the app window (Advanced > Tools).
 - **Tray menu** — short, in the app's light / dark theme: Start / Stop recording, Open VR EyeCapture, Open captures folder,
   Convert last recording now, SteamVR games..., Exit, and Pause / Resume / Cancel conversion (with its progress and time
   left) while one runs. Everything else is in the app window.
-- **Tray icon** — the goggles logo with a status dot (grey, green, red, amber, blue); the lenses swap colours while it
-  records or converts; the tooltip shows game, resolution, fps, dropped frames and elapsed time.
+- **Tray icon** — the goggles logo, one fixed icon (since 0.5.1 it no longer changes colour or blinks). Hover it: the
+  tooltip shows the status, game, resolution, fps, dropped frames and elapsed time. In the headset the recording dot shows
+  the state; balloons tell you about the important events (for example a failed recording or a file ready for YouTube).
 - **Start with Windows** — optional, off by default (app window → Advanced).
 - **Command line** — `--start | --stop | --toggle | --status` for scripts and Stream Deck buttons.
 - **Automatic MKV conversion** — with the Matroska 3D tag that YouTube recognises. By default it waits until the game has
@@ -129,11 +130,10 @@ YouTube, use 16:9 or 4:3 padded.
 </summary>
 
 
-Everything runs from one small icon in the Windows tray (next to the clock): the goggles logo. Its status dot tells you
-the state: **grey goggles, no dot** = no VR game running, **green** = game running and ready, **red** = recording,
-**amber** = starting, finishing the file or an error, **blue** = converting a finished recording. While it records or
-converts, the blue and red lenses swap colours every half second. Hover the icon for the details (game, resolution,
-fps, dropped frames, recording time, conversion progress). **Left-click** the icon to open the app window (with the
+Everything runs from one small icon in the Windows tray (next to the clock): the goggles logo. The icon itself does not
+change (since 0.5.1). Hover it for the state and the details: no VR game, ready, recording, starting, finishing the file
+or an error, converting a finished recording (game, resolution, fps, dropped frames, recording time, conversion
+progress). In the headset, the small recording dot shows the state too. **Left-click** the icon to open the app window (with the
 conversion queue); **right-click** it for the menu.
 
 ### The tray menu (right-click the icon)
@@ -344,8 +344,8 @@ used for the encoder (measured: about 6 MB more while recording), and the record
 
 1. Start `EyeCaptureTray.exe`, then the game in VR as usual (ETS2 / ATS: launch option `-openxr`).
 2. Press **ScrollLock** (the default hotkey) → one beep (880 Hz) in the headset: recording. **Or with the VR controllers**
-   (OpenXR games): press both thumbsticks down and hold them for 1 second → a short vibration + the beep. The same again
-   stops it (a longer vibration + two beeps). See "VR controller hotkey" below.
+   (OpenXR and SteamVR games): press both thumbsticks down and hold them for 1 second → a short vibration + the beep. The
+   same again stops it (two beeps; OpenXR games: a longer vibration). See "VR controller hotkey" below.
 3. Press **ScrollLock** again → two beeps: stopped, the MP4 is finalized.
    One long low beep = it could not start (see the log).
    The beeps are played by the game's own process, so you hear them wherever you hear the game (they no longer depend on
@@ -365,14 +365,23 @@ bindings, so the runtime keeps picking the profile the game expects. Other combi
 Touch there is no `right_menu`: that is the system button). `vr_hotkey = off` leaves the game's input completely alone.
 The log shows the bindings (`vr hotkey: binding ... merged into the game's N bindings`), the controller profile the
 runtime uses and every activation (`vr hotkey: thumbsticks held 1.0 s -> start recording`). A game with no controller
-input at all gets our action set after 20 s of frames. Read when the game starts. SteamVR (OpenVR) games: not available
-(use the hotkey or the tray).
+input at all gets our action set after 20 s of frames. Read when the game starts. A game that offers only the basic "simple controller"
+(no thumbsticks; American Truck Simulator / Euro Truck Simulator 2) also gets the real controller types (Quest, Index, Vive,
+WMR) with its own buttons translated (select = trigger, menu = menu), so the runtime uses the real controller, the game keeps
+its buttons and the sticks work (log: `the game suggests only khr/simple_controller ...`).
+
+SteamVR (OpenVR) games (since 0.5.1): a game takes one SteamVR Input action list per process, so the in-game proxy cannot
+add buttons. While a SteamVR game recorded by VR EyeCapture runs, the tray starts `EyeCaptureVrInput.exe`: a small SteamVR
+overlay app with its own action list ("VR EyeCapture" in SteamVR → Settings → Controllers → Manage controller bindings,
+where you can also rebind it) and default bindings for Quest / Oculus Touch, Index, Vive and WMR controllers. Same
+`vr_hotkey` / `vr_hotkey_hold_s`, same vibration; it exits with the game. The log shows `vr input: ...` lines.
 
 Recording also stops and the file is finalized when the game closes its VR session (quitting the game normally).
 If the game crashes or is killed while recording, the MP4 is lost (it is only finalized at the end).
 
-**Tray icon** (the status dot): grey goggles = no VR game, green = ready, red = recording (the lenses swap colours),
-amber = starting / finalizing / failed, blue = converting a finished recording, or recordings waiting to be converted while no game is running (see "Upload to YouTube").
+**Tray icon**: one fixed goggles icon (since 0.5.1 it no longer changes colour or blinks, and the tray does no polling
+while no VR game runs). Hover it for the status: no VR game / ready / recording / starting / finalizing / failed /
+converting a finished recording (see "Upload to YouTube"). In the headset the recording dot shows the state.
 Left-click: the app window. Right-click: Start / Stop recording, Open VR EyeCapture, Open captures folder, Convert last recording now, SteamVR games..., Exit, and while a
 conversion runs Pause / Resume / Cancel conversion. The tooltip shows game, resolution, fps, dropped frames and elapsed time, and
 "converting <file> (MKV) 42% - about 6 min left" / "paused: <file> ..." / "last: <file>.mkv ready". `EyeCaptureTray.exe --start | --stop | --toggle | --status` does the
@@ -450,7 +459,7 @@ the normal side-by-side way (logged).
   recording waits for the game to close still applies). Queue the same MP4 again after changing the Export settings to get
   e.g. a 16:9 and a 4:3 copy, or an HEVC and an AV1 8K file; the same file with the same format is not queued twice. With
   `keep_mp4 = 0` the MP4 is deleted only by the last conversion that needs it (while another one for the same MP4 waits, it stays).
-- While it runs the tray icon is **blue** and the tooltip says "converting <file> (MKV) 42% - about 6 min left" (the percent
+- While it runs the tray tooltip says "converting <file> (MKV) 42% - about 6 min left" (the percent
   needs `ffprobe`, which ships next to ffmpeg); the tray menu can pause, resume or cancel it. Afterwards the tooltip says
   "last: <file>.mkv ready" and a balloon says "Ready for YouTube: <file>.mkv". One recording at a time, in order.
 - The MP4 is deleted only after the MKV is verified (`keep_mp4 = 1` keeps both): a remux must exist and be larger than 90%
@@ -542,7 +551,7 @@ projections are labelled "experimental" in the window.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `vr_hotkey` | `thumbsticks` | `[capture]`: start / stop with the VR controllers in OpenXR games: the buttons held together for `vr_hotkey_hold_s`. `thumbsticks` = both stick clicks; `off` = the game's controller input is not touched; or up to 4 of `left_`/`right_` + `a`, `b`, `x`, `y`, `menu`, `thumbstick`, `trigger`, `grip` joined with `+` (e.g. `left_menu+right_a`). Read when the game starts. App window: Recording → Controllers. See "Record". |
+| `vr_hotkey` | `thumbsticks` | `[capture]`: start / stop with the VR controllers in OpenXR and SteamVR games: the buttons held together for `vr_hotkey_hold_s`. `thumbsticks` = both stick clicks; `off` = the game's controller input is not touched; or up to 4 of `left_`/`right_` + `a`, `b`, `x`, `y`, `menu`, `thumbstick`, `trigger`, `grip` joined with `+` (e.g. `left_menu+right_a`). Read when the game starts. App window: Recording → Controllers. See "Record". |
 | `vr_hotkey_hold_s` | `1.0` | `[capture]`: how long the `vr_hotkey` buttons must be held, 0.2 .. 10 s. |
 | `hotkey` | `ScrollLock` | Start / stop. One or more, separated by commas; any of them works. **Keys**: `Ctrl`, `Shift`, `Alt` + `F1`..`F24`, `A`..`Z`, `0`..`9`, `Numpad0`..`9`, `Home`, `End`, `Insert`, `Delete`, `PageUp`, `PageDown`, `Pause`, `ScrollLock`, `CapsLock`, media keys (`MediaPlayPause`, `VolumeUp` ...), punctuation (`Semicolon`, `Comma` ...), any other key as `Key0xNN`; modifiers must match exactly. **Mouse**: `MouseMiddle`, `MouseX1`, `MouseX2`. Keys and mouse buttons are read when the game starts. **Xbox controller**: `Pad:A`, `Pad:Back+Start` (hold both), `Pad2:LB` (2nd pad only). **Wheel / joystick**: `Joy:*:Button3` (any device), `Joy:T300RS:Button5+Button6` (device name contains `T300RS`), `POVUp` / `POVDown` / `POVLeft` / `POVRight` for the hat. Controller and wheel buttons are read by the tray and apply at once. `EyeCaptureTray.exe --inputs` lists your devices and prints the name of each button you press. `none` = tray only. Example: `ScrollLock, Pad:Back+Start`. |
 | `output_dir` | *(empty)* = `captures` next to the DLL | Where MP4s go; the converted files (MKV, 8K, flat) go next to them, on the same drive. Nothing large is written to C: (or `%TEMP%`) unless this folder is on C:. **Low-space guard**: a recording does not start with less than 10 GB free on that drive, a conversion not with less than 10 GB + the estimated size of the files it makes (from the recording's length and the bitrates: an 8K copy of a 30-minute recording at 150 Mbit/s is about 31 GB) (log line + balloon "Recording not started" / "Not enough disk space ... needs about N GB"), and a recording is stopped and saved when the drive drops below 2 GB free (balloon "Recording stopped: disk almost full"). |
@@ -571,7 +580,7 @@ projections are labelled "experimental" in the window.
 | `roll_lock` | `0` | Smoothing: `1` = keep the horizon level. |
 | `output_fov_scale` | `0.9` | Smoothing: fraction of the game's field of view in the recording (room for the correction). |
 | `edge_guard` | `1` | Smoothing: `1` = never show black edges (the correction is limited to what the game rendered). |
-| `projection`, `dome_width`, `dome_forward`, `fill`, `fill_fade_s`, `window_feather_deg` | | `[dome]`: VR180 / VR360 output, see "VR180 / VR360 dome mode". |
+| `projection`, `dome_width`, `dome_forward`, `fill`, `fill_fade_s`, `window_feather_deg`, `dome_shared_view` | | `[dome]`: VR180 / VR360 output, see "VR180 / VR360 dome mode". |
 | `post_mkv` | `1` | Tray app: after each recording, write `<name>.mkv` with the Matroska 3D tag (what YouTube reads): a plain remux with `layout_3d = sbs_full` (and for VR180 / VR360), otherwise a re-encode in the `layout_3d` layout at the recording's own size, same frame rate. |
 | `keep_mp4` | `0` | Tray app: `0` = delete the MP4 once the MKV (and the flat / 8K files, if requested) is verified (remux: exists and > 90% of the MP4; re-encode: exists, not empty, duration within 1 s / 2% of the MP4's); `1` = keep both. |
 | `post_flat` | `0` | Tray app: also write `<name>_FLAT.mp4`, a normal 2D video (left eye, 16:9 centre crop, 3840 wide). |
@@ -763,6 +772,7 @@ the two eyes (each eye's dome is centred on that eye, like a VR180 camera).
 | `fill` | `last_seen` | `last_seen` = keep what you looked at earlier; `black` = only the live view, the rest black. |
 | `fill_fade_s` | `8` | Seconds a painted area stays before fading to black (over 2 s); `0` = never fade. |
 | `window_feather_deg` | `1` | Soft edge (degrees) where the live view blends into the dome; `0` = hard edge. |
+| `dome_shared_view` | `1` | `1` = each eye paints only where the other eye also sees (no one-eye strips at the sides, easier on the eyes); `0` = each eye paints its full view. |
 
 </details>
 
@@ -1045,7 +1055,7 @@ app window → Advanced → **Open log**):
 - GPU and driver version.
 - Windows version.
 - Tool version (the setup file name, or the `v...` line at the top of `tray.log`).
-- What you pressed and what happened (beeps heard, tray icon colour).
+- What you pressed and what happened (beeps heard, the tray tooltip text).
 - Other OpenXR layers or mods in use (the DLAA injector, OpenXR Toolkit, etc.).
 
 **Privacy:** the logs contain folder paths with your Windows user name. Open them and check (or edit them) before uploading.

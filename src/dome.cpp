@@ -89,6 +89,32 @@ void DomeEyeMatrix(const SmoothQuat& D, const SmoothQuat& qEye, double m[9]) {
     QuatToMatrix(QuatMul(QuatConj(QuatNormalize(qEye)), D), m);
 }
 
+bool DomeSharedTans(const SmoothQuat& qSelf, const float fovSelf[4], const SmoothQuat& qOther, const float fovOther[4],
+                    float out[4]) {
+    double own[4];
+    for (int i = 0; i < 4; ++i) {
+        own[i] = std::tan((double)fovSelf[i]);
+        out[i] = (float)own[i];
+    }
+    double m[9];   // other-eye camera -> self camera
+    QuatToMatrix(QuatMul(QuatConj(QuatNormalize(qSelf)), QuatNormalize(qOther)), m);
+    double t[4];
+    for (int i = 0; i < 4; ++i) {
+        const double tn = std::tan((double)fovOther[i]);
+        const double v[3] = {i < 2 ? tn : 0.0, i < 2 ? 0.0 : tn, -1.0};
+        const double x = m[0] * v[0] + m[1] * v[1] + m[2] * v[2];
+        const double y = m[3] * v[0] + m[4] * v[1] + m[5] * v[2];
+        const double z = m[6] * v[0] + m[7] * v[1] + m[8] * v[2];
+        if (!(z < -1e-6)) return false;
+        t[i] = (i < 2 ? x : y) / -z;
+    }
+    const double l = std::max(own[0], t[0]), r = std::min(own[1], t[1]);
+    const double u = std::min(own[2], t[2]), d = std::max(own[3], t[3]);
+    if (!(l < r && d < u)) return false;
+    out[0] = (float)l; out[1] = (float)r; out[2] = (float)u; out[3] = (float)d;
+    return true;
+}
+
 bool DomeDirToUv(DomeProjection p, const SmoothQuat& D, const double d[3], double& u, double& v) {
     double m[9];
     QuatToMatrix(QuatConj(D), m);   // dome-from-space

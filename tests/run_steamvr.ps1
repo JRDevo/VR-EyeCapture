@@ -289,6 +289,45 @@ foreach ($iface in 'cpp', 'fntable') {
     Record $name $f
 }
 
+# ---- dynamic resolution (Half-Life: Alyx, GitHub issue #2): the eye rects change size during the recording ----
+#   grow   = the recording starts on small eyes, larger ones later are cut WITH their fov (logged), never stretched
+#   shrink = the recording starts on full eyes, smaller ones later fit (nothing cut)
+foreach ($c in @(@{ n = 'dynres_grow_sym'; mode = 'grow'; cfg = $symCfg; cut = $true },
+                 @{ n = 'dynres_shrink_sym'; mode = 'shrink'; cfg = $symCfg; cut = $false },
+                 @{ n = 'dynres_grow_vr180'; mode = 'grow'; cfg = ($symCfg -replace 'projection=flat', 'projection=vr180'); cut = $true })) {
+    if (-not (Want $c.n)) { continue }
+    $r = RunCase $c.n @('--layout', 'wide', '--seconds', '4', '--dynres', $c.mode) $c.cfg
+    $f = @()
+    Need ($r.code -eq 0) 'openvr_e2e failed' ([ref]$f)
+    Need ($r.log -match 'steamvr: the eye size changes \(.* dynamic resolution\)') 'dynamic resolution logged' ([ref]$f)
+    Need ($r.log -match 'recording summary: OK') 'recording finalized' ([ref]$f)
+    Need ($r.log -match 'steamvr: pose check start: pose WaitGetPoses render pose') 'pose check start line' ([ref]$f)
+    Need ($r.log -match 'steamvr: pose check end \(\d+ pairs\): pose from Submit 0, WaitGetPoses \d+, none 0') 'pose check end line' ([ref]$f)
+    $cutLine = $r.log -match 'recording: \d+ eye images were larger than at the recording''s start'
+    if ($c.cut) { Need $cutLine 'larger eyes cut with their fov (logged)' ([ref]$f) }
+    else { Need (-not $cutLine) 'nothing cut (the recording started at the full size)' ([ref]$f) }
+    Need ($null -ne $r.mp4) 'no MP4' ([ref]$f)
+    Record $c.n $f
+}
+
+# ---- VR180: eye pixels that never show picture (a game's lens mask) are never painted into the dome ----
+#   mask_vr180     --mask: a 0.2 x 0.2 corner of each eye is always black (4 %) + the pattern's black grey step (band A
+#                  step 0: 1/9 x 1/4 = 2.8 %) -> about 6.8 % of each eye never shows picture
+#   nomask_vr180   only the pattern's black step -> about 2.8 %
+foreach ($c in @(@{ n = 'mask_vr180'; a = @('--mask'); lo = 5.5; hi = 8.5 },
+                 @{ n = 'nomask_vr180'; a = @(); lo = 1.5; hi = 4.0 })) {
+    if (-not (Want $c.n)) { continue }
+    $r = RunCase $c.n (@('--layout', 'two', '--seconds', '4') + $c.a) ($symCfg -replace 'projection=flat', 'projection=vr180')
+    $f = @()
+    Need ($r.code -eq 0) 'openvr_e2e failed' ([ref]$f)
+    $m = [regex]::Match($r.log, 'dome: lens mask = eye pixels that never showed picture \(never painted\): left ([\d.]+)%, right ([\d.]+)%')
+    $ok = $m.Success -and [double]$m.Groups[1].Value -ge $c.lo -and [double]$m.Groups[1].Value -le $c.hi -and
+          [double]$m.Groups[2].Value -ge $c.lo -and [double]$m.Groups[2].Value -le $c.hi
+    Need $ok "lens mask $($c.lo) .. $($c.hi) % per eye ('$($m.Value)')" ([ref]$f)
+    Need ($r.log -match 'recording summary: OK') 'recording finalized' ([ref]$f)
+    Record $c.n $f
+}
+
 # ---- poses: symmetric_fov needs pose + fov ----
 foreach ($c in @(@{ n = 'pose_wait_sym'; a = @('--pose', 'wait'); from = 'WaitGetPoses render pose'; sys = '' },
                  @{ n = 'pose_submit_sym'; a = @('--pose', 'submit'); from = 'Submit \(TextureWithPose\)'; sys = '' },
@@ -311,11 +350,12 @@ foreach ($c in @(@{ n = 'pose_wait_sym'; a = @('--pose', 'wait'); from = 'WaitGe
         Need ($LASTEXITCODE -eq 0) "verify_mp4 at ${w}x${h}" ([ref]$f)
         Need ($r.symW -gt 0 -and $r.symW -ne 3840) 'E2E_SYM differs from the raw size (the test can tell them apart)' ([ref]$f)
         if ($c.n -ne 'pose_none_sym') {
-            # fov SIGN: the mock's frustum is asymmetric vertically (t -1.0 = 45 deg up, b 0.9 down), symmetric_fov keeps +-0.9:
-            # the picture loses rows at the TOP only, so the eye-id band (source rows h/2 .. 5h/8) covers the output rows
-            # 0.472 .. 0.604. With up / down swapped it would cover 0.528 .. 0.660 and rows 0.48 / 0.50 would show band B.
+            # fov SIGN: the mock's frustum is asymmetric vertically. OpenVR's raw top / bottom are y-down ("Top and bottom are
+            # backwards per SteamVR documentation"): t -1.0 = 45 deg DOWN, b 0.9 = 42 deg UP. symmetric_fov keeps +-0.9: the
+            # picture loses rows at the BOTTOM only, so the eye-id band (source rows h/2 .. 5h/8) covers the output rows
+            # 0.528 .. 0.660. With up / down swapped (before 0.5.1) it covered 0.472 .. 0.604: rows 0.62 / 0.64 showed band D.
             $ok = $true
-            foreach ($fy in 0.48, 0.50) {
+            foreach ($fy in 0.62, 0.64) {
                 foreach ($eye in 0, 1) {
                     $px = PixelAt $r.mp4 ([int]($w / 4 + $eye * $w / 2)) ([int]($h * $fy))
                     $want = if ($eye -eq 0) { @(200, 40, 40) } else { @(40, 40, 200) }
@@ -324,7 +364,7 @@ foreach ($c in @(@{ n = 'pose_wait_sym'; a = @('--pose', 'wait'); from = 'WaitGe
                     if (-not $good) { $ok = $false }
                 }
             }
-            Need $ok 'fov sign: the eye-id band sits where +45 deg up / -42 deg down puts it (a swapped up/down sign fails here)' ([ref]$f)
+            Need $ok 'fov sign: the eye-id band sits where +42 deg up / -45 deg down puts it (a swapped up/down sign fails here)' ([ref]$f)
         }
     }
     Record $c.n $f

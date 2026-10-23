@@ -44,6 +44,12 @@ struct HmdQuaternion_t { double w, x, y, z; };
 
 enum EVREye { Eye_Left = 0, Eye_Right = 1 };
 
+struct HiddenAreaMesh_t {
+    const HmdVector2_t* pVertexData;
+    uint32_t            unTriangleCount;
+};
+enum EHiddenAreaMeshType { k_eHiddenAreaMesh_Standard = 0, k_eHiddenAreaMesh_Inverse = 1, k_eHiddenAreaMesh_LineLoop = 2 };
+
 enum ETextureType {
     TextureType_Invalid = -1,
     TextureType_DirectX = 0,            // ID3D11Texture2D
@@ -278,6 +284,12 @@ public:
                                                     char* pchValue, uint32_t unBufferSize, ETrackedPropertyError* pError) = 0; // 27
     virtual const char* GetPropErrorNameFromEnum(ETrackedPropertyError error) = 0;                              // 28
     virtual bool PollNextEvent(VREvent_t* pEvent, uint32_t uncbVREvent) = 0;                                    // 29
+    virtual bool PollNextEventWithPose(ETrackingUniverseOrigin eOrigin, VREvent_t* pEvent, uint32_t uncbVREvent,
+                                       TrackedDevicePose_t* pTrackedDevicePose) = 0;                            // 30
+    virtual const char* GetEventTypeNameFromEnum(uint32_t eType) = 0;                                          // 31
+    // The pixels this mesh covers are never seen through the lenses; games draw it into their stencil / depth buffer
+    // before each eye (= black in the submitted eye image). Vertices in [0, 1] of the eye's render target, 3 per triangle.
+    virtual HiddenAreaMesh_t GetHiddenAreaMesh(EVREye eEye, EHiddenAreaMeshType type) = 0;                    // 32
 };
 
 // IVRCompositor, the first methods (stable order since IVRCompositor_014: WaitGetPoses = slot 2, Submit = slot 5). The

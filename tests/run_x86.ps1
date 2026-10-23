@@ -27,7 +27,8 @@
         to the (private) tray status block.
       second_game: two 32-bit games at once: one is recorded, the other logs why it is not, both run normally.
       tray: a scratch test-mode tray (EYECAP_TRAY_TEST_SHM) with EyeCaptureRecorder.exe next to it starts the helper when the
-        game's layer creates its block (logged), the recording is made, the helper exits with the game (code 0).
+        game's layer creates its block (logged), the recording is made, the helper exits with the game (code 0). The game
+        publishes its status to the tray's private block (TRAY_IPC=1): the idle tray has no timer and wakes on that.
       address_space: the 32-bit game's used address space with the layer recording vs without the layer (informational,
         limit 64 MB).
       dormant (no tray, no override): no block, nothing recorded -- skipped while an EyeCaptureTray runs.
@@ -382,7 +383,10 @@ if (Want 'tray') {
     $env:EYECAP_TRAY_TEST_SHM = "eyecap-x86-tray-$PID"
     $tray = Start-Process (Join-Path $tt 'EyeCaptureTray.exe') -PassThru
     Start-Sleep -Seconds 2
+    # like a real game: the layer publishes its status to the tray's block -- an idle tray has no timer and wakes on that
+    $env:XR_EYE_CAPTURE_TRAY_IPC = '1'; $env:XR_EYE_CAPTURE_TEST_SHM = $env:EYECAP_TRAY_TEST_SHM
     $r = RunGame 'tray' @('--api', 'd3d11', '--layout', 'two', '--seconds', '10', '--record', '4')
+    $env:XR_EYE_CAPTURE_TRAY_IPC = '0'; $env:XR_EYE_CAPTURE_TEST_SHM = $null
     $hExit = $false
     for ($i = 0; $i -lt 30 -and -not $hExit; $i++) { Start-Sleep -Milliseconds 500; $hExit = -not (Get-Process EyeCaptureRecorder -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$tt*" }) }
     Start-Sleep -Seconds 3   # the tray's next 2 s tick reaps the helper

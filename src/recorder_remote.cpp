@@ -249,7 +249,7 @@ void Recorder::Impl::Request(EyeCapX86* b) {
     q.headSmoothing = s.head.smoothing; q.headFollowDeg = s.head.followDeg; q.rollLock = s.head.rollLock ? 1u : 0u;
     q.fovScale = s.head.fovScale; q.edgeGuard = s.head.edgeGuard ? 1u : 0u; q.symmetricFov = s.head.symmetricFov ? 1u : 0u;
     q.domeProjection = (uint32_t)s.dome.projection; q.domeWidth = s.dome.width; q.domeFill = (uint32_t)s.dome.fill;
-    q.domeFadeS = s.dome.fadeS; q.domeFeatherDeg = s.dome.featherDeg;
+    q.domeFadeS = s.dome.fadeS; q.domeFeatherDeg = s.dome.featherDeg; q.domeSharedView = s.dome.sharedView ? 1u : 0u;
     q.youtube = s.youtube ? 1u : 0u; q.tag3d = s.tag3d ? 1u : 0u;
     q.layout3d = (uint32_t)s.layout3d; q.eyeCrop = (uint32_t)s.eyeCrop;
     q.startFovValid = s.startFovValid ? 1u : 0u;

@@ -85,7 +85,7 @@ struct EyeCapX86Start {
     uint32_t youtube, tag3d, layout3d, eyeCrop, startFovValid;
     float    startFov[2][4];
     uint32_t startEyeW[2], startEyeH[2];
-    uint32_t pad0;
+    uint32_t domeSharedView;            // was padding (0 from an older layer = off)
     wchar_t  path[520];                 // output .mp4
     wchar_t  audioDevice[256];
 };

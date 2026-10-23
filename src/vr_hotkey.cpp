@@ -172,6 +172,35 @@ bool VrSameInput(const std::string& appPath, const std::string& ourPath) {
     return appPath == id || (appPath.size() > id.size() && appPath.compare(0, id.size(), id) == 0 && appPath[id.size()] == '/');
 }
 
+const std::vector<const char*>& VrSimpleTranslationTargets() {
+    static const std::vector<const char*> t = {"/interaction_profiles/oculus/touch_controller", "/interaction_profiles/valve/index_controller",
+                                               "/interaction_profiles/htc/vive_controller", "/interaction_profiles/microsoft/motion_controller",
+                                               "/interaction_profiles/hp/mixed_reality_controller", "/interaction_profiles/bytedance/pico4_controller"};
+    return t;
+}
+
+bool VrTranslateSimpleBinding(const std::string& target, const std::string& p, std::string& out) {
+    std::string hand;
+    if (p.compare(0, 16, "/user/hand/left/") == 0) hand = "left";
+    else if (p.compare(0, 17, "/user/hand/right/") == 0) hand = "right";
+    else return false;
+    const std::string top = "/user/hand/" + hand + "/", rest = p.substr(top.size());
+    if (rest == "input/grip/pose" || rest == "input/aim/pose" || rest == "output/haptic") { out = p; return true; }
+    const bool touch = target == "/interaction_profiles/oculus/touch_controller", index = target == "/interaction_profiles/valve/index_controller";
+    const bool vive = target == "/interaction_profiles/htc/vive_controller", pico = target == "/interaction_profiles/bytedance/pico4_controller";
+    if (rest == "input/select/click" || rest == "input/select") {
+        out = top + ((index || vive) ? "input/trigger/click" : "input/trigger/value");
+        return true;
+    }
+    if (rest == "input/menu/click" || rest == "input/menu") {
+        if (index) { out = top + "input/b/click"; return true; }
+        if ((touch || pico) && hand == "right") return false;   // the right "menu" is the system button there
+        out = top + "input/menu/click";
+        return true;
+    }
+    return false;
+}
+
 bool VrHoldTracker::Update(bool allDown, double now, double holdS) {
     if (!allDown) { since_ = -1; fired_ = false; return false; }
     if (since_ < 0) since_ = now;

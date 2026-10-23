@@ -111,12 +111,23 @@ bool SysGetDisplayHz(void* sys, const SystemVersion& v, float* hz, int* error);
 
 // ------------------------------------------------------------------------------------------------ conversions
 
-// Row-major 3x4 (rotation | translation) -> unit quaternion (x, y, z, w) + position. false = not a finite rotation.
+// Row-major 3x4 (rotation | translation) -> unit quaternion (x, y, z, w) + position. false = not a finite rotation
+// (MatrixRotationError above kMaxRotationError: scaled, sheared, mirrored, NaN).
 bool MatrixToPose(const vr::HmdMatrix34_t& m, float q[4], float p[3]);
+// How far the 3x3 part is from a rotation: max |column dot products - identity| (0 = exact; 1 or more for a mirror / flat
+// matrix; INFINITY for NaN). 0.02 = a 1 % scale.
+double MatrixRotationError(const vr::HmdMatrix34_t& m);
+constexpr double kMaxRotationError = 0.02;
+// Angle in degrees between the rotations of two poses (their 3x3 parts).
+double MatrixAngleDeg(const vr::HmdMatrix34_t& a, const vr::HmdMatrix34_t& b);
 // a * b (b applied first): eye-to-tracking = head-to-tracking * eye-to-head.
 vr::HmdMatrix34_t ComposeMatrix(const vr::HmdMatrix34_t& a, const vr::HmdMatrix34_t& b);
-// GetProjectionRaw tangents (left < 0 < right, top < 0 < bottom: OpenVR's top is the NEGATIVE tangent) -> OpenXR-style
-// fov {angleLeft, angleRight, angleUp, angleDown} = {atan(l), atan(r), atan(-t), atan(-b)}.
+// GetProjectionRaw tangents -> OpenXR-style fov {angleLeft, angleRight, angleUp, angleDown} = {atan(l), atan(r), atan(b),
+// atan(t)}. OpenVR's raw "top" / "bottom" are in a y-DOWN sense: SteamVR's own projection matrix uses idy = 1 / (bottom -
+// top), sy = bottom + top, so the y-up frustum's top tangent is `bottom` and its bottom tangent is `top` (top < 0 < bottom
+// on every headset). Checked against the same Quest 3 through VDXR (OpenXR: up 44, down -55 deg) and SteamVR (t -1.428 =
+// down 55 deg, b 0.966 = up 44 deg). Until 0.5.1 up / down were swapped: the vertical view was mirrored around the eye's
+// axis -- the top of an eye was cut by symmetric_fov and the picture skewed with head movement (GitHub issue #2).
 void FovFromProjectionRaw(float l, float r, float t, float b, float fov[4]);
 
 // Submit bounds -> pixel rectangle of a texW x texH texture (nullptr = whole texture). u / v outside 0..1 are clipped.

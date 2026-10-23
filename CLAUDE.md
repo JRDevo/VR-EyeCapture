@@ -17,6 +17,7 @@ Project memory lives in the Claude workspace for this folder (`~/.claude/project
   `tests\run_steamvr.ps1` (SteamVR proxy `openvr_api.dll` + `mock_openvr.dll` + fake game `openvr_e2e.exe`, and the quick-mode `EyeCaptureMirror.exe` cases, GPU; also not
   while `Crisis VRigade 2`, `vrserver` or `vrcompositor` runs), the CPU exes `openvr_hook_test.exe` / `steamvr_install_test.exe`,
   `tests\run_steamvr_ui.ps1` (the tray's "SteamVR games" window on a fake game tree, CPU only),
+  `tests\run_vrinput.ps1` (EyeCaptureVrInput.exe, the SteamVR controller hotkey, on the mock + status_sim, CPU only),
   `tests\run_install.ps1` (registration:
   `install_test.exe` + the tray's `--register/--unregister/--status` and GUI flow on test keys under
   `HKCU\Software\OpenXR-EyeCapture-Test`; no admin, run it NON-elevated), plus the unit-test exes in `build\Release`.
@@ -38,6 +39,8 @@ Project memory lives in the Claude workspace for this folder (`~/.claude/project
   use their own built-in OpenXR loader that reads only HKLM. Never also register HKCU — the official loader then loads
   the layer twice and crashes (the tray removes HKCU copies at every start). `scripts\install.ps1` / `uninstall.ps1`
   are dev-only (not in the zip); never run `--register` / `install.ps1` from a session without asking (UAC + HKLM).
+- Installed copy (`C:\Program Files\VR EyeCapture`, from the setup): update it after a build with
+  `scripts\deploy_installed.ps1` (one UAC prompt; also refreshes the proxy in enabled SteamVR games). Ask before running it.
 
 ## Git
 - Branch `master`, remote `origin` = GitHub `JRDevo/VR-EyeCapture` (public; renamed from `JRDevo/OpenXR-EyeCapture`, which redirects). Commit with `-c user.name=JRDevo -c user.email=42043842+JRDevo@users.noreply.github.com`. Push only when the user asks.

@@ -12,6 +12,7 @@
 #include <vector>
 #include "openvr/openvr_hooks.h"
 #include "openvr/openvr_versions.h"
+#include "openvr/vrinput.h"
 
 namespace {
 
@@ -83,6 +84,9 @@ public:
                                             vr::ETrackedPropertyError*) override { return 0; }
     const char* GetPropErrorNameFromEnum(vr::ETrackedPropertyError) override { return ""; }
     bool PollNextEvent(vr::VREvent_t*, uint32_t) override { return false; }
+    bool PollNextEventWithPose(vr::ETrackingUniverseOrigin, vr::VREvent_t*, uint32_t, vr::TrackedDevicePose_t*) override { return false; }
+    const char* GetEventTypeNameFromEnum(uint32_t) override { return "VREvent_Test"; }
+    vr::HiddenAreaMesh_t GetHiddenAreaMesh(vr::EVREye, vr::EHiddenAreaMeshType) override { return vr::HiddenAreaMesh_t{nullptr, 0}; }
 };
 
 vr::HmdMatrix34_t RotY(double deg, float tx, float ty, float tz) {
@@ -298,6 +302,19 @@ int main() {
         bad = id;
         bad.m[0][3] = NAN;
         Check(!MatrixToPose(bad, q, p), "NaN position rejected");
+        // a game's own Submit pose (Submit_TextureWithPose) with a scale / mirror is not a rotation (GitHub issue #2)
+        vr::HmdMatrix34_t scaled = RotY(30, 0, 0, 0);
+        for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j) scaled.m[i][j] *= 1.1f;
+        Check(MatrixRotationError(scaled) > kMaxRotationError && !MatrixToPose(scaled, q, p), "scaled (1.1x) matrix rejected");
+        vr::HmdMatrix34_t mirror = id;
+        mirror.m[0][0] = -1;
+        Check(MatrixRotationError(mirror) >= 1.0 && !MatrixToPose(mirror, q, p), "mirrored matrix rejected");
+        vr::HmdMatrix34_t drift = RotY(90, 0, 0, 0);
+        drift.m[0][0] += 0.002f;   // float drift: accepted, re-orthonormalized
+        Check(MatrixRotationError(drift) < kMaxRotationError && MatrixToPose(drift, q, p) && Near(q[1], std::sqrt(0.5), 1e-3) &&
+              Near(q[3], std::sqrt(0.5), 1e-3), "small drift accepted (90 deg about +Y kept)");
+        Check(Near(MatrixAngleDeg(RotY(10, 0, 0, 0), RotY(40, 1, 2, 3)), 30, 1e-3), "MatrixAngleDeg 10 vs 40 deg = 30");
+        Check(Near(MatrixAngleDeg(id, id), 0, 1e-3), "MatrixAngleDeg same = 0");
         // eye = head * eyeToHead: head turned 90 deg left (+Y), eye 3.2 cm to the right -> the eye ends up at -Z of the head
         const vr::HmdMatrix34_t head = RotY(90, 1, 2, 3);
         vr::HmdMatrix34_t e2h = RotY(0, 0.032f, 0, 0);
@@ -306,12 +323,51 @@ int main() {
         Check(Near(eye.m[0][2], 1) && Near(eye.m[2][0], -1), "compose: rotation kept");
     }
 
+    // ---- SteamVR controller hotkey (EyeCaptureVrInput.exe): button sources, legacy ids, manifest / bindings JSON
+    {
+        VrHotkey hk;
+        Check(ParseVrHotkey(L"thumbsticks", hk) && hk.buttons.size() == 2, "vr_hotkey thumbsticks parsed");
+        SteamVrSource src;
+        Check(SteamVrButtonSource("oculus_touch", hk.buttons[0], src) && src.path == "/user/hand/left/input/joystick" &&
+              strcmp(src.mode, "joystick") == 0 && strcmp(src.input, "click") == 0, "oculus_touch: left stick = joystick click");
+        Check(SteamVrButtonSource("vive_controller", hk.buttons[1], src) && src.path == "/user/hand/right/input/trackpad" &&
+              strcmp(src.mode, "trackpad") == 0, "vive_controller: the trackpad click stands in for the stick");
+        Check(SteamVrButtonSource("knuckles", hk.buttons[0], src) && src.path == "/user/hand/left/input/thumbstick",
+              "knuckles: thumbstick");
+        Check(SteamVrLegacyButtonId(hk.buttons[0]) == 32, "legacy: stick click = Axis0 (32)");
+        int bound = -1;
+        const std::string b = SteamVrBindingJson("oculus_touch", hk, &bound);
+        Check(bound == 2 && b.find("\"controller_type\": \"oculus_touch\"") != std::string::npos &&
+              b.find("\"output\": \"/actions/eyecapture/in/button2\"") != std::string::npos &&
+              b.find("/user/hand/right/output/haptic") != std::string::npos, "oculus_touch bindings: 2 buttons + haptics");
+        const std::string m = SteamVrManifestJson(hk);
+        Check(m.find("\"binding_url\": \"bindings_knuckles.json\"") != std::string::npos &&
+              m.find("\"name\": \"/actions/eyecapture/in/button1\", \"type\": \"boolean\"") != std::string::npos &&
+              m.find("\"type\": \"vibration\"") != std::string::npos && m.find("button3") == std::string::npos,
+              "manifest: 4 controller types, 2 boolean actions + vibration");
+        VrHotkey mk;
+        Check(ParseVrHotkey(L"left_menu+right_a", mk), "vr_hotkey left_menu+right_a parsed");
+        SteamVrBindingJson("oculus_touch", mk, &bound);
+        Check(bound == 1, "oculus_touch: no menu button for apps -> only right_a bound");
+        SteamVrBindingJson("holographic_controller", mk, &bound);
+        Check(bound == 1, "holographic_controller: menu bound, no a button");
+        int depth = 0;
+        bool balanced = true;
+        for (char c : m + b) { depth += c == '{' || c == '[' ? 1 : c == '}' || c == ']' ? -1 : 0; if (depth < 0) balanced = false; }
+        Check(balanced && depth == 0, "JSON brackets balanced");
+    }
+
     // ---- fov
     {
         float fov[4];
         FovFromProjectionRaw(-1.1f, 0.9f, -1.0f, 0.9f, fov);
-        Check(Near(fov[0], std::atan(-1.1)) && Near(fov[1], std::atan(0.9)) && Near(fov[2], std::atan(1.0)) && Near(fov[3], std::atan(-0.9)),
-              "GetProjectionRaw -> {atan l, atan r, atan -t, atan -b}");
+        Check(Near(fov[0], std::atan(-1.1)) && Near(fov[1], std::atan(0.9)) && Near(fov[2], std::atan(0.9)) && Near(fov[3], std::atan(-1.0)),
+              "GetProjectionRaw -> {atan l, atan r, atan b, atan t} (OpenVR's raw top / bottom are y-down)");
+        // SteamVR's projection: m11 = 2 / (b - t), m12 = (b + t) / (b - t); the y-up frustum's top tangent (1 + m12) / m11 = b
+        const double t = -1.428, b = 0.966, m11 = 2.0 / (b - t), m12 = (b + t) / (b - t);
+        FovFromProjectionRaw(-1.376f, 0.839f, (float)t, (float)b, fov);
+        Check(Near(std::tan(fov[2]), (1.0 + m12) / m11, 1e-4) && Near(std::tan(fov[3]), (m12 - 1.0) / m11, 1e-4),
+              "Quest 3 via VD (t -1.428 b 0.966): up 44 deg, down -55 deg, as the projection matrix and OpenXR say");
         Check(fov[0] < 0 && fov[1] > 0 && fov[2] > 0 && fov[3] < 0, "fov signs: left/down negative, right/up positive (OpenXR)");
     }
 

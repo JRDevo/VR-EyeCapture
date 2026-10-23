@@ -229,7 +229,8 @@ library auto-discovery moved to v1.)
 - `Submit_LensDistortionAlreadyApplied`: warn once, still record. `Submit_TextureWithPose`: read
   `mDeviceToAbsoluteTracking`. Pose precedence: Submit pose > last `WaitGetPoses` render pose [0] (valid) > none.
   Eye pose = HMD × `GetEyeToHeadTransform(eye)` (right-handed, -Z forward, +Y up, same as OpenXR).
-  FOV: `GetProjectionRaw` returns tangents with t negative / b positive → `fov = {atan(l), atan(r), atan(-t), atan(-b)}`;
+  FOV: `GetProjectionRaw` returns tangents with t negative / b positive in a y-DOWN sense (SteamVR's projection matrix:
+  idy = 1 / (b - t)) → `fov = {atan(l), atan(r), atan(b), atan(t)}` (until 0.5.1 up / down were swapped, issue #2);
   confirm the sign against the mock's asymmetric frustum in `run_steamvr.ps1`.
 - **Lifetime:** copy before forwarding the second eye's `Submit`, on the game's immediate context. Never AddRef.
 - **Pairing:** a frame = (Left, Right) in either order; a second Left before a Right replaces the pending one (counted);
