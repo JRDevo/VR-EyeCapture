@@ -1,0 +1,46 @@
+name: Feature request
+description: An idea for VR EyeCapture (a new setting, a game or headset to support, a better video or workflow).
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks, ideas are welcome. Say what it would do for **you**, not only how to build it.
+        If something does not work as it should, that is a **Bug report** (with logs), not a feature request.
+  - type: textarea
+    id: what
+    attributes:
+      label: What should VR EyeCapture do?
+      description: A short description of the feature. One or two sentences.
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why? What would it do for you?
+      description: The problem it solves or what it improves (picture, file size, editing, comfort, a game that does not work yet), and how often you would use it.
+    validations:
+      required: true
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where would it live?
+      options:
+        - A setting in the app window
+        - A config.ini key only
+        - A hotkey or controller button
+        - The YouTube / export conversion
+        - Don't know
+    validations:
+      required: true
+  - type: input
+    id: setup
+    attributes:
+      label: Your setup (helps to judge the cost)
+      placeholder: "Game, headset and how it connects, GPU, VR EyeCapture version"
+  - type: textarea
+    id: more
+    attributes:
+      label: Anything else
+      description: Links, screenshots, an example video, a log if it shows the thing you want changed.

@@ -1,0 +1,79 @@
+name: Bug report
+description: Something does not record, crashes, or looks wrong in the video.
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Before you write:** make the problem happen once more (start the game, record, stop), then close the game.
+        Then open the log folder: paste `%LOCALAPPDATA%\VR EyeCapture\logs` into the Explorer address bar
+        (or app window → Advanced → **Open log**). Without the log I usually cannot tell what happened.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happens
+      description: What you did, what you expected, and what you got. Say when it happens (every recording, only VR180, after a few minutes, ...).
+      placeholder: |
+        I pressed the hotkey, heard one beep, recorded 2 minutes and stopped.
+        The video is black / stutters / the eyes are swapped / no file was made.
+    validations:
+      required: true
+  - type: input
+    id: game
+    attributes:
+      label: Game
+      description: Game name, and OpenXR or SteamVR.
+      placeholder: "Half-Life: Alyx (SteamVR)"
+    validations:
+      required: true
+  - type: input
+    id: headset
+    attributes:
+      label: Headset and how it connects
+      placeholder: "Quest 3 via Virtual Desktop / Quest Link / Steam Link / Index / ..."
+    validations:
+      required: true
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU and driver version
+      placeholder: "RTX 4070, driver 580.xx"
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: VR EyeCapture version
+      placeholder: "0.5.2"
+    validations:
+      required: true
+  - type: input
+    id: mods
+    attributes:
+      label: Other overlays or mods
+      description: OpenXR Toolkit, other OpenXR layers, ReShade, overlay apps, ... ("none" if none).
+    validations:
+      required: true
+  - type: textarea
+    id: files
+    attributes:
+      label: Files (drag them into this box)
+      description: |
+        - `eye_capture.log` (**required**; no file = the recorder did not load in the game, say so)
+        - `tray.log` (**required**)
+        - `config.ini` (**required**; usually `%APPDATA%\VR EyeCapture\config.ini`). GitHub does not take `.ini` files: rename it to `config.txt` or zip it.
+        - A screenshot or short clip of the problem (optional)
+
+        **Privacy:** the logs contain folder paths with your Windows user name. Open them and check before uploading.
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before you send
+      options:
+        - label: I use the latest version from the Releases page of this repository.
+          required: true
+        - label: I attached eye_capture.log, tray.log and config.ini (or said that eye_capture.log does not exist).
+          required: true

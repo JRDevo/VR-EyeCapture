@@ -1,0 +1,39 @@
+; SPDX-License-Identifier: GPL-2.0-or-later
+; Exports of obs.dll that obs-eyecapture.dll uses. The build turns this into the import library obs.lib
+; (lib /def:obs.def /machine:x64), so no OBS binaries are needed to build the plugin. Checked against the installed
+; OBS 32.2.2 with dumpbin /exports obs.dll.
+LIBRARY obs
+EXPORTS
+    blog
+    obs_register_source_s
+    obs_enter_graphics
+    obs_leave_graphics
+    obs_source_showing
+    obs_get_base_effect
+    obs_get_video_frame_time
+    obs_data_get_int
+    obs_data_get_bool
+    obs_data_set_default_int
+    obs_data_set_default_bool
+    obs_properties_create
+    obs_properties_add_list
+    obs_properties_add_bool
+    obs_properties_add_int
+    obs_property_list_add_int
+    obs_properties_add_int_slider
+    obs_property_int_set_suffix
+    gs_get_device_type
+    gs_get_device_obj
+    gs_texture_create
+    gs_texture_destroy
+    gs_texture_get_obj
+    gs_effect_get_param_by_name
+    gs_effect_set_texture
+    gs_effect_set_texture_srgb
+    gs_effect_loop
+    gs_enable_framebuffer_srgb
+    gs_framebuffer_srgb_enabled
+    gs_draw_sprite_subregion
+    gs_matrix_push
+    gs_matrix_pop
+    gs_matrix_scale3f
